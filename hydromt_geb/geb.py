@@ -1,7 +1,6 @@
 from typing import List, Optional
 from hydromt.models.model_grid import GridMixin, GridModel
-from hydromt.config import configread
-import hydromt
+import hydromt.workflows
 import logging
 import os
 import numpy as np
@@ -13,9 +12,8 @@ from .workflows import downscale
 
 logger = logging.getLogger(__name__)
 
-
 class GEBModel(GridModel):
-    _CLI_ARGS = {"region": "setup_grid", "res": "setup_basemaps"}
+    _CLI_ARGS = {"region": "setup_grid"}
     
     def __init__(
         self,
@@ -37,6 +35,7 @@ class GEBModel(GridModel):
 
         self.epsg = epsg
         self.subgrid = GridMixin()
+        self.MERIT_grid = GridMixin()
 
     def setup_grid(
         self,
@@ -113,7 +112,7 @@ class GEBModel(GridModel):
         )
         self.set_grid(ds_hydro['rivslp'], name='channel_slope')
         
-        ds_hydro['mask'].raster.set_nodata(0)
+        # ds_hydro['mask'].raster.set_nodata(-1)
         self.set_grid(ds_hydro['mask'].astype(np.int8), name='grid_mask')
         self.grid_coords = {d: self.grid['mask'].coords[d] for d in self.grid['mask'].dims}
 
@@ -124,10 +123,11 @@ class GEBModel(GridModel):
         submask = hydromt.raster.full_from_transform(
             dst_transform,
             (mask.raster.shape[0] * sub_grid_factor, mask.raster.shape[1] * sub_grid_factor), 
-            nodata=mask.raster.nodata,
+            nodata=0,
             dtype=mask.dtype,
             name='grid_mask'
         )
+        submask.raster.set_nodata(None)
         submask.data = downscale(mask.data, sub_grid_factor)
 
         self.subgrid.set_grid(submask)
@@ -170,9 +170,9 @@ class GEBModel(GridModel):
         mannings.data = 0.025 + 0.015 * a + 0.030 * b
         self.set_grid(mannings)
 
-    def setup_channel_width(self, mimumum_width):
+    def setup_channel_width(self, minimum_width):
         channel_width_data = self.grid['upstream_area'] / 500
-        channel_width_data = xr.where(channel_width_data < mimumum_width, mimumum_width, channel_width_data)
+        channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
         
         channel_width = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='channel_width')
         channel_width.data = channel_width_data
@@ -187,7 +187,7 @@ class GEBModel(GridModel):
         self.set_grid(channel_depth)
 
     def setup_channel_ratio(self):
-        assert (self.grid['river_length'] > 0).all()
+        assert (self.grid['channel_length'] > 0).all()
         channel_area = self.grid['channel_width'] * self.grid['channel_length']
         channel_ratio_data = channel_area / self.grid['cell_area']
         channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
@@ -199,7 +199,19 @@ class GEBModel(GridModel):
 
     def setup_elevation_STD(self):
         MERIT = self.data_catalog.get_rasterdataset("merit_hydro")
-        # TODO: figure out half cell offset
+        # There is a half degree offset in MERIT data
+        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
+        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT_x_step / 2,
+            y=MERIT.coords['y'] + MERIT_y_step / 2
+        )
+
+        # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
+        MERIT_ul = MERIT.assign_coords(
+            x=MERIT.coords['x'] - MERIT_x_step / 2,
+            y=MERIT.coords['y'] + MERIT_y_step / 2
+        )
 
         scaling = 10
 
@@ -208,9 +220,14 @@ class GEBModel(GridModel):
         x_step = self.grid.get_index('x')[1] - self.grid.get_index('x')[0]
         upper_left_y = self.grid.get_index('y')[0] - y_step / 2
         upper_left_x = self.grid.get_index('x')[0] - x_step / 2
-        ymin = np.isclose(MERIT.get_index('y'), upper_left_y, atol=abs(y_step) / 100).argmax()
+        
+        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT_y_step.item() / 100)
+        assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        ymin = ymin.argmax()
         ymax = ymin + self.grid.mask.shape[0] * scaling
-        xmin = np.isclose(MERIT.get_index('x'), upper_left_x, atol=abs(x_step) / 100).argmax()
+        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT_x_step.item() / 100)
+        assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        xmin = xmin.argmax()
         xmax = xmin + self.grid.mask.shape[1] * scaling
 
         # select data from MERIT using the grid coordinates
@@ -218,6 +235,11 @@ class GEBModel(GridModel):
             y=slice(ymin, ymax),
             x=slice(xmin, xmax)
         )
+
+        self.MERIT_grid.set_grid(MERIT.isel(
+            y=slice(ymin-1, ymax+1),
+            x=slice(xmin-1, xmax+1)
+        ), name='elevation')
 
         elevation_per_cell = (
             high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
@@ -237,21 +259,9 @@ class GEBModel(GridModel):
         **kwargs,
     ):
         self._assert_write_mode
-        self.grid.raster.to_mapstack(self.root)
-        self.subgrid.grid.raster.to_mapstack(self.root)
+        self.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'grid'))
+        self.subgrid.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'subgrid'))
+        self.MERIT_grid.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'MERIT_grid'))
 
     def write(self):
         self.write_grid()
-
-
-if __name__ == '__main__':
-    yml = r"preprocessing/geb.yml"
-    root = r"root"
-    from preconfig import config, ORIGINAL_DATA, INPUT
-
-    data_libs = [os.path.join(ORIGINAL_DATA, 'data_catalog.yml')]
-    opt = configread(yml)
-    
-    geb_model = GEBModel(root=root, mode='w+', data_libs=data_libs)
-    geb_model.build(opt=opt)
-    # !hydromt build GEBModel root -d data.yml -i geb.yml
