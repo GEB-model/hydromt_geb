@@ -103,20 +103,19 @@ class GEBModel(GridModel):
         )['ldd']
         ldd.raster.set_nodata(0)
         
-        self.set_grid(ldd, name='ldd')
-        self.set_grid(ds_hydro['uparea'], name='upstream_area')
-        self.set_grid(ds_hydro['elevtn'], name='elevation')
+        self.set_grid(ldd, name='routing/kinematic/ldd')
+        self.set_grid(ds_hydro['uparea'], name='routing/kinematic/upstream_area')
+        self.set_grid(ds_hydro['elevtn'], name='landsurface/topo/elevation')
         self.set_grid(
             xr.where(ds_hydro['rivlen_ds'] != -9999, ds_hydro['rivlen_ds'], np.nan, keep_attrs=True),
-            name='channel_length'
+            name='routing/kinematic/channel_length'
         )
-        self.set_grid(ds_hydro['rivslp'], name='channel_slope')
+        self.set_grid(ds_hydro['rivslp'], name='routing/kinematic/channel_slope')
         
         # ds_hydro['mask'].raster.set_nodata(-1)
-        self.set_grid(ds_hydro['mask'].astype(np.int8), name='grid_mask')
-        self.grid_coords = {d: self.grid['mask'].coords[d] for d in self.grid['mask'].dims}
+        self.set_grid(ds_hydro['mask'].astype(np.int8), name='input/areamaps/grid_mask')
 
-        mask = self.grid['grid_mask']
+        mask = self.grid['input/areamaps/grid_mask']
 
         dst_transform = mask.raster.transform * Affine.scale(1 / sub_grid_factor)
 
@@ -125,20 +124,19 @@ class GEBModel(GridModel):
             (mask.raster.shape[0] * sub_grid_factor, mask.raster.shape[1] * sub_grid_factor), 
             nodata=0,
             dtype=mask.dtype,
-            name='grid_mask'
+            name='input/areamaps/sub_grid_mask'
         )
         submask.raster.set_nodata(None)
         submask.data = downscale(mask.data, sub_grid_factor)
 
         self.subgrid.set_grid(submask)
-        self.subgrid.grid_coords = {d: self.subgrid.grid['grid_mask'].coords[d] for d in self.subgrid.grid['grid_mask'].dims}
         self.subgrid.factor = sub_grid_factor
 
     def setup_cell_area_map(self):
         RADIUS_EARTH_EQUATOR = 40075017  # m
         distance_1_degree_latitude = RADIUS_EARTH_EQUATOR / 360
 
-        mask = self.grid['grid_mask'].raster
+        mask = self.grid['input/areamaps/grid_mask'].raster
         affine = mask.transform
 
         lat_idx = np.arange(0, mask.height).repeat(mask.width).reshape((mask.height, mask.width))
@@ -146,54 +144,54 @@ class GEBModel(GridModel):
         width_m = distance_1_degree_latitude * np.cos(np.radians(lat)) * abs(affine.a)
         height_m = distance_1_degree_latitude * abs(affine.e)
 
-        cell_area = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='cell_area')
+        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area')
         cell_area.data = (width_m * height_m)
         self.set_grid(cell_area)
 
         sub_cell_area = hydromt.raster.full(
-            self.subgrid.grid_coords,
+            self.subgrid.grid.raster.coords,
             nodata=cell_area.raster.nodata,
             dtype=cell_area.dtype,
-            name='cell_area'
+            name='areamaps/sub_cell_area'
         )
 
         sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor)
         self.subgrid.set_grid(sub_cell_area)
 
     def setup_mannings(self):
-        a = (2 * self.grid['cell_area']) / self.grid['upstream_area']
+        a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
         a = xr.where(a > 1, 1, a)
-        b = self.grid['elevation'] / 2000
+        b = self.grid['landsurface/topo/elevation'] / 2000
         b = xr.where(b > 1, 1, b)
         
-        mannings = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='mannings')
+        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings')
         mannings.data = 0.025 + 0.015 * a + 0.030 * b
         self.set_grid(mannings)
 
     def setup_channel_width(self, minimum_width):
-        channel_width_data = self.grid['upstream_area'] / 500
+        channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
         channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
         
-        channel_width = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='channel_width')
+        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width')
         channel_width.data = channel_width_data
         
         self.set_grid(channel_width)
 
     def setup_channel_depth(self):
-        assert (self.grid['upstream_area'] > 0).all()
-        channel_depth_data = 0.27 * self.grid['upstream_area'] ** 0.26
-        channel_depth = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='channel_depth')
+        assert (self.grid['routing/kinematic/upstream_area'] > 0).all()
+        channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
+        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth')
         channel_depth.data = channel_depth_data
         self.set_grid(channel_depth)
 
     def setup_channel_ratio(self):
-        assert (self.grid['channel_length'] > 0).all()
-        channel_area = self.grid['channel_width'] * self.grid['channel_length']
-        channel_ratio_data = channel_area / self.grid['cell_area']
+        assert (self.grid['routing/kinematic/channel_length'] > 0).all()
+        channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
+        channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
         channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
         assert (channel_ratio_data >= 0).all()
 
-        channel_ratio = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='channel_ratio')
+        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio')
         channel_ratio.data = channel_ratio_data
         self.set_grid(channel_ratio)
 
@@ -239,7 +237,7 @@ class GEBModel(GridModel):
         self.MERIT_grid.set_grid(MERIT.isel(
             y=slice(ymin-1, ymax+1),
             x=slice(xmin-1, xmax+1)
-        ), name='elevation')
+        ), name='landsurface/topo/sub_elevation')
 
         elevation_per_cell = (
             high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
@@ -247,21 +245,95 @@ class GEBModel(GridModel):
 
         elevation_per_cell = high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling).swapaxes(1, 2)
 
-        standard_deviation = hydromt.raster.full(self.grid_coords, nodata=np.nan, dtype=np.float32, name='elevation_STD')
+        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD')
         standard_deviation.data = np.std(elevation_per_cell, axis=(2,3))
         self.set_grid(standard_deviation)
 
+    def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
+        return ds.interp(
+            method=interpolation_method,
+            **{
+                ydim: self.grid.coords['y'].values,
+                xdim: self.grid.coords['x'].values
+            }
+        )
+
+    def setup_soil_parameters(self, interpolation_method='nearest'):
+        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
+        for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
+            for soil_layer in range(1, 4):
+                ds = soil_ds[f'{parameter}{soil_layer}_5min']
+                self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/{parameter}{soil_layer}')
+
+        for soil_layer in range(1, 3):
+            ds = soil_ds[f'storageDepth{soil_layer}']
+            self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/storage_depth{soil_layer}')
+
+        ds = soil_ds['percolationImp']
+        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/percolation_impeded')
+        ds = soil_ds['cropgrp']
+        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
+
+    def setup_land_use_parametsers(self, interpolation_method='nearest'):
+        for land_use_type, land_use_type_netcdf_name in (
+            ('forest', 'Forest'),
+            ('grassland', 'Grassland'),
+            ('irrPaddy', 'irrPaddy'),
+            ('irrNonPaddy', 'irrNonPaddy'),
+        ):
+            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min")
+            
+            for parameter in ('maxRootDepth', 'rootFraction1'):
+                self.set_grid(
+                    self.interpolate(land_use_ds[parameter], interpolation_method),
+                    name=f'landcover/{land_use_type}/{parameter}_{land_use_type}'
+                )
+            
+            parameter = f'cropCoefficient{land_use_type_netcdf_name}_10days'               
+            self.set_forcing(
+                self.interpolate(land_use_ds[parameter], interpolation_method),
+                name=f'landcover/{land_use_type}/{parameter}'
+            )
+            if land_use_type in ('forest', 'grassland'):
+                parameter = f'interceptCap{land_use_type_netcdf_name}_10days'               
+                self.set_forcing(
+                    self.interpolate(land_use_ds[parameter], interpolation_method),
+                    name=f'landcover/{land_use_type}/{parameter}'
+                )
+
+    def setup_albedo(self, interpolation_method='nearest'):
+        albedo_ds = self.data_catalog.get_rasterdataset("cwatm_albedo_5min")
+        self.set_forcing(
+            self.interpolate(albedo_ds['albedoLand'], interpolation_method, ydim='lat', xdim='lon'),
+            name='landsurface/albedo/albedo_land'
+        )
+        self.set_forcing(
+            self.interpolate(albedo_ds['albedoWater'], interpolation_method, ydim='lat', xdim='lon'),
+            name='landsurface/albedo/albedo_water'
+        )
+        
     def write_grid(
         self,
-        variables=[],
         driver="GTiff",
         compress="deflate",
         **kwargs,
-    ):
+    ) -> None:
         self._assert_write_mode
-        self.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'grid'))
-        self.subgrid.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'subgrid'))
-        self.MERIT_grid.grid.raster.to_mapstack(os.path.join(self.root, 'maps', 'MERIT_grid'))
+        self.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+
+    def write_forcing(self) -> None:
+        self._assert_write_mode
+        self.logger.info("Write forcing files")
+        for var in self.forcing:
+            forcing = self.forcing[var]
+            path = os.path.join(self.root, var + '.nc')
+            # get folder of path
+            folder = os.path.dirname(path)
+            os.makedirs(folder, exist_ok=True)
+            forcing.to_netcdf(path, mode='w')
 
     def write(self):
+        self.write_forcing()
         self.write_grid()
