@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from affine import Affine
+import matplotlib.pyplot as plt
+import geopandas as gpd
 
 from .workflows import downscale
 
@@ -36,6 +38,7 @@ class GEBModel(GridModel):
         self.epsg = epsg
         self.subgrid = GridMixin()
         self.MERIT_grid = GridMixin()
+        self.table = {}
 
     def setup_grid(
         self,
@@ -274,7 +277,7 @@ class GEBModel(GridModel):
         ds = soil_ds['cropgrp']
         self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
 
-    def setup_land_use_parametsers(self, interpolation_method='nearest'):
+    def setup_land_use_parameters(self, interpolation_method='nearest'):
         for land_use_type, land_use_type_netcdf_name in (
             ('forest', 'Forest'),
             ('grassland', 'Grassland'),
@@ -311,6 +314,69 @@ class GEBModel(GridModel):
             self.interpolate(albedo_ds['albedoWater'], interpolation_method, ydim='lat', xdim='lon'),
             name='landsurface/albedo/albedo_water'
         )
+
+    def setup_waterbodies(self):
+        # TODO: Check whether intersect is the right predicate
+        print('todo ^')
+        waterbodies = self.data_catalog.get_geodataframe(
+            "hydro_lakes",
+            geom=self.staticgeoms['region'],
+            predicate="intersects",
+            variables=['waterbody_id', 'waterbody_type', 'volume_total']
+        ).set_index('waterbody_id')
+
+        self.set_grid(self.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/lakesResID')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/sublakesResID')
+
+        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
+        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
+        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
+        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
+        command_areas['area'] = command_areas.to_crs(3857).area
+        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
+        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
+        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
+
+        self.set_grid(self.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/command_areas')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/subcommand_areas')
+
+        # set all lakes with command area to reservoir
+
+        waterbodies['volume_flood'] = waterbodies['volume_total']
+        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+        custom_reservoir_capacity = self.data_catalog.get_geodataframe("custom_reservoir_capacity").set_index('waterbody_id')
+        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
+
+        # TODO: test this
+        print('todo ^')
+        waterbodies.update(custom_reservoir_capacity)
+        waterbodies = waterbodies.drop('geometry', axis=1)
+
+        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
         
     def write_grid(
         self,
@@ -320,8 +386,10 @@ class GEBModel(GridModel):
     ) -> None:
         self._assert_write_mode
         self.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
-        self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
-        self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        if len(self.subgrid._grid) > 0:
+            self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        if len(self.MERIT_grid._grid) > 0:
+            self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
 
     def write_forcing(self) -> None:
         self._assert_write_mode
@@ -334,6 +402,29 @@ class GEBModel(GridModel):
             os.makedirs(folder, exist_ok=True)
             forcing.to_netcdf(path, mode='w')
 
+    def write_table(self):
+        """Write model table data to csv file at <root>/<fn>
+
+        key-word arguments are passed to :py:func:`pd.to_csv`
+
+        Parameters
+        ----------
+        fn : str, optional
+            filename relative to model root, by default 'table/table.csv'
+        """
+        if len(self.table) == 0:
+            self.logger.debug("No table data found, skip writing.")
+        else:
+            self._assert_write_mode
+            for name, data in self.table.items():
+                fn = os.path.join(name + '.csv')
+                self.logger.debug(f"Writing file {fn}")
+                data.to_csv(os.path.join(self.root, fn))
+
+    def set_table(self, table, name):
+        self.table[name] = table
+
     def write(self):
         self.write_forcing()
         self.write_grid()
+        self.write_table()
