@@ -7,10 +7,11 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from affine import Affine
-import matplotlib.pyplot as plt
 import geopandas as gpd
+from datetime import timedelta
+from pathlib import Path
 
-from .workflows import downscale
+from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class GEBModel(GridModel):
         self.epsg = epsg
         self.subgrid = GridMixin()
         self.MERIT_grid = GridMixin()
+        self.MODFLOW_grid = GridMixin()
         self.table = {}
 
     def setup_grid(
@@ -95,7 +97,7 @@ class GEBModel(GridModel):
             )
 
         # Add region and grid to model
-        self.set_geoms(geom, "region")
+        self.set_geoms(geom, name="areamaps/region")
         
         ldd = ds_hydro['flwdir'].raster.reclassify(
             reclass_table=pd.DataFrame(
@@ -260,6 +262,56 @@ class GEBModel(GridModel):
                 xdim: self.grid.coords['x'].values
             }
         )
+    
+    def setup_modflow(self, epsg, resolution):
+        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
+            self.grid.mask,
+            4326,
+            epsg,
+            resolution
+        )
+        modflow_mask = hydromt.raster.full_from_transform(
+            modflow_affine,
+            MODFLOW_shape,
+            nodata=0,
+            dtype=np.int8,
+            name=f'groundwater/modflow/{resolution}m/modflow_mask',
+            crs=epsg
+        )
+
+        intersection = create_indices(
+            self.grid.mask.raster.transform,
+            self.grid.mask.raster.shape,
+            4326,
+            modflow_affine,
+            MODFLOW_shape,
+            epsg
+        )
+
+        save_folder = Path(self.root, f'groundwater/modflow/{resolution}m')
+        save_folder.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(save_folder, 'modflow_indices.npz'),
+            y_modflow=intersection['y_modflow'],
+            x_modflow=intersection['x_modflow'],
+            y_hydro=intersection['y_hydro'],
+            x_hydro=intersection['x_hydro'],
+            area=intersection['area']
+        )
+
+        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
+        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/{resolution}m/modflow_mask')
+
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro")
+        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
+        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT_x_step / 2,
+            y=MERIT.coords['y'] + MERIT_y_step / 2
+        )
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
+
+        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/{resolution}m/modflow_elevation')
 
     def setup_soil_parameters(self, interpolation_method='nearest'):
         soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
@@ -316,26 +368,24 @@ class GEBModel(GridModel):
         )
 
     def setup_waterbodies(self):
-        # TODO: Check whether intersect is the right predicate
-        print('todo ^')
         waterbodies = self.data_catalog.get_geodataframe(
             "hydro_lakes",
-            geom=self.staticgeoms['region'],
+            geom=self.staticgeoms['areamaps/region'],
             predicate="intersects",
-            variables=['waterbody_id', 'waterbody_type', 'volume_total']
+            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
         ).set_index('waterbody_id')
 
         self.set_grid(self.grid.raster.rasterize(
             waterbodies,
             col_name='waterbody_id',
-            nodata=-1,
+            nodata=0,
             all_touched=True,
             dtype=np.int32
         ), name='routing/lakesreservoirs/lakesResID')
         self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
             waterbodies,
             col_name='waterbody_id',
-            nodata=-1,
+            nodata=0,
             all_touched=True,
             dtype=np.int32
         ), name='routing/lakesreservoirs/sublakesResID')
@@ -348,6 +398,7 @@ class GEBModel(GridModel):
         command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
         areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
         relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
+        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
 
         self.set_grid(self.grid.raster.rasterize(
             command_areas,
@@ -368,15 +419,89 @@ class GEBModel(GridModel):
 
         waterbodies['volume_flood'] = waterbodies['volume_total']
         waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+        waterbodies = waterbodies.merge(relative_area_in_region, left_index=True, right_index=True)
+
         custom_reservoir_capacity = self.data_catalog.get_geodataframe("custom_reservoir_capacity").set_index('waterbody_id')
         custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
 
-        # TODO: test this
-        print('todo ^')
         waterbodies.update(custom_reservoir_capacity)
         waterbodies = waterbodies.drop('geometry', axis=1)
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
+
+    def setup_precip_forcing(
+        self,
+        starttime: str,
+        endtime: str,
+        precip_fn: str = "cmip6",
+        precip_clim_fn: Optional[str] = None,
+        chunksize: Optional[int] = None,
+        **kwargs,
+    ) -> None:
+        """Setup gridded precipitation forcing at model resolution.
+
+        Adds model layer:
+
+        * **precip**: precipitation [mm]
+
+        Parameters
+        ----------
+        precip_fn : str, default era5
+            Precipitation data source, see data/forcing_sources.yml.
+
+            * Required variable: ['precip']
+        precip_clim_fn : str, default None
+            High resolution climatology precipitation data source to correct precipitation,
+            see data/forcing_sources.yml.
+
+            * Required variable: ['precip']
+        chunksize: int, optional
+            Chunksize on time dimension for processing data (not for saving to disk!).
+            If None the data chunksize is used, this can however be optimized for
+            large/small catchments. By default None.
+        """
+        if precip_fn is None:
+            return
+        mask = self.grid['input/areamaps/grid_mask']
+
+        # https://cds.climate.copernicus.eu/cdsapp#!/dataset/projections-cmip6?tab=form
+        # https://www.isimip.org/documents/413/ISIMIP3b_bias_adjustment_fact_sheet_Gnsz7CO.pdf
+
+        precip = self.data_catalog.get_rasterdataset(
+            precip_fn,
+            geom=self.region,
+            buffer=2,
+            time_tuple=(starttime, endtime),
+            variables=["precip"],
+        )
+
+        if chunksize is not None:
+            precip = precip.chunk({"time": chunksize})
+
+        clim = None
+        if precip_clim_fn != None:
+            clim = self.data_catalog.get_rasterdataset(
+                precip_clim_fn,
+                geom=precip.raster.box,
+                buffer=2,
+                variables=["precip"],
+            )
+
+        precip_out = hydromt.workflows.forcing.precip(
+            precip=precip,
+            da_like=self.staticmaps[self._MAPS["elevtn"]],
+            clim=clim,
+            freq=timedelta(days=1),
+            resample_kwargs=dict(label="right", closed="right"),
+            logger=self.logger,
+            **kwargs,
+        )
+
+        # Update meta attributes (used for default output filename later)
+        precip_out.attrs.update({"precip_fn": precip_fn})
+        if precip_clim_fn is not None:
+            precip_out.attrs.update({"precip_clim_fn": precip_clim_fn})
+        self.set_forcing(precip_out.where(mask), name="precip")
         
     def write_grid(
         self,
@@ -390,6 +515,8 @@ class GEBModel(GridModel):
             self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
         if len(self.MERIT_grid._grid) > 0:
             self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        if len(self.MODFLOW_grid._grid) > 0:
+            self.MODFLOW_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
 
     def write_forcing(self) -> None:
         self._assert_write_mode
@@ -425,6 +552,7 @@ class GEBModel(GridModel):
         self.table[name] = table
 
     def write(self):
+        self.write_geoms(fn="{name}.geojson")
         self.write_forcing()
         self.write_grid()
         self.write_table()
