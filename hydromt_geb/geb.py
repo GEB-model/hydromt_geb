@@ -3,6 +3,7 @@ from hydromt.models.model_grid import GridMixin, GridModel
 import hydromt.workflows
 import logging
 import os
+import math
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -10,8 +11,9 @@ from affine import Affine
 import geopandas as gpd
 from datetime import timedelta
 from pathlib import Path
+import matplotlib.pyplot as plt
 
-from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin
+from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class GEBModel(GridModel):
 
         self.epsg = epsg
         self.subgrid = GridMixin()
+        self.region_subgrid = GridMixin()
         self.MERIT_grid = GridMixin()
         self.MODFLOW_grid = GridMixin()
         self.table = {}
@@ -75,6 +78,10 @@ class GEBModel(GridModel):
         grid : xr.DataArray
             Generated grid mask.
         """
+        assert sub_grid_factor > 10, "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
+        assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
+        self.subgrid_factor = sub_grid_factor
+
         self.logger.info(f"Preparing 2D grid.")
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
         if kind in ["basin", "subbasin"]:
@@ -118,9 +125,9 @@ class GEBModel(GridModel):
         self.set_grid(ds_hydro['rivslp'], name='routing/kinematic/channel_slope')
         
         # ds_hydro['mask'].raster.set_nodata(-1)
-        self.set_grid(ds_hydro['mask'].astype(np.int8), name='input/areamaps/grid_mask')
+        self.set_grid(ds_hydro['mask'].astype(np.int8), name='areamaps/grid_mask')
 
-        mask = self.grid['input/areamaps/grid_mask']
+        mask = self.grid['areamaps/grid_mask']
 
         dst_transform = mask.raster.transform * Affine.scale(1 / sub_grid_factor)
 
@@ -129,7 +136,8 @@ class GEBModel(GridModel):
             (mask.raster.shape[0] * sub_grid_factor, mask.raster.shape[1] * sub_grid_factor), 
             nodata=0,
             dtype=mask.dtype,
-            name='input/areamaps/sub_grid_mask'
+            crs=mask.raster.crs,
+            name='areamaps/sub_grid_mask'
         )
         submask.raster.set_nodata(None)
         submask.data = downscale(mask.data, sub_grid_factor)
@@ -141,7 +149,7 @@ class GEBModel(GridModel):
         RADIUS_EARTH_EQUATOR = 40075017  # m
         distance_1_degree_latitude = RADIUS_EARTH_EQUATOR / 360
 
-        mask = self.grid['input/areamaps/grid_mask'].raster
+        mask = self.grid['areamaps/grid_mask'].raster
         affine = mask.transform
 
         lat_idx = np.arange(0, mask.height).repeat(mask.width).reshape((mask.height, mask.width))
@@ -162,6 +170,115 @@ class GEBModel(GridModel):
 
         sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor)
         self.subgrid.set_grid(sub_cell_area)
+
+    def setup_regions_and_land_use(self, level, river_threshold):
+        regions = self.data_catalog.get_geodataframe(
+            f"gadm_level{level}",
+            geom=self.staticgeoms['areamaps/region'],
+            predicate="intersects",
+        )
+        self.set_geoms(regions, name='areamaps/regions')
+
+        land_use = self.data_catalog.get_rasterdataset(
+            "esa_worldcover_2020_v100",
+            geom=self.geoms['areamaps/regions'],
+            buffer=200 # 2 km buffer
+        )
+
+        region_bounds = self.geoms['areamaps/regions'].total_bounds
+        
+        resolution_x, resolution_y = self.subgrid.grid['areamaps/sub_grid_mask'].rio.resolution()
+        pad_minx = region_bounds[0] - abs(resolution_x) / 2.0
+        pad_miny = region_bounds[1] - abs(resolution_y) / 2.0
+        pad_maxx = region_bounds[2] + abs(resolution_x) / 2.0
+        pad_maxy = region_bounds[3] + abs(resolution_y) / 2.0
+
+        # TODO: Is there a better way to do this?
+        padded_subgrid, padding = pad_xy(
+            self.subgrid.grid['areamaps/sub_grid_mask'].rio,
+            pad_minx,
+            pad_miny,
+            pad_maxx,
+            pad_maxy,
+            return_padding=True
+        )
+        
+        reprojected_land_use = land_use.raster.reproject_like(
+            padded_subgrid,
+            method='nearest'
+        )
+
+        region_raster = reprojected_land_use.raster.rasterize(
+            self.geoms['areamaps/regions'],
+            col_name='UID',
+            all_touched=True,
+        )
+        self.region_subgrid.set_grid(region_raster, name='areamaps/region_subgrid')
+
+        MERIT = self.data_catalog.get_rasterdataset(
+            "merit_hydro",
+            variables=['upg'],
+            bbox=padded_subgrid.rio.bounds(),
+            buffer=300 # 3 km buffer
+        )
+        # There is a half degree offset in MERIT data
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+        )
+
+        # Assume all cells with at least x upstream cells are rivers.
+        rivers = MERIT > river_threshold
+        rivers = rivers.astype(np.int32)
+        rivers = rivers.rio.set_nodata(-1)
+        rivers = rivers.raster.reproject_like(reprojected_land_use, method='nearest')
+        self.region_subgrid.set_grid(rivers, name='landcover/rivers')
+
+        hydro_land_use = reprojected_land_use.raster.reclassify(
+            pd.DataFrame.from_dict({
+                    10: 0, # tree cover
+                    20: 1, # shrubland
+                    30: 1, # grassland
+                    40: 1, # cropland, setting to non-irrigated. Initiated as irrigated based on agents
+                    50: 4, # built-up 
+                    60: 1, # bare / sparse vegetation
+                    70: 1, # snow and ice
+                    80: 5, # permanent water bodies
+                    90: 1, # herbaceous wetland
+                    95: 5, # mangroves
+                    100: 1, # moss and lichen
+                }, orient='index'
+            ),
+        )[0]  # TODO: check why dataset is returned instead of dataarray, also need again setting of no data and crs
+        # set rivers to 5 (permanent water bodies)
+        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)
+        hydro_land_use = hydro_land_use.rio.set_nodata(-1)
+        hydro_land_use.rio.set_crs(reprojected_land_use.rio.crs)
+        
+        self.region_subgrid.set_grid(hydro_land_use, name='landsurface/full_region_land_use_classes')
+
+        cultivated_land = xr.where((hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0)
+        cultivated_land = cultivated_land.rio.set_nodata(-1)
+        cultivated_land.rio.set_crs(reprojected_land_use.rio.crs)
+
+        self.region_subgrid.set_grid(cultivated_land, name='landsurface/full_region_cultivated_land')
+
+        hydro_land_use_region = hydro_land_use.isel(
+            x=slice(padding[0], hydro_land_use['x'].size - padding[1]),
+            y=slice(padding[2], hydro_land_use['y'].size - padding[3])
+        )
+
+        # TODO: Doesn't work when using the original array. Somehow the dtype is changed on adding it to the subgrid. This is a workaround.
+        self.subgrid.set_grid(hydro_land_use_region.values, name='landsurface/land_use_classes')
+        print(self.subgrid.grid)
+
+        cultivated_land_region = cultivated_land.isel(
+            x=slice(padding[0], cultivated_land['x'].size - padding[1]),
+            y=slice(padding[2], cultivated_land['y'].size - padding[3])
+        )
+
+        # Same workaround as above
+        self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
     def setup_mannings(self):
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
@@ -201,19 +318,17 @@ class GEBModel(GridModel):
         self.set_grid(channel_ratio)
 
     def setup_elevation_STD(self):
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro")
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
         # There is a half degree offset in MERIT data
-        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
-        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
         MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT_x_step / 2,
-            y=MERIT.coords['y'] + MERIT_y_step / 2
+            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
         )
 
         # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
         MERIT_ul = MERIT.assign_coords(
-            x=MERIT.coords['x'] - MERIT_x_step / 2,
-            y=MERIT.coords['y'] + MERIT_y_step / 2
+            x=MERIT.coords['x'] - MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
         )
 
         scaling = 10
@@ -302,7 +417,7 @@ class GEBModel(GridModel):
         modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
         self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/{resolution}m/modflow_mask')
 
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro")
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
         MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
         MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
         MERIT = MERIT.assign_coords(
@@ -462,7 +577,7 @@ class GEBModel(GridModel):
         """
         if precip_fn is None:
             return
-        mask = self.grid['input/areamaps/grid_mask']
+        mask = self.grid['areamaps/grid_mask']
 
         # https://cds.climate.copernicus.eu/cdsapp#!/dataset/projections-cmip6?tab=form
         # https://www.isimip.org/documents/413/ISIMIP3b_bias_adjustment_fact_sheet_Gnsz7CO.pdf
@@ -513,6 +628,8 @@ class GEBModel(GridModel):
         self.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
         if len(self.subgrid._grid) > 0:
             self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        if len(self.region_subgrid._grid) > 0:
+            self.region_subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
         if len(self.MERIT_grid._grid) > 0:
             self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
         if len(self.MODFLOW_grid._grid) > 0:

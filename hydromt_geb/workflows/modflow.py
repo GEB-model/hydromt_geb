@@ -6,9 +6,6 @@ import rasterio
 from rasterio.transform import Affine
 from pyproj import Transformer
 
-def downscale(data, factor):
-    return data.repeat(factor, axis=-2).repeat(factor, axis=-1)
-
 def get_modflow_transform_and_shape(
     mask,
     hydro_crs,
