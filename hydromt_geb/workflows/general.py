@@ -15,7 +15,7 @@ def pad_xy(
     constant_values: Union[
         float, tuple[int, int], Mapping[Any, tuple[int, int]], None
     ] = None,
-    return_padding: bool = False,
+    return_slice: bool = False,
 ) -> xarray.DataArray:
     """Pad the array to x,y bounds.
 
@@ -81,7 +81,16 @@ def pad_xy(
     superset[self.x_dim] = x_coord
     superset[self.y_dim] = y_coord
     superset.rio.write_transform(inplace=True)
-    if return_padding:
-        return superset, (x_before, x_after, y_before, y_after)
+    if return_slice:
+        return superset, {
+            'x': slice(
+                x_before,
+                superset['x'].size - x_after
+            ),
+            'y': slice(
+                y_before,
+                superset['y'].size - y_after
+            )
+        }
     else:
         return superset

@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy
+from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ class GEBModel(GridModel):
             name='areamaps/sub_cell_area'
         )
 
-        sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor)
+        sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
         self.subgrid.set_grid(sub_cell_area)
 
     def setup_regions_and_land_use(self, level, river_threshold):
@@ -194,13 +194,13 @@ class GEBModel(GridModel):
         pad_maxy = region_bounds[3] + abs(resolution_y) / 2.0
 
         # TODO: Is there a better way to do this?
-        padded_subgrid, padding = pad_xy(
+        padded_subgrid, self.region_subgrid.slice = pad_xy(
             self.subgrid.grid['areamaps/sub_grid_mask'].rio,
             pad_minx,
             pad_miny,
             pad_maxx,
             pad_maxy,
-            return_padding=True
+            return_slice=True
         )
         
         reprojected_land_use = land_use.raster.reproject_like(
@@ -252,33 +252,94 @@ class GEBModel(GridModel):
         )[0]  # TODO: check why dataset is returned instead of dataarray, also need again setting of no data and crs
         # set rivers to 5 (permanent water bodies)
         hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)
-        hydro_land_use = hydro_land_use.rio.set_nodata(-1)
         hydro_land_use.rio.set_crs(reprojected_land_use.rio.crs)
+        hydro_land_use.rio.set_nodata(-1)
         
         self.region_subgrid.set_grid(hydro_land_use, name='landsurface/full_region_land_use_classes')
 
         cultivated_land = xr.where((hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0)
         cultivated_land = cultivated_land.rio.set_nodata(-1)
         cultivated_land.rio.set_crs(reprojected_land_use.rio.crs)
+        cultivated_land.rio.set_nodata(-1)
 
         self.region_subgrid.set_grid(cultivated_land, name='landsurface/full_region_cultivated_land')
 
-        hydro_land_use_region = hydro_land_use.isel(
-            x=slice(padding[0], hydro_land_use['x'].size - padding[1]),
-            y=slice(padding[2], hydro_land_use['y'].size - padding[3])
-        )
+        hydro_land_use_region = hydro_land_use.isel(self.region_subgrid.slice)
 
         # TODO: Doesn't work when using the original array. Somehow the dtype is changed on adding it to the subgrid. This is a workaround.
         self.subgrid.set_grid(hydro_land_use_region.values, name='landsurface/land_use_classes')
-        print(self.subgrid.grid)
 
-        cultivated_land_region = cultivated_land.isel(
-            x=slice(padding[0], cultivated_land['x'].size - padding[1]),
-            y=slice(padding[2], cultivated_land['y'].size - padding[3])
-        )
+        cultivated_land_region = cultivated_land.isel(self.region_subgrid.slice)
 
         # Same workaround as above
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
+
+    def clip_with_grid(self, ds, mask):
+        cells_along_x = mask.sum(dim='x')
+        minx = (cells_along_x > 0).argmax().item()
+        maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
+        
+        cells_along_y = mask.sum(dim='y')
+        miny = (cells_along_y > 0).argmax().item()
+        maxy = cells_along_y.size - (cells_along_y[::-1] > 0).argmax().item()
+
+        bounds = {'x': slice(miny, maxy), 'y': slice(minx, maxx)}
+
+        return ds.isel(bounds), bounds
+
+
+    def setup_farmers(self):
+        regions = self.geoms['areamaps/regions']
+        regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
+        farm_sizes_m2 = [50_000]
+        cell_area = self.subgrid.grid['areamaps/sub_cell_area']
+        
+        farms = hydromt.raster.full_like(regions_raster, nodata=-1)
+        
+        all_agents = []
+        total_agent_count = 0
+        for region_id in regions['UID']:
+            region = regions_raster == region_id
+            region_clip, bounds = self.clip_with_grid(region, region)
+
+            cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
+            cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0)
+            # TODO: Why does nodata value disappear?
+           
+            # This is a small simplification to take the average across the region. Of course not entirely true
+            # but should be ok.
+            average_cell_area = cell_area.where(region).mean().item()
+            if np.isnan(average_cell_area):
+                continue
+
+            farm_sizes_n_cells = [math.floor(farm_size_m2 / average_cell_area) for farm_size_m2 in farm_sizes_m2]
+            total_cultivated_land_cells = cultivated_land_region.where(region).sum()
+            
+            agent_count_region = math.floor(total_cultivated_land_cells / farm_sizes_n_cells[0])
+            left_over_cells = int((total_cultivated_land_cells - agent_count_region * farm_sizes_n_cells[0]).compute().item())
+
+            agents = pd.DataFrame(index=np.arange(agent_count_region), columns=['farm_size_n_cells'])
+            all_agents.append(agents)
+
+            agents['farm_size_n_cells'] = farm_sizes_n_cells[0]
+            agents.loc[0, 'farm_size_n_cells'] = agents.loc[0, 'farm_size_n_cells'] + left_over_cells
+            
+            farms_region = create_farms(agents, cultivated_land_region)
+            farms_region[farms_region != -1] += total_agent_count
+
+            farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
+
+            total_agent_count += agent_count_region
+
+        all_agents = pd.concat(all_agents, ignore_index=True)
+        assert len(all_agents) == all_agents.index.max() + 1 == farms.max() + 1
+
+        # TODO: Again why is dtype changed? And export doesn't work?
+        farms = farms.isel(self.region_subgrid.slice)
+        farms = xr.where(self.subgrid.grid['areamaps/sub_grid_mask'] == 1, farms.values, -1)
+
+        self.subgrid.set_grid(farms.values, name='agents/farmers/farms')
+        self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
 
     def setup_mannings(self):
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
