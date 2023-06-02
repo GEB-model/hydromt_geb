@@ -400,11 +400,11 @@ class GEBModel(GridModel):
         upper_left_y = self.grid.get_index('y')[0] - y_step / 2
         upper_left_x = self.grid.get_index('x')[0] - x_step / 2
         
-        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT_y_step.item() / 100)
+        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT.rio.resolution()[1] / 100)
         assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
         ymin = ymin.argmax()
         ymax = ymin + self.grid.mask.shape[0] * scaling
-        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT_x_step.item() / 100)
+        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT.rio.resolution()[0] / 100)
         assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
         xmin = xmin.argmax()
         xmax = xmin + self.grid.mask.shape[1] * scaling
