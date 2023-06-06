@@ -102,10 +102,9 @@ def create_farms(agents: pd.DataFrame, cultivated_land_tehsil: np.ndarray, farm_
     ).astype(np.int32)
     unique_farms = np.unique(farms)
     unique_farms = unique_farms[unique_farms != -1]
-    if unique_farms.size > 0:
-        assert unique_farms.size == unique_farms.max() + 1
+    assert np.array_equal(np.sort(agents.index.to_numpy()), unique_farms)
+    assert unique_farms.size == len(agents)
     assert agents[farm_size_key].sum() == np.count_nonzero(farms != -1)
-    assert farms.max() + 1 == len(agents)
     assert ((farms >= 0) == (cultivated_land_tehsil == 1)).all()
     
     return farms

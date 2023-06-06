@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms
+from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, calculate_cell_area
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class GEBModel(GridModel):
         self.MERIT_grid = GridMixin()
         self.MODFLOW_grid = GridMixin()
         self.table = {}
+        self.binary = {}
 
     def setup_grid(
         self,
@@ -146,19 +147,11 @@ class GEBModel(GridModel):
         self.subgrid.factor = sub_grid_factor
 
     def setup_cell_area_map(self):
-        RADIUS_EARTH_EQUATOR = 40075017  # m
-        distance_1_degree_latitude = RADIUS_EARTH_EQUATOR / 360
-
         mask = self.grid['areamaps/grid_mask'].raster
         affine = mask.transform
 
-        lat_idx = np.arange(0, mask.height).repeat(mask.width).reshape((mask.height, mask.width))
-        lat = (lat_idx + 0.5) * affine.e + affine.f
-        width_m = distance_1_degree_latitude * np.cos(np.radians(lat)) * abs(affine.a)
-        height_m = distance_1_degree_latitude * abs(affine.e)
-
         cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area')
-        cell_area.data = (width_m * height_m)
+        cell_area.data = calculate_cell_area(affine, mask.shape)
         self.set_grid(cell_area)
 
         sub_cell_area = hydromt.raster.full(
@@ -214,6 +207,26 @@ class GEBModel(GridModel):
             all_touched=True,
         )
         self.region_subgrid.set_grid(region_raster, name='areamaps/region_subgrid')
+
+        self.grid['areamaps/cell_area']
+        padded_cell_area = self.grid['areamaps/cell_area'].rio.pad_box(*region_bounds)
+
+        region_cell_area = calculate_cell_area(padded_cell_area.raster.transform, padded_cell_area.shape)
+
+        region_cell_area_subgrid = hydromt.raster.full_from_transform(
+            padded_cell_area.raster.transform * Affine.scale(1 / self.subgrid.factor),
+            (padded_cell_area.raster.shape[0] * self.subgrid.factor, padded_cell_area.raster.shape[1] * self.subgrid.factor), 
+            nodata=np.nan,
+            dtype=padded_cell_area.dtype,
+            crs=padded_cell_area.raster.crs,
+            name='areamaps/sub_grid_mask'
+        )
+
+        region_cell_area_subgrid.data = downscale(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
+        region_cell_area_subgrid_clipped_to_region = region_cell_area_subgrid.raster.clip_bbox((pad_minx, pad_miny, pad_maxx, pad_maxy))
+        
+        # TODO: Why is everything set to nan if not using values?
+        self.region_subgrid.set_grid(region_cell_area_subgrid_clipped_to_region.values, name='areamaps/region_cell_area_subgrid')
 
         MERIT = self.data_catalog.get_rasterdataset(
             "merit_hydro",
@@ -287,19 +300,16 @@ class GEBModel(GridModel):
 
         return ds.isel(bounds), bounds
 
-
     def setup_farmers(self):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
-        farm_sizes_m2 = [50_000]
-        cell_area = self.subgrid.grid['areamaps/sub_cell_area']
+        cell_area = self.region_subgrid.grid['areamaps/region_cell_area_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1)
+        farmers = pd.read_csv(Path(self.root, 'agents', 'farmers', 'farmers.csv'))
         
-        all_agents = []
-        total_agent_count = 0
-        for region_id in regions['UID']:
-            region = regions_raster == region_id
+        for UID in regions['UID']:
+            region = regions_raster == UID
             region_clip, bounds = self.clip_with_grid(region, region)
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
@@ -308,38 +318,33 @@ class GEBModel(GridModel):
            
             # This is a small simplification to take the average across the region. Of course not entirely true
             # but should be ok.
-            average_cell_area = cell_area.where(region).mean().item()
-            if np.isnan(average_cell_area):
-                continue
-
-            farm_sizes_n_cells = [math.floor(farm_size_m2 / average_cell_area) for farm_size_m2 in farm_sizes_m2]
-            total_cultivated_land_cells = cultivated_land_region.where(region).sum()
-            
-            agent_count_region = math.floor(total_cultivated_land_cells / farm_sizes_n_cells[0])
-            left_over_cells = int((total_cultivated_land_cells - agent_count_region * farm_sizes_n_cells[0]).compute().item())
-
-            agents = pd.DataFrame(index=np.arange(agent_count_region), columns=['farm_size_n_cells'])
-            all_agents.append(agents)
-
-            agents['farm_size_n_cells'] = farm_sizes_n_cells[0]
-            agents.loc[0, 'farm_size_n_cells'] = agents.loc[0, 'farm_size_n_cells'] + left_over_cells
-            
-            farms_region = create_farms(agents, cultivated_land_region)
-            farms_region[farms_region != -1] += total_agent_count
+            assert cell_area.shape == region.shape
+                        
+            farmers_region = farmers[farmers['UID'] == UID]
+            farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
 
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
 
-            total_agent_count += agent_count_region
-
-        all_agents = pd.concat(all_agents, ignore_index=True)
-        assert len(all_agents) == all_agents.index.max() + 1 == farms.max() + 1
-
         # TODO: Again why is dtype changed? And export doesn't work?
-        farms = farms.isel(self.region_subgrid.slice)
-        farms = xr.where(self.subgrid.grid['areamaps/sub_grid_mask'] == 1, farms.values, -1)
+        subgrid_farms = farms.isel(self.region_subgrid.slice)
+        farms_copy = farms.copy()
+        farms_copy[self.region_subgrid.slice] = -1
+        cut_farms = np.unique(farms_copy.values)
+        
+        subgrid_farms_outside_study_area = xr.where(self.subgrid.grid['areamaps/sub_grid_mask'] == 0, subgrid_farms.values, -1)
+        
+        cut_farms = np.concatenate((cut_farms, np.unique(subgrid_farms_outside_study_area.values)))
+        cut_farms = cut_farms[cut_farms != -1]
 
-        self.subgrid.set_grid(farms.values, name='agents/farmers/farms')
+        subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
+        farmers = farmers[~farmers.index.isin(cut_farms)]
+
+        assert np.setdiff1d(np.unique(subgrid_farms_in_study_area.values), -1).size == len(farmers)
+
+        self.subgrid.set_grid(subgrid_farms_in_study_area.values, name='agents/farmers/farms')
         self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
+
+        self.set_binary(farmers['UID'], name='agents/farmers/UID')
 
     def setup_mannings(self):
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
@@ -708,15 +713,6 @@ class GEBModel(GridModel):
             forcing.to_netcdf(path, mode='w')
 
     def write_table(self):
-        """Write model table data to csv file at <root>/<fn>
-
-        key-word arguments are passed to :py:func:`pd.to_csv`
-
-        Parameters
-        ----------
-        fn : str, optional
-            filename relative to model root, by default 'table/table.csv'
-        """
         if len(self.table) == 0:
             self.logger.debug("No table data found, skip writing.")
         else:
@@ -726,11 +722,25 @@ class GEBModel(GridModel):
                 self.logger.debug(f"Writing file {fn}")
                 data.to_csv(os.path.join(self.root, fn))
 
+    def write_binary(self):
+        if len(self.binary) == 0:
+            self.logger.debug("No table data found, skip writing.")
+        else:
+            self._assert_write_mode
+            for name, data in self.binary.items():
+                fn = os.path.join(name + '.npz')
+                self.logger.debug(f"Writing file {fn}")
+                np.savez_compressed(os.path.join(self.root, fn), data=data)
+
     def set_table(self, table, name):
         self.table[name] = table
+
+    def set_binary(self, data, name):
+        self.binary[name] = data
 
     def write(self):
         self.write_geoms(fn="{name}.geojson")
         self.write_forcing()
         self.write_grid()
         self.write_table()
+        self.write_binary()

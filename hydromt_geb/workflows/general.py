@@ -6,6 +6,18 @@ from collections.abc import Mapping
 def downscale(data, factor):
     return data.repeat(factor, axis=-2).repeat(factor, axis=-1)
 
+def calculate_cell_area(affine_transform, shape):
+    RADIUS_EARTH_EQUATOR = 40075017  # m
+    distance_1_degree_latitude = RADIUS_EARTH_EQUATOR / 360
+
+    height, width = shape
+
+    lat_idx = np.arange(0, height).repeat(width).reshape((height, width))
+    lat = (lat_idx + 0.5) * affine_transform.e + affine_transform.f
+    width_m = distance_1_degree_latitude * np.cos(np.radians(lat)) * abs(affine_transform.a)
+    height_m = distance_1_degree_latitude * abs(affine_transform.e)
+    return (width_m * height_m)
+
 def pad_xy(
     self,
     minx: float,
