@@ -3,7 +3,7 @@ from hydromt.models.model_grid import GridMixin, GridModel
 import hydromt.workflows
 import logging
 import os
-import math
+import json
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -39,12 +39,26 @@ class GEBModel(GridModel):
         )
 
         self.epsg = epsg
+        
         self.subgrid = GridMixin()
         self.region_subgrid = GridMixin()
         self.MERIT_grid = GridMixin()
         self.MODFLOW_grid = GridMixin()
         self.table = {}
         self.binary = {}
+        self.dict = {}
+
+        self.model_structure = {
+            "geoms": {},
+            "grid": {},
+            "subgrid": {},
+            "region_subgrid": {},
+            "MERIT_grid": {},
+            "MODFLOW_grid": {},
+            "table": {},
+            "binary": {},
+            "dict": {},
+        }
 
     def setup_grid(
         self,
@@ -146,6 +160,40 @@ class GEBModel(GridModel):
         self.subgrid.set_grid(submask)
         self.subgrid.factor = sub_grid_factor
 
+    def setup_crops(
+            self,
+            crop_ids,
+            crop_variables,
+            crop_prices=None,
+            cultivation_costs=None,
+        ):
+        self.set_dict(crop_ids, name='crops/crop_ids')
+        self.set_dict(crop_variables, name='crops/crop_variables')
+        if crop_prices is not None:
+            if isinstance(crop_prices, str):
+                with open(Path(self.root, crop_prices), 'r') as f:
+                    crop_prices_data = json.load(f)
+                crop_prices = {
+                    'time': crop_prices_data['time'],
+                    'crops': {
+                        crop_id: crop_prices_data['crops'][crop_name]
+                        for crop_id, crop_name in crop_ids.items()
+                    }
+                }
+            self.set_dict(crop_prices, name='crops/crop_prices')
+        if cultivation_costs is not None:
+            if isinstance(cultivation_costs, str):
+                with open(Path(self.root, cultivation_costs)) as f:
+                    cultivation_costs = json.load(f)
+                cultivation_costs = {
+                    'time': cultivation_costs['time'],
+                    'crops': {
+                        crop_id: cultivation_costs['crops'][crop_name]
+                        for crop_id, crop_name in crop_ids.items()
+                    }
+                }
+            self.set_dict(cultivation_costs, name='crops/cultivation_costs')
+
     def setup_cell_area_map(self):
         mask = self.grid['areamaps/grid_mask'].raster
         affine = mask.transform
@@ -164,12 +212,13 @@ class GEBModel(GridModel):
         sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
         self.subgrid.set_grid(sub_cell_area)
 
-    def setup_regions_and_land_use(self, level, river_threshold):
+    def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         regions = self.data_catalog.get_geodataframe(
-            f"gadm_level{level}",
+            region_database,
             geom=self.staticgeoms['areamaps/region'],
             predicate="intersects",
-        )
+        ).rename(columns={unique_region_id: 'region_id'})
+        assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
         self.set_geoms(regions, name='areamaps/regions')
 
         land_use = self.data_catalog.get_rasterdataset(
@@ -203,7 +252,7 @@ class GEBModel(GridModel):
 
         region_raster = reprojected_land_use.raster.rasterize(
             self.geoms['areamaps/regions'],
-            col_name='UID',
+            col_name='region_id',
             all_touched=True,
         )
         self.region_subgrid.set_grid(region_raster, name='areamaps/region_subgrid')
@@ -300,16 +349,16 @@ class GEBModel(GridModel):
 
         return ds.isel(bounds), bounds
 
-    def setup_farmers(self):
+    def setup_farmers(self, irrigation_sources=None):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         cell_area = self.region_subgrid.grid['areamaps/region_cell_area_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1)
-        farmers = pd.read_csv(Path(self.root, 'agents', 'farmers', 'farmers.csv'))
+        farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'))
         
-        for UID in regions['UID']:
-            region = regions_raster == UID
+        for region_id in regions['region_id']:
+            region = regions_raster == region_id
             region_clip, bounds = self.clip_with_grid(region, region)
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
@@ -320,7 +369,7 @@ class GEBModel(GridModel):
             # but should be ok.
             assert cell_area.shape == region.shape
                         
-            farmers_region = farmers[farmers['UID'] == UID]
+            farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
 
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
@@ -339,12 +388,19 @@ class GEBModel(GridModel):
         subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
         farmers = farmers[~farmers.index.isin(cut_farms)]
 
-        assert np.setdiff1d(np.unique(subgrid_farms_in_study_area.values), -1).size == len(farmers)
+        remap_farmer_ids = np.full(farmers.index.max() + 2, -1, dtype=np.int32) # +1 because 0 is also a farm, +1 because no farm is -1, set to -1 in next step
+        remap_farmer_ids[farmers.index] = np.arange(len(farmers))
+        subgrid_farms_in_study_area = remap_farmer_ids[subgrid_farms_in_study_area]
+        
+        assert np.setdiff1d(np.unique(subgrid_farms_in_study_area), -1).size == len(farmers)
 
-        self.subgrid.set_grid(subgrid_farms_in_study_area.values, name='agents/farmers/farms')
+        self.subgrid.set_grid(subgrid_farms_in_study_area, name='agents/farmers/farms')
         self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
 
-        self.set_binary(farmers['UID'], name='agents/farmers/UID')
+        self.set_binary(farmers['region_id'], name='agents/farmers/region_id')
+
+        if irrigation_sources:
+            self.set_dict(irrigation_sources, name='agents/farmers/irrigation_sources')
 
     def setup_mannings(self):
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
@@ -683,6 +739,10 @@ class GEBModel(GridModel):
         if precip_clim_fn is not None:
             precip_out.attrs.update({"precip_clim_fn": precip_clim_fn})
         self.set_forcing(precip_out.where(mask), name="precip")
+
+    def add_grid_to_model_structure(self, grid: xr.Dataset, name: str) -> None:
+        for var_name in grid.data_vars:
+            self.model_structure[name][var_name] = var_name + '.tif'
         
     def write_grid(
         self,
@@ -692,25 +752,32 @@ class GEBModel(GridModel):
     ) -> None:
         self._assert_write_mode
         self.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+        self.add_grid_to_model_structure(self.grid, 'grid')
         if len(self.subgrid._grid) > 0:
             self.subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+            self.add_grid_to_model_structure(self.subgrid.grid, 'subgrid')
         if len(self.region_subgrid._grid) > 0:
             self.region_subgrid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+            self.add_grid_to_model_structure(self.region_subgrid.grid, 'region_subgrid')
         if len(self.MERIT_grid._grid) > 0:
             self.MERIT_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+            self.add_grid_to_model_structure(self.MERIT_grid.grid, 'MERIT_grid')
         if len(self.MODFLOW_grid._grid) > 0:
             self.MODFLOW_grid.grid.raster.to_mapstack(self.root, driver=driver, compress=compress, **kwargs)
+            self.add_grid_to_model_structure(self.MODFLOW_grid.grid, 'MODFLOW_grid')
 
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
         for var in self.forcing:
             forcing = self.forcing[var]
-            path = os.path.join(self.root, var + '.nc')
+            fn = var + '.nc'
+            self.model_structure['forcing'][var] = fn
+            fp = os.path.join(self.root, fn)
             # get folder of path
-            folder = os.path.dirname(path)
+            folder = os.path.dirname(fp)
             os.makedirs(folder, exist_ok=True)
-            forcing.to_netcdf(path, mode='w')
+            forcing.to_netcdf(fp, mode='w')
 
     def write_table(self):
         if len(self.table) == 0:
@@ -719,6 +786,7 @@ class GEBModel(GridModel):
             self._assert_write_mode
             for name, data in self.table.items():
                 fn = os.path.join(name + '.csv')
+                self.model_structure['table'][name] = fn
                 self.logger.debug(f"Writing file {fn}")
                 data.to_csv(os.path.join(self.root, fn))
 
@@ -729,8 +797,47 @@ class GEBModel(GridModel):
             self._assert_write_mode
             for name, data in self.binary.items():
                 fn = os.path.join(name + '.npz')
+                self.model_structure['binary'][name] = fn
                 self.logger.debug(f"Writing file {fn}")
                 np.savez_compressed(os.path.join(self.root, fn), data=data)
+
+    def write_dict(self):
+        if len(self.binary) == 0:
+            self.logger.debug("No table data found, skip writing.")
+        else:
+            self._assert_write_mode
+            for name, data in self.dict.items():
+                fn = os.path.join(name + '.json')
+                self.model_structure['dict'][name] = fn
+                self.logger.debug(f"Writing file {fn}")
+                with open(os.path.join(self.root, fn), 'w') as f:
+                    json.dump(data, f)
+
+    def write_geoms(self, fn: str = "geoms/{name}.geojson", **kwargs) -> None:
+        """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
+
+        key-word arguments are passed to :py:meth:`geopandas.GeoDataFrame.to_file`
+
+        Parameters
+        ----------
+        fn : str, optional
+            filename relative to model root and should contain a {name} placeholder,
+            by default 'geoms/{name}.geojson'
+        """
+        if len(self._geoms) == 0:
+            self.logger.debug("No geoms data found, skip writing.")
+            return
+        self._assert_write_mode
+        if "driver" not in kwargs:
+            kwargs.update(driver="GeoJSON")
+        for name, gdf in self._geoms.items():
+            self.logger.debug(f"Writing file {fn.format(name=name)}")
+            fn = fn.format(name=name)
+            self.model_structure["geoms"][name] = fn
+            _fn = os.path.join(self.root, fn.format(name=name))
+            if not os.path.isdir(os.path.dirname(_fn)):
+                os.makedirs(os.path.dirname(_fn))
+            gdf.to_file(_fn, **kwargs)
 
     def set_table(self, table, name):
         self.table[name] = table
@@ -738,9 +845,66 @@ class GEBModel(GridModel):
     def set_binary(self, data, name):
         self.binary[name] = data
 
+    def set_dict(self, data, name):
+        self.dict[name] = data
+
+    def write_model_structure(self):
+        with open(Path(self.root, "model_structure.json"), "w") as f:
+            json.dump(self.model_structure, f, indent=4)
+
     def write(self):
         self.write_geoms(fn="{name}.geojson")
         self.write_forcing()
         self.write_grid()
         self.write_table()
         self.write_binary()
+        self.write_dict()
+
+        self.write_model_structure()
+
+    def read_model_structure(self):
+        with open(Path(self.root, "model_structure.json"), "r") as f:
+            self.model_structure = json.load(f)
+
+    def read_geoms(self):
+        for name, fn in self.model_structure["geoms"].items():
+            self._geoms[name] = gpd.read_file(Path(self.root, fn))
+
+    def read_binary(self):
+        for name, fn in self.model_structure["binary"].items():
+            self.binary[name] = np.load(Path(self.root, fn))["data"]
+    
+    def read_table(self):
+        for name, fn in self.model_structure["table"].items():
+            self.table[name] = pd.read_csv(Path(self.root, fn))
+
+    def read_dict(self):
+        for name, fn in self.model_structure["dict"].items():
+            with open(Path(self.root, fn), "r") as f:
+                self.dict[name] = json.load(f)
+
+    def read_grid_from_disk(self, grid, name: str) -> None:
+        ds = []
+        for name, fn in self.model_structure[name].items():
+            ds.append(xr.open_dataset(Path(self.root) / fn).rename({'band_data': name}))
+        ds = xr.merge(ds)
+        grid.set_grid(ds)
+
+    def read_grid(self) -> None:
+        self.read_grid_from_disk(self, 'grid')
+        self.read_grid_from_disk(self.subgrid, 'subgrid')
+        self.read_grid_from_disk(self.region_subgrid, 'region_subgrid')
+        self.read_grid_from_disk(self.MERIT_grid, 'MERIT_grid')
+        self.read_grid_from_disk(self.MODFLOW_grid, 'MODFLOW_grid')
+
+    def read(self):
+        self.read_model_structure()
+        
+        self.read_geoms()
+        self.read_binary()
+        self.read_table()
+        self.read_dict()
+        self.read_grid()
+
+        # self.read_forcing()
+        # self.read_dict()
