@@ -12,6 +12,7 @@ import geopandas as gpd
 from datetime import timedelta
 from pathlib import Path
 import matplotlib.pyplot as plt
+from isimip_client.client import ISIMIPClient
 
 from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, calculate_cell_area
 
@@ -41,9 +42,18 @@ class GEBModel(GridModel):
         self.epsg = epsg
         
         self.subgrid = GridMixin()
+        # TODO: How to do this properly?
+        self.subgrid._read = True
+        self.subgrid.logger = self.logger
         self.region_subgrid = GridMixin()
+        self.region_subgrid._read = True
+        self.region_subgrid.logger = self.logger
         self.MERIT_grid = GridMixin()
+        self.MERIT_grid._read = True
+        self.MERIT_grid.logger = self.logger
         self.MODFLOW_grid = GridMixin()
+        self.MODFLOW_grid._read = True
+        self.MODFLOW_grid.logger = self.logger
         self.table = {}
         self.binary = {}
         self.dict = {}
@@ -58,6 +68,7 @@ class GEBModel(GridModel):
             "table": {},
             "binary": {},
             "dict": {},
+            "forcing": {}
         }
 
     def setup_grid(
@@ -140,7 +151,7 @@ class GEBModel(GridModel):
         self.set_grid(ds_hydro['rivslp'], name='routing/kinematic/channel_slope')
         
         # ds_hydro['mask'].raster.set_nodata(-1)
-        self.set_grid(ds_hydro['mask'].astype(np.int8), name='areamaps/grid_mask')
+        self.set_grid((~ds_hydro['mask']).astype(np.int8), name='areamaps/grid_mask')
 
         mask = self.grid['areamaps/grid_mask']
 
@@ -221,12 +232,6 @@ class GEBModel(GridModel):
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
         self.set_geoms(regions, name='areamaps/regions')
 
-        land_use = self.data_catalog.get_rasterdataset(
-            "esa_worldcover_2020_v100",
-            geom=self.geoms['areamaps/regions'],
-            buffer=200 # 2 km buffer
-        )
-
         region_bounds = self.geoms['areamaps/regions'].total_bounds
         
         resolution_x, resolution_y = self.subgrid.grid['areamaps/sub_grid_mask'].rio.resolution()
@@ -242,9 +247,17 @@ class GEBModel(GridModel):
             pad_miny,
             pad_maxx,
             pad_maxy,
-            return_slice=True
+            return_slice=True,
+            constant_values=1,
         )
+        padded_subgrid.raster.set_nodata(-1)
+        self.region_subgrid.set_grid(padded_subgrid, name='areamaps/region_mask')
         
+        land_use = self.data_catalog.get_rasterdataset(
+            "esa_worldcover_2020_v100",
+            geom=self.geoms['areamaps/regions'],
+            buffer=200 # 2 km buffer
+        )
         reprojected_land_use = land_use.raster.reproject_like(
             padded_subgrid,
             method='nearest'
@@ -337,70 +350,79 @@ class GEBModel(GridModel):
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
     def clip_with_grid(self, ds, mask):
-        cells_along_x = mask.sum(dim='x')
-        minx = (cells_along_x > 0).argmax().item()
-        maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
-        
-        cells_along_y = mask.sum(dim='y')
+        assert ds.shape == mask.shape
+        cells_along_y = mask.sum(dim='x').values.ravel()
         miny = (cells_along_y > 0).argmax().item()
         maxy = cells_along_y.size - (cells_along_y[::-1] > 0).argmax().item()
+        
+        cells_along_x = mask.sum(dim='y').values.ravel()
+        minx = (cells_along_x > 0).argmax().item()
+        maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
 
-        bounds = {'x': slice(miny, maxy), 'y': slice(minx, maxx)}
+        bounds = {'y': slice(miny, maxy), 'x': slice(minx, maxx)}
 
         return ds.isel(bounds), bounds
 
-    def setup_farmers(self, irrigation_sources=None):
+    def setup_farmers(self, irrigation_sources=None, n_seasons=1):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
-        cell_area = self.region_subgrid.grid['areamaps/region_cell_area_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1)
-        farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'))
+        farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'), index_col=0)
         
         for region_id in regions['region_id']:
+            print(f"Creating farms for region {region_id}")
             region = regions_raster == region_id
             region_clip, bounds = self.clip_with_grid(region, region)
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0)
-            # TODO: Why does nodata value disappear?
-           
-            # This is a small simplification to take the average across the region. Of course not entirely true
-            # but should be ok.
-            assert cell_area.shape == region.shape
-                        
+            # TODO: Why does nodata value disappear?                  
             farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
 
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
+        
+        farmers = farmers.drop('area_n_cells', axis=1)
 
         # TODO: Again why is dtype changed? And export doesn't work?
-        subgrid_farms = farms.isel(self.region_subgrid.slice)
         farms_copy = farms.copy()
-        farms_copy[self.region_subgrid.slice] = -1
+        farms_copy = xr.where(self.region_subgrid.grid['areamaps/region_mask'], -1, farms_copy)
         cut_farms = np.unique(farms_copy.values)
-        
-        subgrid_farms_outside_study_area = xr.where(self.subgrid.grid['areamaps/sub_grid_mask'] == 0, subgrid_farms.values, -1)
-        
-        cut_farms = np.concatenate((cut_farms, np.unique(subgrid_farms_outside_study_area.values)))
         cut_farms = cut_farms[cut_farms != -1]
+
+        subgrid_farms = self.clip_with_grid(farms, self.region_subgrid.grid['areamaps/region_mask'])[0]
 
         subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
         farmers = farmers[~farmers.index.isin(cut_farms)]
 
         remap_farmer_ids = np.full(farmers.index.max() + 2, -1, dtype=np.int32) # +1 because 0 is also a farm, +1 because no farm is -1, set to -1 in next step
         remap_farmer_ids[farmers.index] = np.arange(len(farmers))
-        subgrid_farms_in_study_area = remap_farmer_ids[subgrid_farms_in_study_area]
+        subgrid_farms_in_study_area = remap_farmer_ids[subgrid_farms_in_study_area.values]
+
+        farmers = farmers.reset_index(drop=True)
         
         assert np.setdiff1d(np.unique(subgrid_farms_in_study_area), -1).size == len(farmers)
+        assert farmers.iloc[-1].name == subgrid_farms_in_study_area.max()
 
-        self.subgrid.set_grid(subgrid_farms_in_study_area, name='agents/farmers/farms')
+        self.subgrid.set_grid(subgrid_farms_in_study_area.squeeze(), name='agents/farmers/farms')
         self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
 
-        self.set_binary(farmers['region_id'], name='agents/farmers/region_id')
+        crop_name_to_id = {
+            crop_name: int(ID)
+            for ID, crop_name in self.dict['crops/crop_ids'].items()
+        }
+        crop_name_to_id[np.nan] = -1
+        for season in range(1, n_seasons + 1):
+            farmers[f'season_#{season}_crop'] = farmers[f'season_#{season}_crop'].map(crop_name_to_id)
 
         if irrigation_sources:
             self.set_dict(irrigation_sources, name='agents/farmers/irrigation_sources')
+            farmers['irrigation_source'] = farmers['irrigation_source'].map(irrigation_sources)
+
+        for column in farmers.columns:
+            self.set_binary(farmers[column], name=f'agents/farmers/{column}')
+
 
     def setup_mannings(self):
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
@@ -479,7 +501,7 @@ class GEBModel(GridModel):
         self.MERIT_grid.set_grid(MERIT.isel(
             y=slice(ymin-1, ymax+1),
             x=slice(xmin-1, xmax+1)
-        ), name='landsurface/topo/sub_elevation')
+        ), name='landsurface/topo/subgrid_elevation')
 
         elevation_per_cell = (
             high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
@@ -512,7 +534,7 @@ class GEBModel(GridModel):
             MODFLOW_shape,
             nodata=0,
             dtype=np.int8,
-            name=f'groundwater/modflow/{resolution}m/modflow_mask',
+            name=f'groundwater/modflow/modflow_mask',
             crs=epsg
         )
 
@@ -525,19 +547,14 @@ class GEBModel(GridModel):
             epsg
         )
 
-        save_folder = Path(self.root, f'groundwater/modflow/{resolution}m')
-        save_folder.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            os.path.join(save_folder, 'modflow_indices.npz'),
-            y_modflow=intersection['y_modflow'],
-            x_modflow=intersection['x_modflow'],
-            y_hydro=intersection['y_hydro'],
-            x_hydro=intersection['x_hydro'],
-            area=intersection['area']
-        )
+        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
+        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
+        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
+        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
+        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
 
         modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
-        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/{resolution}m/modflow_mask')
+        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
 
         MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
         MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
@@ -548,7 +565,7 @@ class GEBModel(GridModel):
         )
         elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
 
-        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/{resolution}m/modflow_elevation')
+        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
 
     def setup_soil_parameters(self, interpolation_method='nearest'):
         soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
@@ -665,6 +682,46 @@ class GEBModel(GridModel):
         waterbodies = waterbodies.drop('geometry', axis=1)
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
+
+    def download_isimip(self, climate_variable, forcing, resolution=None, buffer=0):
+        client = ISIMIPClient()
+        download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / climate_variable
+        download_path.mkdir(parents=True, exist_ok=True)
+        # get the dataset metadata from the ISIMIP repository
+        response = client.datasets(
+            simulation_round='ISIMIP3a',
+            product='InputData',
+            climate_forcing=forcing,
+            climate_scenario='obsclim',
+            climate_variable=climate_variable,
+        )
+        assert len(response["results"]) == 1
+        dataset = response["results"][0]
+        paths = [file['path'] for file in dataset['files']]
+
+        xmin, ymin, xmax, ymax = self.bounds
+        response = client.cutout(paths, [ymin-buffer, ymax+buffer, xmin-buffer, xmax+buffer], poll=10)
+
+        # download the file when it is ready
+        client.download(
+            response['file_url'],
+            path=download_path,
+            validate=False,
+            extract=True
+        )
+
+    def setup_forcing(
+            self,
+            starttime,
+            endtime,
+        ):
+        high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
+        low_res_variables = ['huss', 'sfcwind', 'rlds', 'ps']
+
+        # for climate_variable in high_res_variables:
+        #     self.download_isimip(climate_variable, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+        for climate_variable in low_res_variables:
+            self.download_isimip(climate_variable, forcing='gswp3-w5e5', buffer=0.5)  # some minimal buffer to avoid edge effects / errors in ISIMIP API
 
     def setup_precip_forcing(
         self,
@@ -802,7 +859,7 @@ class GEBModel(GridModel):
                 np.savez_compressed(os.path.join(self.root, fn), data=data)
 
     def write_dict(self):
-        if len(self.binary) == 0:
+        if len(self.dict) == 0:
             self.logger.debug("No table data found, skip writing.")
         else:
             self._assert_write_mode
@@ -813,7 +870,7 @@ class GEBModel(GridModel):
                 with open(os.path.join(self.root, fn), 'w') as f:
                     json.dump(data, f)
 
-    def write_geoms(self, fn: str = "geoms/{name}.geojson", **kwargs) -> None:
+    def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:
         """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
 
         key-word arguments are passed to :py:meth:`geopandas.GeoDataFrame.to_file`
@@ -832,8 +889,7 @@ class GEBModel(GridModel):
             kwargs.update(driver="GeoJSON")
         for name, gdf in self._geoms.items():
             self.logger.debug(f"Writing file {fn.format(name=name)}")
-            fn = fn.format(name=name)
-            self.model_structure["geoms"][name] = fn
+            self.model_structure["geoms"][name] = fn.format(name=name)
             _fn = os.path.join(self.root, fn.format(name=name))
             if not os.path.isdir(os.path.dirname(_fn)):
                 os.makedirs(os.path.dirname(_fn))
@@ -853,7 +909,7 @@ class GEBModel(GridModel):
             json.dump(self.model_structure, f, indent=4)
 
     def write(self):
-        self.write_geoms(fn="{name}.geojson")
+        self.write_geoms()
         self.write_forcing()
         self.write_grid()
         self.write_table()
@@ -884,10 +940,13 @@ class GEBModel(GridModel):
                 self.dict[name] = json.load(f)
 
     def read_grid_from_disk(self, grid, name: str) -> None:
-        ds = []
+        data_arrays = []
         for name, fn in self.model_structure[name].items():
-            ds.append(xr.open_dataset(Path(self.root) / fn).rename({'band_data': name}))
-        ds = xr.merge(ds)
+            with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
+                data_arrays.append(da.load())
+            # with xr.load_dataarray(Path(self.root) / fn, decode_cf=False) as da:
+            #     data_arrays.append(da.rename(name))
+        ds = xr.merge(data_arrays)
         grid.set_grid(ds)
 
     def read_grid(self) -> None:
@@ -907,4 +966,3 @@ class GEBModel(GridModel):
         self.read_grid()
 
         # self.read_forcing()
-        # self.read_dict()

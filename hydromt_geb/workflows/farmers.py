@@ -96,7 +96,7 @@ def create_farms(agents: pd.DataFrame, cultivated_land_tehsil: np.ndarray, farm_
 
     agents = agents.sample(frac=1)
     farms = create_farms_numba(
-        cultivated_land_tehsil.values,
+        cultivated_land_tehsil.squeeze().values,  # using first (and should be only) layer
         ids=agents.index.to_numpy(),
         farm_sizes=agents[farm_size_key].to_numpy(),
     ).astype(np.int32)
