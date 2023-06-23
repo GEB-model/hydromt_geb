@@ -3,7 +3,7 @@ import xarray
 import numpy as np
 from collections.abc import Mapping
 
-def downscale(data, factor):
+def repeat_grid(data, factor):
     return data.repeat(factor, axis=-2).repeat(factor, axis=-1)
 
 def calculate_cell_area(affine_transform, shape):

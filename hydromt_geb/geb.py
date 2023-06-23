@@ -1,3 +1,5 @@
+from tqdm import tqdm
+from pathlib import Path
 from typing import List, Optional
 from hydromt.models.model_grid import GridMixin, GridModel
 import hydromt.workflows
@@ -7,14 +9,21 @@ import json
 import numpy as np
 import pandas as pd
 import xarray as xr
+import rioxarray as rxr
+from urllib.parse import urlparse
+
+# temporary fix for ESMF on Windows
+os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
+
+import xesmf as xe
 from affine import Affine
 import geopandas as gpd
-from datetime import timedelta
-from pathlib import Path
+from datetime import timedelta, datetime
+from calendar import monthrange
 import matplotlib.pyplot as plt
 from isimip_client.client import ISIMIPClient
 
-from .workflows import downscale, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, calculate_cell_area
+from .workflows import repeat_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, calculate_cell_area
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +175,7 @@ class GEBModel(GridModel):
             name='areamaps/sub_grid_mask'
         )
         submask.raster.set_nodata(None)
-        submask.data = downscale(mask.data, sub_grid_factor)
+        submask.data = repeat_grid(mask.data, sub_grid_factor)
 
         self.subgrid.set_grid(submask)
         self.subgrid.factor = sub_grid_factor
@@ -220,7 +229,7 @@ class GEBModel(GridModel):
             name='areamaps/sub_cell_area'
         )
 
-        sub_cell_area.data = downscale(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
+        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
         self.subgrid.set_grid(sub_cell_area)
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
@@ -230,6 +239,7 @@ class GEBModel(GridModel):
             predicate="intersects",
         ).rename(columns={unique_region_id: 'region_id'})
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
+        assert 'ISO3' in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
         self.set_geoms(regions, name='areamaps/regions')
 
         region_bounds = self.geoms['areamaps/regions'].total_bounds
@@ -284,7 +294,7 @@ class GEBModel(GridModel):
             name='areamaps/sub_grid_mask'
         )
 
-        region_cell_area_subgrid.data = downscale(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
+        region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
         region_cell_area_subgrid_clipped_to_region = region_cell_area_subgrid.raster.clip_bbox((pad_minx, pad_miny, pad_maxx, pad_maxy))
         
         # TODO: Why is everything set to nan if not using values?
@@ -349,6 +359,31 @@ class GEBModel(GridModel):
         # Same workaround as above
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
+    def setup_economic_data(self):
+        print('Setting up economic data')
+        lending_rates = self.data_catalog.get_geodataframe('wb_lending_rate')
+        inflation_rates = self.data_catalog.get_geodataframe('wb_inflation_rate')
+
+        lending_rates_dict, inflation_rates_dict = {'rates': {}}, { 'rates': {}}
+        years_lending_rates = [c for c in lending_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
+        lending_rates_dict['time'] = years_lending_rates
+        years_inflation_rates = [c for c in inflation_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
+        inflation_rates_dict['time'] = years_inflation_rates
+        for _, region in self.geoms['areamaps/regions'].iterrows():
+            region_id = region['region_id']
+            ISO3 = region['ISO3']
+
+            lending_rates_country = (lending_rates.loc[lending_rates["Country Code"] == ISO3, years_lending_rates] / 100 + 1)  # percentage to rate
+            assert len(lending_rates_country) == 1, f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
+            lending_rates_dict['rates'][region_id] = lending_rates_country.iloc[0].tolist()
+
+            inflation_rates_country = (inflation_rates.loc[inflation_rates["Country Code"] == ISO3, years_inflation_rates] / 100 + 1) # percentage to rate
+            assert len(inflation_rates_country) == 1, f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
+            inflation_rates_dict['rates'][region_id] = inflation_rates_country.iloc[0].tolist()
+
+        self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
+        self.set_dict(lending_rates_dict, name='economics/lending_rates')
+            
     def clip_with_grid(self, ds, mask):
         assert ds.shape == mask.shape
         cells_along_y = mask.sum(dim='x').values.ravel()
@@ -683,9 +718,9 @@ class GEBModel(GridModel):
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
 
-    def download_isimip(self, climate_variable, forcing, resolution=None, buffer=0):
+    def download_isimip(self, starttime, endtime, variable, forcing, resolution=None, buffer=0):
         client = ISIMIPClient()
-        download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / climate_variable
+        download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / variable
         download_path.mkdir(parents=True, exist_ok=True)
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
@@ -693,35 +728,244 @@ class GEBModel(GridModel):
             product='InputData',
             climate_forcing=forcing,
             climate_scenario='obsclim',
-            climate_variable=climate_variable,
+            climate_variable=variable,
+            resolution=resolution,
         )
         assert len(response["results"]) == 1
         dataset = response["results"][0]
-        paths = [file['path'] for file in dataset['files']]
+        files = dataset['files']
 
         xmin, ymin, xmax, ymax = self.bounds
-        response = client.cutout(paths, [ymin-buffer, ymax+buffer, xmin-buffer, xmax+buffer], poll=10)
+        xmin -= buffer
+        ymin -= buffer
+        xmax += buffer
+        ymax += buffer
+        
+        download_files = []
+        parse_files = []
+        for file in files:
+            name = file['name']
+            assert name.endswith('.nc')
+            splitted_filename = name.split('_')
+            date = splitted_filename[-1].split('.')[0]
+            if len(date) == 6:
+                start_year = int(date[:4])
+                end_year = start_year
+                month = int(date[4:6])
+            elif len(date) == 4:
+                start_year = int((splitted_filename[-2]))
+                end_year = int(date[:4])
+                month = None
+            else:
+                raise ValueError(f'could not parse date {date} from file {name}')
 
-        # download the file when it is ready
-        client.download(
-            response['file_url'],
-            path=download_path,
-            validate=False,
-            extract=True
-        )
+            if (not (endtime.year < start_year or starttime.year > end_year)) and (month is None or (month >= starttime.month and month <= endtime.month)):
+                parse_files.append(file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}'))
+                if not (download_path / name.replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')).exists():
+                    download_files.append(file['path'])
+
+        if download_files:
+            response = client.cutout(download_files, [ymin, ymax, xmin, xmax], poll=10)
+            # download the file when it is ready
+            client.download(
+                response['file_url'],
+                path=download_path,
+                validate=False,
+                extract=True
+            )
+            # remove zip file
+            (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
+            
+        datasets = [xr.open_dataset(download_path / file) for file in parse_files]
+        coords_first_dataset = datasets[0].coords
+        for dataset in datasets:
+            # make sure all datasets have more or less the same coordinates
+            assert np.isclose(dataset.coords['lat'].values, coords_first_dataset['lat'].values, atol=abs(datasets[0].rio.resolution()[1] / 100), rtol=0).all()
+            assert np.isclose(dataset.coords['lon'].values, coords_first_dataset['lon'].values, atol=abs(datasets[0].rio.resolution()[0] / 100), rtol=0).all()
+
+        datasets = [
+            ds.assign_coords(
+                lon=coords_first_dataset['lon'],
+                lat=coords_first_dataset['lat'],
+                inplace=True
+            ) for ds in datasets
+        ]
+        ds = xr.concat(datasets, dim='time').sel(time=slice(starttime, endtime))
+
+        # assert that time is monotonically increasing with a constant step size
+        assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
+        ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
+        return ds
 
     def setup_forcing(
             self,
             starttime,
             endtime,
         ):
+        # download source data from ISIMIP
         high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-        low_res_variables = ['huss', 'sfcwind', 'rlds', 'ps']
+        low_res_variables = ['hurs', 'sfcwind', 'rlds', 'ps']
 
         # for climate_variable in high_res_variables:
         #     self.download_isimip(climate_variable, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
-        for climate_variable in low_res_variables:
-            self.download_isimip(climate_variable, forcing='gswp3-w5e5', buffer=0.5)  # some minimal buffer to avoid edge effects / errors in ISIMIP API
+        self.setup_pressure(starttime, endtime)
+        self.setup_wind(starttime, endtime)
+        self.setup_hurs(starttime, endtime)
+        self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
+
+    def setup_pressure(self, starttime, endtime):
+        g = 9.80665  # gravitational acceleration [m/s2]
+        M = 0.02896968  # molar mass of dry air [kg/mol]
+        r0 = 8.314462618  # universal gas constant [J/(mol·K)]
+        T0 = 288.16  # Sea level standard temperature  [K]
+ 
+        
+        self.set_forcing()
+
+    def setup_high_resolution_variables(self, variables, starttime, endtime):
+        for variable in variables:
+            ds = self.download_isimip(variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+            var = ds[variable].raster.clip_bbox(ds.raster.bounds)
+            self.set_forcing(var, name=f'climate/{variable}')
+
+    def setup_hurs(self, starttime, endtime):
+        # hurs
+        hurs_30_min = self.download_isimip(variable='hurs', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        # just taking the years to simplify things
+        start_year = starttime.year
+        end_year = endtime.year
+
+        folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
+        folder.mkdir(parents=True, exist_ok=True)
+
+        hurs_ds_30sec, hurs_time = [], []
+        for year in tqdm(range(start_year, end_year+1)):
+            for month in range(1, 13):
+                fn = folder / f'hurs_{year}_{month:02d}.nc'
+                if not fn.exists():
+                    hurs = self.data_catalog.get_rasterdataset(f'CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}', bbox=hurs_30_min.raster.bounds, buffer=1)
+                    del hurs.attrs['_FillValue']
+                    hurs.name = 'hurs'
+                    hurs.to_netcdf(fn)
+                else:
+                    hurs = xr.open_dataset(fn)['hurs']
+                hurs_ds_30sec.append(hurs)
+                hurs_time.append(f'{year}-{month:02d}')
+        
+        hurs_ds_30sec = xr.concat(hurs_ds_30sec, dim='time').rename({'x': 'lon', 'y': 'lat'})
+        hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
+        hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
+
+        output_coords = {}
+        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
+        output_coords['y'] = self.grid.raster.coords['y']
+        output_coords['x'] = self.grid.raster.coords['x']
+        hurs_output = hydromt.raster.full(output_coords, name='hurs', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs)
+
+        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
+        for year in tqdm(range(start_year, end_year+1)):
+            for month in range(1, 13):
+                start_month = datetime(year, month, 1)
+                end_month = datetime(year, month, monthrange(year, month)[1])
+                
+                w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
+                w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                w5e5_regridded_mean = w5e5_regridded.mean(dim='time')  # get monthly mean
+                w5e5_regridded_tr = np.log(w5e5_regridded / (1 - w5e5_regridded))  # assume beta distribuation => logit transform
+                w5e5_regridded_mean_tr = np.log(w5e5_regridded_mean / (1 - w5e5_regridded_mean))  # logit transform
+
+                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.01  # convert to fraction
+                chelsa_tr = np.log(chelsa / (1 - chelsa))  # assume beta distribuation => logit transform
+
+                difference = chelsa_tr - w5e5_regridded_mean_tr
+
+                # apply difference to w5e5
+                w5e5_regridded_tr_corr = w5e5_regridded_tr + difference
+                w5e5_regridded_corr = (1 / (1 + np.exp(-w5e5_regridded_tr_corr))) * 100  # back transform
+                w5e5_regridded_corr.raster.set_crs(4326)
+
+                hurs_output.loc[
+                    dict(time=slice(start_month, end_month))
+                ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
+
+        self.set_forcing(hurs_output, 'climate/hurs')
+
+    def setup_wind(self, starttime, endtime):
+        global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
+        # TODO: Gives memory errors when loading from disk.
+        # global_wind_atlas = self.data_catalog.get_rasterdataset(
+        #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
+        # ).rename({'x': 'lon', 'y': 'lat'})
+        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'})
+        target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
+        regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
+        global_wind_atlas_regridded = regridder(global_wind_atlas)
+
+        wind_30_min_avg = self.download_isimip(
+            variable='sfcwind',
+            starttime=datetime(2008, 1, 1),
+            endtime=datetime(2017, 12, 31),
+            forcing='gswp3-w5e5',
+            buffer=1
+        ).mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
+        regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
+        wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
+
+        # create diff layer:
+        # assume wind follows weibull distribution => do log transform
+        wind_30_min_avg_regridded_log = np.log(
+            wind_30_min_avg_regridded.sfcwind.values,
+            out=np.zeros_like(wind_30_min_avg_regridded.sfcwind.values),
+            where=(wind_30_min_avg_regridded.sfcwind.values != 0)
+        )  # avoid  -inf at locations where wind == 0
+
+        global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded.values,
+            out=np.zeros_like(global_wind_atlas_regridded.values),
+            where=(global_wind_atlas_regridded.values != 0)
+        )  # avoid  -inf at locations where wind == 0
+
+        diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
+
+        wind_30_min = self.download_isimip(variable='sfcwind', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        # just taking the years to simplify things
+        start_year = starttime.year
+        end_year = endtime.year
+
+        output_coords = {}
+        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
+        output_coords['y'] = self.grid.raster.coords['y']
+        output_coords['x'] = self.grid.raster.coords['x']
+        wind_output = hydromt.raster.full(output_coords, name='wind', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs)
+
+        for year in tqdm(range(start_year, end_year+1)):
+            for month in range(1, 13):
+                start_month = datetime(year, month, 1)
+                end_month = datetime(year, month, monthrange(year, month)[1])
+                
+                wind_30min_sel = wind_30_min.sel(time=slice(start_month, end_month))
+                wind_30min_sel_regridded = regridder_30_min(wind_30min_sel)
+
+                wind_30min_sel_regridded_log = np.log(wind_30min_sel_regridded.sfcwind.values,
+                    out=np.zeros_like(wind_30min_sel_regridded.sfcwind.values),
+                    where=(wind_30min_sel_regridded.sfcwind.values != 0)  # avoid -inf at x=0
+                )
+                wind_30min_sel_regridded_log_corr = wind_30min_sel_regridded_log + diff_layer
+                wind_30min_sel_regridded_corr = np.exp(
+                    wind_30min_sel_regridded_log_corr,
+                    out=np.zeros_like(wind_30min_sel_regridded_log_corr),
+                    where=(wind_30min_sel_regridded_log_corr != 0)
+                )
+
+                wind_30min_sel_regridded_corr_ds = wind_30min_sel_regridded.copy()
+                wind_30min_sel_regridded_corr_ds.sfcwind.values = wind_30min_sel_regridded_corr
+
+                wind_output.loc[
+                    dict(time=slice(start_month, end_month))
+                ] = wind_30min_sel_regridded_corr_ds.sfcwind.raster.clip_bbox(wind_output.raster.bounds)
+
+        self.set_forcing(wind_output, 'climate/wind')
 
     def setup_precip_forcing(
         self,
@@ -830,10 +1074,8 @@ class GEBModel(GridModel):
             forcing = self.forcing[var]
             fn = var + '.nc'
             self.model_structure['forcing'][var] = fn
-            fp = os.path.join(self.root, fn)
-            # get folder of path
-            folder = os.path.dirname(fp)
-            os.makedirs(folder, exist_ok=True)
+            fp = Path(self.root, fn)
+            fp.parent.mkdir(parents=True, exist_ok=True)
             forcing.to_netcdf(fp, mode='w')
 
     def write_table(self):
@@ -867,7 +1109,9 @@ class GEBModel(GridModel):
                 fn = os.path.join(name + '.json')
                 self.model_structure['dict'][name] = fn
                 self.logger.debug(f"Writing file {fn}")
-                with open(os.path.join(self.root, fn), 'w') as f:
+                output_path = Path(self.root) / fn
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, 'w') as f:
                     json.dump(data, f)
 
     def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:

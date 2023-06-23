@@ -10,6 +10,7 @@ authors = [
 ]
 dependencies = [
     "s3fs",
+    "xesmf",
 ]
 requires-python = ">=3.8" # fix tests to support older versions
 readme = "README.rst"
