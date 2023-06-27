@@ -806,21 +806,81 @@ class GEBModel(GridModel):
         high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
         low_res_variables = ['hurs', 'sfcwind', 'rlds', 'ps']
 
-        # for climate_variable in high_res_variables:
-        #     self.download_isimip(climate_variable, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
-        self.setup_pressure(starttime, endtime)
-        self.setup_wind(starttime, endtime)
-        self.setup_hurs(starttime, endtime)
         self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
+        self.setup_hurs(starttime, endtime)
+        self.setup_longwave(starttime=starttime, endtime=endtime)
+        # self.setup_pressure(starttime, endtime)
+        # self.setup_wind(starttime, endtime)
+
+    def setup_longwave(self, starttime, endtime):
+        x1 = 0.43
+        x2 = 5.7
+        sbc = 5.67E-8   # stefan boltzman constant [Js−1 m−2 K−4]
+
+        es0 = 6.11  # reference saturation vapour pressure  [hPa]
+        T0 = 273.15
+        lv = 2.5E6  # latent heat of vaporization of water
+        Rv = 461.5  # gas constant for water vapour [J K kg-1]
+
+        target = self.grid['landsurface/topo/elevation'].rename({'x': 'lon', 'y': 'lat'})
+
+        hurs_coarse = self.download_isimip(variable='hurs', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        tas_coarse = self.download_isimip(variable='tas', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        rlds_coarse = self.download_isimip(variable='rlds', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        
+        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop('time'), target, 'bilinear')
+
+        hurs_coarse_regridded = regridder(hurs_coarse)
+        tas_coarse_regridded = regridder(tas_coarse)
+        rlds_coarse_regridded = regridder(rlds_coarse)
+
+        hurs_fine = self.forcing['climate/hurs']
+        tas_fine = self.forcing['climate/tas']
+
+        output_coords = {}
+        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
+        output_coords['y'] = self.grid.raster.coords['y']
+        output_coords['x'] = self.grid.raster.coords['x']
+        rlds_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='rlds')
+
+        # now ready for calculation:
+        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded.tas.data))  # saturation vapor pressure
+        pV_coarse = (hurs_coarse_regridded.hurs.data * es_coarse) / 100  # water vapor pressure [hPa]
+
+        es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine.data))
+        pV_fine = (hurs_fine.data * es_fine) / 100  # water vapour pressure [hPa]
+
+        e_cl_coarse = 0.23 + x1 * ((pV_coarse * 100) / tas_coarse_regridded.tas.data) ** (1 / x2)
+        # e_cl_coarse == clear-sky emissivity w5e5 (pV needs to be in Pa not hPa, hence *100)
+        e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine.data) ** (1 / x2)
+        # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
+
+        e_as_coarse = rlds_coarse_regridded.rlds.data / (sbc * tas_coarse_regridded.tas.data ** 4)  # all-sky emissivity w5e5
+        e_as_coarse[e_as_coarse > 1] = 1  # constrain all-sky emissivity to max 1
+        delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
+        
+        e_as_fine = e_cl_fine + delta_e
+        e_as_fine[e_as_fine > 1] = 1  # constrain all-sky emissivity to max 1
+        lw_fine = e_as_fine * sbc * tas_fine.data ** 4  # downscaled lwr! assume cloud e is the same
+
+        rlds_output.data = lw_fine
+        self.set_forcing(rlds_output, name='climate/rlds')
 
     def setup_pressure(self, starttime, endtime):
         g = 9.80665  # gravitational acceleration [m/s2]
         M = 0.02896968  # molar mass of dry air [kg/mol]
         r0 = 8.314462618  # universal gas constant [J/(mol·K)]
         T0 = 288.16  # Sea level standard temperature  [K]
+
+        DEM = self.grid['landsurface/topo/elevation']
+        pressure_30_min = self.download_isimip(variable='ps', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)['ps']  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), DEM.rename({'x': 'lon', 'y': 'lat'}), 'bilinear')
  
-        
-        self.set_forcing()
+        pressure_30_min_regridded = regridder(pressure_30_min)
+        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * DEM.values * M) / (T0 * r0))
+
+        self.set_forcing(pressure_30_min_regridded_corr, name='climate/ps')
 
     def setup_high_resolution_variables(self, variables, starttime, endtime):
         for variable in variables:
