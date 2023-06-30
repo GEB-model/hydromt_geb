@@ -97,6 +97,7 @@ def create_indices(hydro_transform, hydro_shape, hydro_epsg, modflow_transform, 
 
     # calculate size of intersection
     intersection['area'] = intersection.apply(lambda x: x.hydro_geometry.intersection(x.geometry).area, axis=1)
+    assert np.all(intersection['area'] > 0)  # check if all cells have an intersection
 
     return intersection
 

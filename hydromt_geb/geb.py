@@ -364,7 +364,7 @@ class GEBModel(GridModel):
         lending_rates = self.data_catalog.get_geodataframe('wb_lending_rate')
         inflation_rates = self.data_catalog.get_geodataframe('wb_inflation_rate')
 
-        lending_rates_dict, inflation_rates_dict = {'rates': {}}, { 'rates': {}}
+        lending_rates_dict, inflation_rates_dict = {'data': {}}, { 'data': {}}
         years_lending_rates = [c for c in lending_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
         lending_rates_dict['time'] = years_lending_rates
         years_inflation_rates = [c for c in inflation_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
@@ -375,15 +375,54 @@ class GEBModel(GridModel):
 
             lending_rates_country = (lending_rates.loc[lending_rates["Country Code"] == ISO3, years_lending_rates] / 100 + 1)  # percentage to rate
             assert len(lending_rates_country) == 1, f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
-            lending_rates_dict['rates'][region_id] = lending_rates_country.iloc[0].tolist()
+            lending_rates_dict['data'][region_id] = lending_rates_country.iloc[0].tolist()
 
             inflation_rates_country = (inflation_rates.loc[inflation_rates["Country Code"] == ISO3, years_inflation_rates] / 100 + 1) # percentage to rate
             assert len(inflation_rates_country) == 1, f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
-            inflation_rates_dict['rates'][region_id] = inflation_rates_country.iloc[0].tolist()
+            inflation_rates_dict['data'][region_id] = inflation_rates_country.iloc[0].tolist()
 
         self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
         self.set_dict(lending_rates_dict, name='economics/lending_rates')
+
+    def setup_well_prices_by_reference_year(self, well_price, upkeep_price_per_m2, reference_year, start_year, end_year):
+        # create dictory with prices for well_prices per year by applying inflation rates
+        inflation_rates = self.dict['economics/inflation_rates']
+        regions = list(inflation_rates['data'].keys())
+
+        well_prices_dict = {
+            'time': list(range(start_year, end_year + 1)),
+            'data': {}
+        }
+        for region in regions:
+            well_prices = pd.Series(index=range(start_year, end_year + 1))
+            well_prices.loc[reference_year] = well_price
             
+            for year in range(reference_year + 1, end_year + 1):
+                well_prices.loc[year] = well_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+            for year in range(reference_year -1, start_year -1, -1):
+                well_prices.loc[year] = well_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+
+            well_prices_dict['data'][region] = well_prices.tolist()
+
+        self.set_dict(well_prices_dict, name='economics/well_prices')
+            
+        upkeep_prices_dict = {
+            'time': list(range(start_year, end_year + 1)),
+            'data': {}
+        }
+        for region in regions:
+            upkeep_prices = pd.Series(index=range(start_year, end_year + 1))
+            upkeep_prices.loc[reference_year] = upkeep_price_per_m2
+            
+            for year in range(reference_year + 1, end_year + 1):
+                upkeep_prices.loc[year] = upkeep_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+            for year in range(reference_year -1, start_year -1, -1):
+                upkeep_prices.loc[year] = upkeep_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+
+            upkeep_prices_dict['data'][region] = upkeep_prices.tolist()
+
+        self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_well_per_m2')
+         
     def clip_with_grid(self, ds, mask):
         assert ds.shape == mask.shape
         cells_along_y = mask.sum(dim='x').values.ravel()
@@ -645,17 +684,6 @@ class GEBModel(GridModel):
                     name=f'landcover/{land_use_type}/{parameter}'
                 )
 
-    def setup_albedo(self, interpolation_method='nearest'):
-        albedo_ds = self.data_catalog.get_rasterdataset("cwatm_albedo_5min")
-        self.set_forcing(
-            self.interpolate(albedo_ds['albedoLand'], interpolation_method, ydim='lat', xdim='lon'),
-            name='landsurface/albedo/albedo_land'
-        )
-        self.set_forcing(
-            self.interpolate(albedo_ds['albedoWater'], interpolation_method, ydim='lat', xdim='lon'),
-            name='landsurface/albedo/albedo_water'
-        )
-
     def setup_waterbodies(self):
         waterbodies = self.data_catalog.get_geodataframe(
             "hydro_lakes",
@@ -809,8 +837,8 @@ class GEBModel(GridModel):
         self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
         self.setup_hurs(starttime, endtime)
         self.setup_longwave(starttime=starttime, endtime=endtime)
-        # self.setup_pressure(starttime, endtime)
-        # self.setup_wind(starttime, endtime)
+        self.setup_pressure(starttime, endtime)
+        self.setup_wind(starttime, endtime)
 
     def setup_longwave(self, starttime, endtime):
         x1 = 0.43
@@ -880,7 +908,14 @@ class GEBModel(GridModel):
         pressure_30_min_regridded = regridder(pressure_30_min)
         pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * DEM.values * M) / (T0 * r0))
 
-        self.set_forcing(pressure_30_min_regridded_corr, name='climate/ps')
+        output_coords = {}
+        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
+        output_coords['y'] = self.grid.raster.coords['y']
+        output_coords['x'] = self.grid.raster.coords['x']
+        ps_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='ps')
+        ps_output.data = pressure_30_min_regridded_corr
+
+        self.set_forcing(ps_output, name='climate/ps')
 
     def setup_high_resolution_variables(self, variables, starttime, endtime):
         for variable in variables:
