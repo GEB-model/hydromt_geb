@@ -172,7 +172,8 @@ class GEBModel(GridModel):
             nodata=0,
             dtype=mask.dtype,
             crs=mask.raster.crs,
-            name='areamaps/sub_grid_mask'
+            name='areamaps/sub_grid_mask',
+            lazy=True
         )
         submask.raster.set_nodata(None)
         submask.data = repeat_grid(mask.data, sub_grid_factor)
@@ -228,7 +229,7 @@ class GEBModel(GridModel):
         mask = self.grid['areamaps/grid_mask'].raster
         affine = mask.transform
 
-        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area')
+        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area', lazy=True)
         cell_area.data = calculate_cell_area(affine, mask.shape)
         self.set_grid(cell_area)
 
@@ -236,7 +237,8 @@ class GEBModel(GridModel):
             self.subgrid.grid.raster.coords,
             nodata=cell_area.raster.nodata,
             dtype=cell_area.dtype,
-            name='areamaps/sub_cell_area'
+            name='areamaps/sub_cell_area',
+            lazy=True
         )
 
         sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
@@ -302,7 +304,8 @@ class GEBModel(GridModel):
             nodata=np.nan,
             dtype=padded_cell_area.dtype,
             crs=padded_cell_area.raster.crs,
-            name='areamaps/sub_grid_mask'
+            name='areamaps/sub_grid_mask',
+            lazy=True
         )
 
         region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
@@ -453,7 +456,7 @@ class GEBModel(GridModel):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
-        farms = hydromt.raster.full_like(regions_raster, nodata=-1)
+        farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
         farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'), index_col=0)
         
         for region_id in regions['region_id']:
@@ -517,7 +520,7 @@ class GEBModel(GridModel):
         b = self.grid['landsurface/topo/elevation'] / 2000
         b = xr.where(b > 1, 1, b)
         
-        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings')
+        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings', lazy=True)
         mannings.data = 0.025 + 0.015 * a + 0.030 * b
         self.set_grid(mannings)
 
@@ -526,7 +529,7 @@ class GEBModel(GridModel):
         channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
         channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
         
-        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width')
+        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width', lazy=True)
         channel_width.data = channel_width_data
         
         self.set_grid(channel_width)
@@ -535,7 +538,7 @@ class GEBModel(GridModel):
         self.logger.info("Setting up channel depth")
         assert (self.grid['routing/kinematic/upstream_area'] > 0).all()
         channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
-        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth')
+        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
         channel_depth.data = channel_depth_data
         self.set_grid(channel_depth)
 
@@ -547,7 +550,7 @@ class GEBModel(GridModel):
         channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
         assert (channel_ratio_data >= 0).all()
 
-        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio')
+        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
         channel_ratio.data = channel_ratio_data
         self.set_grid(channel_ratio)
 
@@ -600,7 +603,7 @@ class GEBModel(GridModel):
 
         elevation_per_cell = high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling).swapaxes(1, 2)
 
-        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD')
+        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD', lazy=True)
         standard_deviation.data = np.std(elevation_per_cell, axis=(2,3))
         self.set_grid(standard_deviation)
 
@@ -627,7 +630,8 @@ class GEBModel(GridModel):
             nodata=0,
             dtype=np.int8,
             name=f'groundwater/modflow/modflow_mask',
-            crs=epsg
+            crs=epsg,
+            lazy=True
         )
 
         intersection = create_indices(
@@ -826,7 +830,7 @@ class GEBModel(GridModel):
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
-        datasets = [xr.open_dataset(download_path / file) for file in parse_files]
+        datasets = [xr.open_dataset(download_path / file, chunks={'time': 10}) for file in parse_files]
         coords_first_dataset = datasets[0].coords
         for dataset in datasets:
             # make sure all datasets have more or less the same coordinates
@@ -894,7 +898,7 @@ class GEBModel(GridModel):
         output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
         output_coords['y'] = self.grid.raster.coords['y']
         output_coords['x'] = self.grid.raster.coords['x']
-        rlds_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='rlds')
+        rlds_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='rlds', lazy=True)
 
         # now ready for calculation:
         es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded.tas.data))  # saturation vapor pressure
@@ -937,7 +941,7 @@ class GEBModel(GridModel):
         output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
         output_coords['y'] = self.grid.raster.coords['y']
         output_coords['x'] = self.grid.raster.coords['x']
-        ps_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='ps')
+        ps_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='ps', lazy=True)
         ps_output.data = pressure_30_min_regridded_corr
 
         self.set_forcing(ps_output, name='climate/ps')
@@ -950,7 +954,6 @@ class GEBModel(GridModel):
             self.set_forcing(var, name=f'climate/{variable}')
 
     def setup_hurs(self, starttime, endtime):
-        # hurs
         hurs_30_min = self.download_isimip(variable='hurs', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
 
         # just taking the years to simplify things
@@ -970,7 +973,7 @@ class GEBModel(GridModel):
                     hurs.name = 'hurs'
                     hurs.to_netcdf(fn)
                 else:
-                    hurs = xr.open_dataset(fn)['hurs']
+                    hurs = xr.open_dataset(fn, chunks={'time': 10})['hurs']
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f'{year}-{month:02d}')
         
@@ -982,7 +985,7 @@ class GEBModel(GridModel):
         output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
         output_coords['y'] = self.grid.raster.coords['y']
         output_coords['x'] = self.grid.raster.coords['x']
-        hurs_output = hydromt.raster.full(output_coords, name='hurs', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs)
+        hurs_output = hydromt.raster.full(output_coords, name='hurs', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, lazy=True)
 
         regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
         for year in tqdm(range(start_year, end_year+1)):
@@ -1058,7 +1061,7 @@ class GEBModel(GridModel):
         output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
         output_coords['y'] = self.grid.raster.coords['y']
         output_coords['x'] = self.grid.raster.coords['x']
-        wind_output = hydromt.raster.full(output_coords, name='wind', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs)
+        wind_output = hydromt.raster.full(output_coords, name='wind', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, lazy=True)
 
         for year in tqdm(range(start_year, end_year+1)):
             for month in range(1, 13):
