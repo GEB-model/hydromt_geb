@@ -187,11 +187,16 @@ class GEBModel(GridModel):
             crop_prices=None,
             cultivation_costs=None,
         ):
+        self.logger.info(f"Preparing crops data")
         self.set_dict(crop_ids, name='crops/crop_ids')
         self.set_dict(crop_variables, name='crops/crop_variables')
         if crop_prices is not None:
+            self.logger.info(f"Preparing crop prices")
             if isinstance(crop_prices, str):
-                with open(Path(self.root, crop_prices), 'r') as f:
+                fp = Path(self.root, crop_prices)
+                if not fp.exists():
+                    raise ValueError(f"crop_prices file {fp.resolve()} does not exist")
+                with open(fp, 'r') as f:
                     crop_prices_data = json.load(f)
                 crop_prices = {
                     'time': crop_prices_data['time'],
@@ -202,8 +207,12 @@ class GEBModel(GridModel):
                 }
             self.set_dict(crop_prices, name='crops/crop_prices')
         if cultivation_costs is not None:
+            self.logger.info(f"Preparing cultivation costs")
             if isinstance(cultivation_costs, str):
-                with open(Path(self.root, cultivation_costs)) as f:
+                fp = Path(self.root, cultivation_costs)
+                if not fp.exists():
+                    raise ValueError(f"cultivation_costs file {fp.resolve()} does not exist")
+                with open(fp) as f:
                     cultivation_costs = json.load(f)
                 cultivation_costs = {
                     'time': cultivation_costs['time'],
@@ -215,6 +224,7 @@ class GEBModel(GridModel):
             self.set_dict(cultivation_costs, name='crops/cultivation_costs')
 
     def setup_cell_area_map(self):
+        self.logger.info(f"Preparing cell area map.")
         mask = self.grid['areamaps/grid_mask'].raster
         affine = mask.transform
 
@@ -233,6 +243,7 @@ class GEBModel(GridModel):
         self.subgrid.set_grid(sub_cell_area)
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
+        self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
             geom=self.staticgeoms['areamaps/region'],
@@ -360,7 +371,7 @@ class GEBModel(GridModel):
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
     def setup_economic_data(self):
-        print('Setting up economic data')
+        self.logger.info('Setting up economic data')
         lending_rates = self.data_catalog.get_geodataframe('wb_lending_rate')
         inflation_rates = self.data_catalog.get_geodataframe('wb_inflation_rate')
 
@@ -385,6 +396,7 @@ class GEBModel(GridModel):
         self.set_dict(lending_rates_dict, name='economics/lending_rates')
 
     def setup_well_prices_by_reference_year(self, well_price, upkeep_price_per_m2, reference_year, start_year, end_year):
+        self.logger.info('Setting up well prices by reference year')
         # create dictory with prices for well_prices per year by applying inflation rates
         inflation_rates = self.dict['economics/inflation_rates']
         regions = list(inflation_rates['data'].keys())
@@ -499,6 +511,7 @@ class GEBModel(GridModel):
 
 
     def setup_mannings(self):
+        self.logger.info("Setting up Manning's coefficient")
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
         a = xr.where(a > 1, 1, a)
         b = self.grid['landsurface/topo/elevation'] / 2000
@@ -509,6 +522,7 @@ class GEBModel(GridModel):
         self.set_grid(mannings)
 
     def setup_channel_width(self, minimum_width):
+        self.logger.info("Setting up channel width")
         channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
         channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
         
@@ -518,6 +532,7 @@ class GEBModel(GridModel):
         self.set_grid(channel_width)
 
     def setup_channel_depth(self):
+        self.logger.info("Setting up channel depth")
         assert (self.grid['routing/kinematic/upstream_area'] > 0).all()
         channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
         channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth')
@@ -525,6 +540,7 @@ class GEBModel(GridModel):
         self.set_grid(channel_depth)
 
     def setup_channel_ratio(self):
+        self.logger.info("Setting up channel ratio")
         assert (self.grid['routing/kinematic/channel_length'] > 0).all()
         channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
         channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
@@ -536,6 +552,7 @@ class GEBModel(GridModel):
         self.set_grid(channel_ratio)
 
     def setup_elevation_STD(self):
+        self.logger.info("Setting up elevation standard deviation")
         MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
         # There is a half degree offset in MERIT data
         MERIT = MERIT.assign_coords(
@@ -597,6 +614,7 @@ class GEBModel(GridModel):
         )
     
     def setup_modflow(self, epsg, resolution):
+        self.logger.info("Setting up MODFLOW")
         modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
             self.grid.mask,
             4326,
@@ -642,6 +660,7 @@ class GEBModel(GridModel):
         self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
 
     def setup_soil_parameters(self, interpolation_method='nearest'):
+        self.logger.info('Setting up soil parameters')
         soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
         for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
             for soil_layer in range(1, 4):
@@ -658,12 +677,14 @@ class GEBModel(GridModel):
         self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
 
     def setup_land_use_parameters(self, interpolation_method='nearest'):
+        self.logger.info('Setting up land use parameters')
         for land_use_type, land_use_type_netcdf_name in (
             ('forest', 'Forest'),
             ('grassland', 'Grassland'),
             ('irrPaddy', 'irrPaddy'),
             ('irrNonPaddy', 'irrNonPaddy'),
         ):
+            self.logger.info(f'Setting up land use parameters for {land_use_type}')
             land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min")
             
             for parameter in ('maxRootDepth', 'rootFraction1'):
@@ -685,6 +706,7 @@ class GEBModel(GridModel):
                 )
 
     def setup_waterbodies(self):
+        self.logger.info('Setting up waterbodies')
         waterbodies = self.data_catalog.get_geodataframe(
             "hydro_lakes",
             geom=self.staticgeoms['areamaps/region'],
@@ -831,13 +853,16 @@ class GEBModel(GridModel):
             endtime,
         ):
         # download source data from ISIMIP
+        self.logger.info('setting up forcing data')
         high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-        low_res_variables = ['hurs', 'sfcwind', 'rlds', 'ps']
-
         self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
+        self.logger.info('setting up relative humdity...')
         self.setup_hurs(starttime, endtime)
+        self.logger.info('setting up longwave radiation...')
         self.setup_longwave(starttime=starttime, endtime=endtime)
+        self.logger.info('setting up pressure...')
         self.setup_pressure(starttime, endtime)
+        self.logger.info('setting up wind...')
         self.setup_wind(starttime, endtime)
 
     def setup_longwave(self, starttime, endtime):
@@ -919,6 +944,7 @@ class GEBModel(GridModel):
 
     def setup_high_resolution_variables(self, variables, starttime, endtime):
         for variable in variables:
+            self.logger.info(f'Setting up {variable}...')
             ds = self.download_isimip(variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             self.set_forcing(var, name=f'climate/{variable}')
