@@ -849,6 +849,7 @@ class GEBModel(GridModel):
         # assert that time is monotonically increasing with a constant step size
         assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
         ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
+        ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
         return ds
 
     def setup_forcing(
@@ -1021,7 +1022,7 @@ class GEBModel(GridModel):
         # global_wind_atlas = self.data_catalog.get_rasterdataset(
         #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
         # ).rename({'x': 'lon', 'y': 'lat'})
-        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'})
+        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'}).squeeze()
         target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
@@ -1032,64 +1033,31 @@ class GEBModel(GridModel):
             endtime=datetime(2017, 12, 31),
             forcing='gswp3-w5e5',
             buffer=1
-        ).mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
+        ).sfcwind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
         regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
         wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
 
         # create diff layer:
         # assume wind follows weibull distribution => do log transform
-        wind_30_min_avg_regridded_log = np.log(
-            wind_30_min_avg_regridded.sfcwind.values,
-            out=np.zeros_like(wind_30_min_avg_regridded.sfcwind.values),
-            where=(wind_30_min_avg_regridded.sfcwind.values != 0)
-        )  # avoid  -inf at locations where wind == 0
+        wind_30_min_avg_regridded_log = np.log(wind_30_min_avg_regridded)
 
-        global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded.values,
-            out=np.zeros_like(global_wind_atlas_regridded.values),
-            where=(global_wind_atlas_regridded.values != 0)
-        )  # avoid  -inf at locations where wind == 0
+        global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded)
 
         diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
 
-        wind_30_min = self.download_isimip(variable='sfcwind', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        wind_30_min = self.download_isimip(variable='sfcwind', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1).sfcwind  # some buffer to avoid edge effects / errors in ISIMIP API
 
-        # just taking the years to simplify things
-        start_year = starttime.year
-        end_year = endtime.year
+        wind_30min_regridded = regridder_30_min(wind_30_min)
+        wind_30min_regridded_log = np.log(wind_30min_regridded)
 
-        output_coords = {}
-        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
-        output_coords['y'] = self.grid.raster.coords['y']
-        output_coords['x'] = self.grid.raster.coords['x']
-        wind_output = hydromt.raster.full(output_coords, name='wind', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, lazy=True)
+        wind_30min_regridded_log_corr = wind_30min_regridded_log + diff_layer
+        wind_30min_regridded_corr = np.exp(wind_30min_regridded_log_corr)
 
-        for year in tqdm(range(start_year, end_year+1)):
-            for month in range(1, 13):
-                start_month = datetime(year, month, 1)
-                end_month = datetime(year, month, monthrange(year, month)[1])
-                
-                wind_30min_sel = wind_30_min.sel(time=slice(start_month, end_month))
-                wind_30min_sel_regridded = regridder_30_min(wind_30min_sel)
+        wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(self.grid.raster.bounds)
+        wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
+        wind_output_clipped.name = 'wind'
 
-                wind_30min_sel_regridded_log = np.log(wind_30min_sel_regridded.sfcwind.values,
-                    out=np.zeros_like(wind_30min_sel_regridded.sfcwind.values),
-                    where=(wind_30min_sel_regridded.sfcwind.values != 0)  # avoid -inf at x=0
-                )
-                wind_30min_sel_regridded_log_corr = wind_30min_sel_regridded_log + diff_layer
-                wind_30min_sel_regridded_corr = np.exp(
-                    wind_30min_sel_regridded_log_corr,
-                    out=np.zeros_like(wind_30min_sel_regridded_log_corr),
-                    where=(wind_30min_sel_regridded_log_corr != 0)
-                )
-
-                wind_30min_sel_regridded_corr_ds = wind_30min_sel_regridded.copy()
-                wind_30min_sel_regridded_corr_ds.sfcwind.values = wind_30min_sel_regridded_corr
-
-                wind_output.loc[
-                    dict(time=slice(start_month, end_month))
-                ] = wind_30min_sel_regridded_corr_ds.sfcwind.raster.clip_bbox(wind_output.raster.bounds)
-
-        self.set_forcing(wind_output, 'climate/wind')
+        self.set_forcing(wind_output_clipped, 'climate/wind')
 
     def setup_precip_forcing(
         self,
@@ -1200,6 +1168,7 @@ class GEBModel(GridModel):
             self.model_structure['forcing'][var] = fn
             fp = Path(self.root, fn)
             fp.parent.mkdir(parents=True, exist_ok=True)
+            forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
             forcing.to_netcdf(fp, mode='w')
 
     def write_table(self):
