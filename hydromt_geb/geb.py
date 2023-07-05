@@ -1182,7 +1182,6 @@ class GEBModel(GridModel):
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
-        self.forcing['climate/ps'].to_netcdf('test.nc')
         for var in self.forcing:
             forcing = self.forcing[var]
             fn = var + '.nc'
