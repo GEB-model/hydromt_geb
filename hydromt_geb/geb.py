@@ -702,6 +702,7 @@ class GEBModel(GridModel):
                 )
 
     def setup_water_demand(self):
+        self.logger.info('Setting up water demand')
         domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
         domestic_water_demand.name = 'domestic_water_demand'
         self.set_forcing(domestic_water_demand, name='water_demand/domestic_water_demand')
