@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 from hydromt.models.model_grid import GridMixin, GridModel
 import hydromt.workflows
+from dateutil.relativedelta import relativedelta
 import logging
 import os
 import json
@@ -13,12 +14,13 @@ import rioxarray as rxr
 from urllib.parse import urlparse
 
 # temporary fix for ESMF on Windows
-os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
+if os.name == 'nt':
+    os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
 
 import xesmf as xe
 from affine import Affine
 import geopandas as gpd
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, date
 from calendar import monthrange
 import matplotlib.pyplot as plt
 from isimip_client.client import ISIMIPClient
@@ -772,14 +774,17 @@ class GEBModel(GridModel):
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
 
-    def download_isimip(self, starttime, endtime, variable, forcing, resolution=None, buffer=0):
+    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0):
+        # if starttime is specified, endtime must be specified as well
+        assert (starttime is None) == (endtime is None)
+        
         client = ISIMIPClient()
         download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / variable
         download_path.mkdir(parents=True, exist_ok=True)
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
             simulation_round='ISIMIP3a',
-            product='InputData',
+            product=product,
             climate_forcing=forcing,
             climate_scenario='obsclim',
             climate_variable=variable,
@@ -794,29 +799,44 @@ class GEBModel(GridModel):
         ymin -= buffer
         xmax += buffer
         ymax += buffer
-        
-        download_files = []
-        parse_files = []
-        for file in files:
-            name = file['name']
-            assert name.endswith('.nc')
-            splitted_filename = name.split('_')
-            date = splitted_filename[-1].split('.')[0]
-            if len(date) == 6:
-                start_year = int(date[:4])
-                end_year = start_year
-                month = int(date[4:6])
-            elif len(date) == 4:
-                start_year = int((splitted_filename[-2]))
-                end_year = int(date[:4])
-                month = None
-            else:
-                raise ValueError(f'could not parse date {date} from file {name}')
 
-            if (not (endtime.year < start_year or starttime.year > end_year)) and (month is None or (month >= starttime.month and month <= endtime.month)):
-                parse_files.append(file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}'))
-                if not (download_path / name.replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')).exists():
-                    download_files.append(file['path'])
+        if variable == 'orog':
+            assert len(files) == 1
+            filename = files[0]['name'].replace('_global', f'_global_lat{ymin}to{ymax}lon{xmin}to{xmax}')  # global should be included due to error in ISIMIP API
+            parse_files = [filename]
+            if not (download_path / filename).exists():
+                download_files = [files[0]['path']]
+            else:
+                download_files = []
+                
+
+        else:
+            assert starttime is not None and endtime is not None
+            download_files = []
+            parse_files = []
+            for file in files:
+                name = file['name']
+                assert name.endswith('.nc')
+                splitted_filename = name.split('_')
+                date = splitted_filename[-1].split('.')[0]
+                if '-' in date:
+                    start_date, end_date = date.split('-')
+                    start_date = datetime.strptime(start_date, '%Y%m%d').date()
+                    end_date = datetime.strptime(end_date, '%Y%m%d').date()
+                elif len(date) == 6:
+                    start_date = datetime.strptime(date, '%Y%m').date()
+                    end_date = start_date + relativedelta(months=1) - relativedelta(days=1)
+                # elif len(date) == 4:
+                #     start_year = int((splitted_filename[-2]))
+                #     end_year = int(date[:4])
+                #     month = None
+                else:
+                    raise ValueError(f'could not parse date {date} from file {name}')
+
+                if not (end_date < starttime or start_date > endtime):
+                    parse_files.append(file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}'))
+                    if not (download_path / name.replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')).exists():
+                        download_files.append(file['path'])
 
         if download_files:
             response = client.cutout(download_files, [ymin, ymax, xmin, xmax], poll=10)
@@ -844,10 +864,16 @@ class GEBModel(GridModel):
                 inplace=True
             ) for ds in datasets
         ]
-        ds = xr.concat(datasets, dim='time').sel(time=slice(starttime, endtime))
+        if len(datasets) > 1:
+            ds = xr.concat(datasets, dim='time')
+        else:
+            ds = datasets[0]
+        
+        if starttime is not None:
+            ds = ds.sel(time=slice(starttime, endtime))
+            # assert that time is monotonically increasing with a constant step size
+            assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
 
-        # assert that time is monotonically increasing with a constant step size
-        assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
         ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
         ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
         return ds
@@ -880,49 +906,43 @@ class GEBModel(GridModel):
         lv = 2.5E6  # latent heat of vaporization of water
         Rv = 461.5  # gas constant for water vapour [J K kg-1]
 
-        target = self.grid['landsurface/topo/elevation'].rename({'x': 'lon', 'y': 'lat'})
+        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
 
-        hurs_coarse = self.download_isimip(variable='hurs', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
-        tas_coarse = self.download_isimip(variable='tas', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
-        rlds_coarse = self.download_isimip(variable='rlds', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        hurs_coarse = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
+        tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
+        rlds_coarse = self.download_isimip(product='SecondaryInputData', variable='rlds', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
         
         regridder = xe.Regridder(hurs_coarse.isel(time=0).drop('time'), target, 'bilinear')
 
-        hurs_coarse_regridded = regridder(hurs_coarse)
-        tas_coarse_regridded = regridder(tas_coarse)
-        rlds_coarse_regridded = regridder(rlds_coarse)
+        hurs_coarse_regridded = regridder(hurs_coarse).rename({'lon': 'x', 'lat': 'y'})
+        tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
+        rlds_coarse_regridded = regridder(rlds_coarse).rename({'lon': 'x', 'lat': 'y'})
 
         hurs_fine = self.forcing['climate/hurs']
         tas_fine = self.forcing['climate/tas']
 
-        output_coords = {}
-        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
-        output_coords['y'] = self.grid.raster.coords['y']
-        output_coords['x'] = self.grid.raster.coords['x']
-        rlds_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='rlds', lazy=True)
-
         # now ready for calculation:
-        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded.tas.data))  # saturation vapor pressure
-        pV_coarse = (hurs_coarse_regridded.hurs.data * es_coarse) / 100  # water vapor pressure [hPa]
+        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded))  # saturation vapor pressure
+        pV_coarse = (hurs_coarse_regridded * es_coarse) / 100  # water vapor pressure [hPa]
 
-        es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine.data))
-        pV_fine = (hurs_fine.data * es_fine) / 100  # water vapour pressure [hPa]
+        es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine))
+        pV_fine = (hurs_fine * es_fine) / 100  # water vapour pressure [hPa]
 
-        e_cl_coarse = 0.23 + x1 * ((pV_coarse * 100) / tas_coarse_regridded.tas.data) ** (1 / x2)
+        e_cl_coarse = 0.23 + x1 * ((pV_coarse * 100) / tas_coarse_regridded) ** (1 / x2)
         # e_cl_coarse == clear-sky emissivity w5e5 (pV needs to be in Pa not hPa, hence *100)
-        e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine.data) ** (1 / x2)
+        e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine) ** (1 / x2)
         # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
 
-        e_as_coarse = rlds_coarse_regridded.rlds.data / (sbc * tas_coarse_regridded.tas.data ** 4)  # all-sky emissivity w5e5
-        e_as_coarse[e_as_coarse > 1] = 1  # constrain all-sky emissivity to max 1
+        e_as_coarse = rlds_coarse_regridded / (sbc * tas_coarse_regridded ** 4)  # all-sky emissivity w5e5
+        e_as_coarse = xr.where(e_as_coarse > 1, 1, e_as_coarse)  # constrain all-sky emissivity to max 1
         delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
         
         e_as_fine = e_cl_fine + delta_e
-        e_as_fine[e_as_fine > 1] = 1  # constrain all-sky emissivity to max 1
-        lw_fine = e_as_fine * sbc * tas_fine.data ** 4  # downscaled lwr! assume cloud e is the same
+        e_as_fine = xr.where(e_as_fine > 1, 1, e_as_fine)  # constrain all-sky emissivity to max 1
+        lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
 
-        rlds_output.data = lw_fine
-        self.set_forcing(rlds_output, name='climate/rlds')
+        lw_fine.name = 'rlds'
+        self.set_forcing(lw_fine, name='climate/rlds')
 
     def setup_pressure(self, starttime, endtime):
         g = 9.80665  # gravitational acceleration [m/s2]
@@ -930,32 +950,33 @@ class GEBModel(GridModel):
         r0 = 8.314462618  # universal gas constant [J/(mol·K)]
         T0 = 288.16  # Sea level standard temperature  [K]
 
-        DEM = self.grid['landsurface/topo/elevation']
-        pressure_30_min = self.download_isimip(variable='ps', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)['ps']  # some buffer to avoid edge effects / errors in ISIMIP API
+        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+        pressure_30_min = self.download_isimip(product='SecondaryInputData', variable='psl', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).psl  # some buffer to avoid edge effects / errors in ISIMIP API
+        
+        orography = self.download_isimip(product='InputData', variable='orog', forcing='chelsa-w5e5v1.0', buffer=1).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        regridder = xe.Regridder(orography, target, 'bilinear')
+        orography = regridder(orography).rename({'lon': 'x', 'lat': 'y'})
 
-        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), DEM.rename({'x': 'lon', 'y': 'lat'}), 'bilinear')
- 
-        pressure_30_min_regridded = regridder(pressure_30_min)
-        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * DEM.values * M) / (T0 * r0))
+        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), target, 'bilinear')
+        pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
+        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
 
-        output_coords = {}
-        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
-        output_coords['y'] = self.grid.raster.coords['y']
-        output_coords['x'] = self.grid.raster.coords['x']
-        ps_output = hydromt.raster.full(output_coords, dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, name='ps', lazy=True)
-        ps_output.data = pressure_30_min_regridded_corr
-
-        self.set_forcing(ps_output, name='climate/ps')
+        pressure = xr.full_like(self.forcing['climate/hurs'], fill_value=np.nan)
+        pressure.name = 'ps'
+        pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
+        pressure.data = pressure_30_min_regridded_corr
+        self.set_forcing(pressure, name='climate/ps')
 
     def setup_high_resolution_variables(self, variables, starttime, endtime):
         for variable in variables:
             self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+            ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             self.set_forcing(var, name=f'climate/{variable}')
 
     def setup_hurs(self, starttime, endtime):
-        hurs_30_min = self.download_isimip(variable='hurs', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
 
         # just taking the years to simplify things
         start_year = starttime.year
@@ -982,11 +1003,9 @@ class GEBModel(GridModel):
         hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
         hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
 
-        output_coords = {}
-        output_coords['time'] = pd.date_range(starttime, endtime, freq="D")    
-        output_coords['y'] = self.grid.raster.coords['y']
-        output_coords['x'] = self.grid.raster.coords['x']
-        hurs_output = hydromt.raster.full(output_coords, name='hurs', dtype='float32', nodata=np.nan, crs=self.grid.raster.crs, lazy=True)
+        hurs_output = xr.full_like(self.forcing['climate/tas'], np.nan)
+        hurs_output.name = 'hurs'
+        hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
 
         regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
         for year in tqdm(range(start_year, end_year+1)):
@@ -1028,10 +1047,11 @@ class GEBModel(GridModel):
         global_wind_atlas_regridded = regridder(global_wind_atlas)
 
         wind_30_min_avg = self.download_isimip(
+            product='SecondaryInputData', 
             variable='sfcwind',
-            starttime=datetime(2008, 1, 1),
-            endtime=datetime(2017, 12, 31),
-            forcing='gswp3-w5e5',
+            starttime=date(2008, 1, 1),
+            endtime=date(2017, 12, 31),
+            forcing='w5e5v2.0',
             buffer=1
         ).sfcwind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
         regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
@@ -1045,7 +1065,7 @@ class GEBModel(GridModel):
 
         diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
 
-        wind_30_min = self.download_isimip(variable='sfcwind', starttime=starttime, endtime=endtime, forcing='gswp3-w5e5', buffer=1).sfcwind  # some buffer to avoid edge effects / errors in ISIMIP API
+        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcwind  # some buffer to avoid edge effects / errors in ISIMIP API
 
         wind_30min_regridded = regridder_30_min(wind_30_min)
         wind_30min_regridded_log = np.log(wind_30min_regridded)
@@ -1162,6 +1182,7 @@ class GEBModel(GridModel):
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
+        self.forcing['climate/ps'].to_netcdf('test.nc')
         for var in self.forcing:
             forcing = self.forcing[var]
             fn = var + '.nc'
