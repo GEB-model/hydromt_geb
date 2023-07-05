@@ -528,7 +528,8 @@ class GEBModel(GridModel):
 
     def setup_channel_depth(self):
         self.logger.info("Setting up channel depth")
-        assert (self.grid['routing/kinematic/upstream_area'] > 0).all()
+        gr = self.grid['routing/kinematic/upstream_area'].compute()
+        assert ((self.grid['routing/kinematic/upstream_area'] > 0) | ~self.grid.mask).all()
         channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
         channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
         channel_depth.data = channel_depth_data
@@ -536,12 +537,11 @@ class GEBModel(GridModel):
 
     def setup_channel_ratio(self):
         self.logger.info("Setting up channel ratio")
-        assert (self.grid['routing/kinematic/channel_length'] > 0).all()
+        assert ((self.grid['routing/kinematic/channel_length'] > 0) | ~self.grid.mask).all()
         channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
         channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
         channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
-        assert (channel_ratio_data >= 0).all()
-
+        assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
         channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
         channel_ratio.data = channel_ratio_data
         self.set_grid(channel_ratio)
