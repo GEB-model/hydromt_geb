@@ -704,22 +704,27 @@ class GEBModel(GridModel):
     def setup_water_demand(self):
         self.logger.info('Setting up water demand')
         domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
+        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
         domestic_water_demand.name = 'domestic_water_demand'
         self.set_forcing(domestic_water_demand, name='water_demand/domestic_water_demand')
 
         domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
         domestic_water_consumption.name = 'domestic_water_consumption'
+        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
         self.set_forcing(domestic_water_consumption, name='water_demand/domestic_water_consumption')
 
         industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
+        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
         industry_water_demand.name = 'industry_water_demand'
         self.set_forcing(industry_water_demand, name='water_demand/industry_water_demand')
 
         industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
         industry_water_consumption.name = 'industry_water_consumption'
+        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
         self.set_forcing(industry_water_consumption, name='water_demand/industry_water_consumption')
 
         livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
+        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
         livestock_water_consumption.name = 'livestock_water_consumption'
         self.set_forcing(livestock_water_consumption, name='water_demand/livestock_water_consumption')
 
