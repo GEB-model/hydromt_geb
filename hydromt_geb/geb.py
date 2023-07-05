@@ -10,6 +10,7 @@ import json
 import numpy as np
 import pandas as pd
 import xarray as xr
+from collections import defaultdict
 import rioxarray as rxr
 from urllib.parse import urlparse
 
@@ -69,18 +70,7 @@ class GEBModel(GridModel):
         self.binary = {}
         self.dict = {}
 
-        self.model_structure = {
-            "geoms": {},
-            "grid": {},
-            "subgrid": {},
-            "region_subgrid": {},
-            "MERIT_grid": {},
-            "MODFLOW_grid": {},
-            "table": {},
-            "binary": {},
-            "dict": {},
-            "forcing": {}
-        }
+        self.model_structure = defaultdict(dict)
 
     def setup_grid(
         self,
@@ -710,6 +700,27 @@ class GEBModel(GridModel):
                     self.interpolate(land_use_ds[parameter], interpolation_method),
                     name=f'landcover/{land_use_type}/{parameter}'
                 )
+
+    def setup_water_demand(self):
+        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
+        domestic_water_demand.name = 'domestic_water_demand'
+        self.set_forcing(domestic_water_demand, name='water_demand/domestic_water_demand')
+
+        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
+        domestic_water_consumption.name = 'domestic_water_consumption'
+        self.set_forcing(domestic_water_consumption, name='water_demand/domestic_water_consumption')
+
+        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
+        industry_water_demand.name = 'industry_water_demand'
+        self.set_forcing(industry_water_demand, name='water_demand/industry_water_demand')
+
+        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
+        industry_water_consumption.name = 'industry_water_consumption'
+        self.set_forcing(industry_water_consumption, name='water_demand/industry_water_consumption')
+
+        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
+        livestock_water_consumption.name = 'livestock_water_consumption'
+        self.set_forcing(livestock_water_consumption, name='water_demand/livestock_water_consumption')
 
     def setup_waterbodies(self):
         self.logger.info('Setting up waterbodies')
