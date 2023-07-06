@@ -1088,7 +1088,7 @@ class GEBModel(GridModel):
             endtime=date(2017, 12, 31),
             forcing='w5e5v2.0',
             buffer=1
-        ).sfcwind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
+        ).sfcWind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
         regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
         wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
 
@@ -1100,7 +1100,7 @@ class GEBModel(GridModel):
 
         diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
 
-        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcwind  # some buffer to avoid edge effects / errors in ISIMIP API
+        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcWind  # some buffer to avoid edge effects / errors in ISIMIP API
 
         wind_30min_regridded = regridder_30_min(wind_30_min)
         wind_30min_regridded_log = np.log(wind_30min_regridded)
