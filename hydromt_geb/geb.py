@@ -6,6 +6,7 @@ import hydromt.workflows
 from dateutil.relativedelta import relativedelta
 import logging
 import os
+import time
 import json
 import numpy as np
 import pandas as pd
@@ -826,7 +827,6 @@ class GEBModel(GridModel):
             else:
                 download_files = []
                 
-
         else:
             assert starttime is not None and endtime is not None
             download_files = []
@@ -851,12 +851,29 @@ class GEBModel(GridModel):
                     raise ValueError(f'could not parse date {date} from file {name}')
 
                 if not (end_date < starttime or start_date > endtime):
-                    parse_files.append(file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}'))
-                    if not (download_path / name.replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')).exists():
+                    if "_global" in file['name']:
+                        downloaded_file = file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')
+                    else:
+                        downloaded_file = file['name'].replace('.nc', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}.nc')
+                    parse_files.append(downloaded_file)
+                    if not (download_path / downloaded_file).exists():
                         download_files.append(file['path'])
 
         if download_files:
-            response = client.cutout(download_files, [ymin, ymax, xmin, xmax], poll=10)
+            self.logger.info(f"Requesting download of {len(download_files)} files")
+            while True:
+                response = client.cutout(download_files, [ymin, ymax, xmin, xmax])
+                if response['status'] == 'finished':
+                    break
+                elif response['status'] == 'started':
+                    print('started')
+                elif response['status'] == 'queued':
+                    print('queued')
+                else:
+                    raise ValueError(f"Could not download files: {response['status']}")
+                self.logger.debug("Waiting 60 seconds before retrying")
+                time.sleep(60)
+            self.logger.info("Starting download of files")
             # download the file when it is ready
             client.download(
                 response['file_url'],
@@ -864,6 +881,7 @@ class GEBModel(GridModel):
                 validate=False,
                 extract=True
             )
+            self.logger.info("Download finished")
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
