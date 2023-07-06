@@ -2,9 +2,6 @@
 HydroMT-GEB: GEB plugin for HydroMT
 =========================================
 
-|pypi| |conda_forge| |docs_latest| |docs_stable| |codecov| |license| |doi| |binder|
-
-
 What is the HydroMT-GEB plugin?
 -----------------------------------
 
@@ -16,16 +13,18 @@ This plugin provides an implementation of the model API for the GEB_ model.
 
 What is GEB?
 ---------------
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed euismod, nisl quis
+GEB, the Geographic Environmental and Behavioural model, is a coupled agent-based and hydrological model which can simulate millions of individual farmers and their bi-directional interaction with a fully distributed hydrological model on a powerful laptop. The model is jointly developed by IVM and IIASA. It is named after Geb, the personification of Earth in Egyptian mythology. You can find full documentation here.
+
+The model is build using widely used hydrological model CWatM and the agent-based model Honeybees for high-performance ABMs in Python. Some of the behavioral components of the model are based on ADOPT .
 
 Why HydroMT-GEB?
 -------------------
-Setting up hydrodynamic models typically requires many (manual) steps
+Setting up hydrological models typically requires many (manual) steps
 to process input data and might therefore be time consuming and hard to reproduce.
 Especially improving models based on global geospatial datasets, which are
 rapidly becoming available at increasingly high resolutions, might be challenging.
-HydroMT-GEB aims to make the model building process **fast**, **modular** and **reproducible**
-and to facilitate the analysis of GEB model results
+HydroMT-GEB aims to make the model building process **fast**, **modular** and **reproducible**,
+and, hopefully soon, to facilitate the analysis of GEB model results.
 
 How to use HydroMT-GEB?
 --------------------------
@@ -41,10 +40,9 @@ To reference the software please use the the DOI provided in the Zenodo badge th
 
 The following paper presents a real-world application of HydroMT-GEB:
 
-    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed euismod, nisl quis
+
+    de Bruijn, J. A., Smilovic, M., Burek, P., Guillaumot, L., Wada, Y., and Aerts, J. C. J. H.: GEB v0.1: a large-scale agent-based socio-hydrological model – simulating 10 million individual farming households in a fully distributed hydrological model, Geosci. Model Dev., 16, 2437–2454, `https://doi.org/10.5194/gmd-16-2437-2023 <https://doi.org/10.5194/gmd-16-2437-2023>`_, 2023.
 
 How to contribute?
 -------------------
-If you find any issues in the code or documentation feel free to leave an issue on the `github issue tracker. <https://github.com/Deltares/hydromt_sfincs/issues>`_
-You can find information about how to contribute to the HydroMT project at our `contributing page. <https://deltares.github.io/hydromt/latest/dev/contributing>`_
-    
+If you find any issues in the code or documentation feel free to leave an issue on the `github issue tracker. <https://github.com/jensdebruijn/hydromt_geb/issues>`_.

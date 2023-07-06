@@ -6,7 +6,6 @@ build-backend = "flit_core.buildapi"
 name = "hydromt_geb"
 authors = [
     {name = "Jens de Bruijn", email = "jens.de.bruijn@vu.nl"},
-    {name = "Dirk Eilander", email = "dirk.eilander@deltares.nl"},
 ]
 dependencies = [
     "s3fs",
@@ -16,7 +15,7 @@ requires-python = ">=3.8" # fix tests to support older versions
 readme = "README.rst"
 classifiers = [
     # https://pypi.python.org/pypi?%3Aaction=list_classifiers
-    "Development Status :: 4 - Beta",
+    "Development Status :: 1 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Hydrology",
@@ -29,13 +28,17 @@ dynamic = ['version', 'description']
 test = [
 ]
 doc = [
+    'sphinx-design',
+    'ipython',
+    'nbsphinx',
+    'pydata-sphinx-theme'
 ]
 full = [
 ]
 
 [project.urls]
-Documentation = "https://deltares.github.io/hydromt_sfincs/"
-Source = "https://github.com/Deltares/hydromt_sfincs"
+Documentation = "https://jensdebruijn.github.io/hydromt_geb/"
+Source = "https://github.com/jensdebruijn/hydromt_geb"
 
 [project.entry-points."hydromt.models"]
 geb = "hydromt_geb.geb:GEBModel"
