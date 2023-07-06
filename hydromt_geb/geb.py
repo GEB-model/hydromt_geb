@@ -6,6 +6,7 @@ import hydromt.workflows
 from dateutil.relativedelta import relativedelta
 import logging
 import os
+import requests
 import time
 import json
 import numpy as np
@@ -862,15 +863,19 @@ class GEBModel(GridModel):
         if download_files:
             self.logger.info(f"Requesting download of {len(download_files)} files")
             while True:
-                response = client.cutout(download_files, [ymin, ymax, xmin, xmax])
-                if response['status'] == 'finished':
-                    break
-                elif response['status'] == 'started':
-                    self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
-                elif response['status'] == 'queued':
-                    self.logger.debug("Date preparation queued on ISIMIP server, waiting 60 seconds before retrying")
+                try:
+                    response = client.cutout(download_files, [ymin, ymax, xmin, xmax])
+                except requests.exceptions.HTTPError:
+                    self.logger.warning("HTTPError, could not download files, retrying in 60 seconds")
                 else:
-                    raise ValueError(f"Could not download files: {response['status']}")
+                    if response['status'] == 'finished':
+                        break
+                    elif response['status'] == 'started':
+                        self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
+                    elif response['status'] == 'queued':
+                        self.logger.debug("Date preparation queued on ISIMIP server, waiting 60 seconds before retrying")
+                    else:
+                        raise ValueError(f"Could not download files: {response['status']}")
                 time.sleep(60)
             self.logger.info("Starting download of files")
             # download the file when it is ready
