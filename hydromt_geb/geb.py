@@ -866,7 +866,7 @@ class GEBModel(GridModel):
                 if response['status'] == 'finished':
                     break
                 elif response['status'] == 'started':
-                    self.logger.debug("Data preparation started on ISIMIP server, waiting 60 seconds before retrying")
+                    self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
                 elif response['status'] == 'queued':
                     self.logger.debug("Date preparation queued on ISIMIP server, waiting 60 seconds before retrying")
                 else:
@@ -1019,6 +1019,7 @@ class GEBModel(GridModel):
         folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
         folder.mkdir(parents=True, exist_ok=True)
 
+        self.logger.info("Downloading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
         hurs_ds_30sec, hurs_time = [], []
         for year in tqdm(range(start_year, end_year+1)):
             for month in range(1, 13):
