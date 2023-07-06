@@ -272,7 +272,8 @@ class GEBModel(GridModel):
         
         land_use = self.data_catalog.get_rasterdataset(
             "esa_worldcover_2020_v100",
-            geom=self.geoms['areamaps/regions'],
+            bbox=[80.1545,15.4513,81.1592,16.132],
+            # geom=self.geoms['areamaps/regions'],
             buffer=200 # 2 km buffer
         )
         reprojected_land_use = land_use.raster.reproject_like(
@@ -329,6 +330,7 @@ class GEBModel(GridModel):
 
         hydro_land_use = reprojected_land_use.raster.reclassify(
             pd.DataFrame.from_dict({
+                    0: 5,  # no data, set to permanent water bodies because ocean
                     10: 0, # tree cover
                     20: 1, # shrubland
                     30: 1, # grassland
