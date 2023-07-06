@@ -873,7 +873,7 @@ class GEBModel(GridModel):
                     elif response['status'] == 'started':
                         self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
                     elif response['status'] == 'queued':
-                        self.logger.debug("Date preparation queued on ISIMIP server, waiting 60 seconds before retrying")
+                        self.logger.debug("Data preparation queued on ISIMIP server, waiting 60 seconds before retrying")
                     else:
                         raise ValueError(f"Could not download files: {response['status']}")
                 time.sleep(60)
