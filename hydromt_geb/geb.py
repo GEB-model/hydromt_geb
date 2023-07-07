@@ -456,7 +456,7 @@ class GEBModel(GridModel):
         farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'), index_col=0)
         
         for region_id in regions['region_id']:
-            print(f"Creating farms for region {region_id}")
+            self.logger.info(f"Creating farms for region {region_id}")
             region = regions_raster == region_id
             region_clip, bounds = self.clip_with_grid(region, region)
 
@@ -470,13 +470,14 @@ class GEBModel(GridModel):
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
+        region_mask = self.region_subgrid.grid['areamaps/region_mask'].astype(bool)
+
         # TODO: Again why is dtype changed? And export doesn't work?
-        farms_copy = farms.copy()
-        farms_copy = xr.where(self.region_subgrid.grid['areamaps/region_mask'], -1, farms_copy)
-        cut_farms = np.unique(farms_copy.values)
+
+        cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1))
         cut_farms = cut_farms[cut_farms != -1]
 
-        subgrid_farms = self.clip_with_grid(farms, self.region_subgrid.grid['areamaps/region_mask'])[0]
+        subgrid_farms = self.clip_with_grid(farms, ~region_mask)[0]
 
         subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
         farmers = farmers[~farmers.index.isin(cut_farms)]
@@ -490,7 +491,7 @@ class GEBModel(GridModel):
         assert np.setdiff1d(np.unique(subgrid_farms_in_study_area), -1).size == len(farmers)
         assert farmers.iloc[-1].name == subgrid_farms_in_study_area.max()
 
-        self.subgrid.set_grid(subgrid_farms_in_study_area.squeeze(), name='agents/farmers/farms')
+        self.subgrid.set_grid(subgrid_farms_in_study_area, name='agents/farmers/farms')
         self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
 
         crop_name_to_id = {
@@ -507,7 +508,6 @@ class GEBModel(GridModel):
 
         for column in farmers.columns:
             self.set_binary(farmers[column], name=f'agents/farmers/{column}')
-
 
     def setup_mannings(self):
         self.logger.info("Setting up Manning's coefficient")
@@ -532,7 +532,6 @@ class GEBModel(GridModel):
 
     def setup_channel_depth(self):
         self.logger.info("Setting up channel depth")
-        gr = self.grid['routing/kinematic/upstream_area'].compute()
         assert ((self.grid['routing/kinematic/upstream_area'] > 0) | ~self.grid.mask).all()
         channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
         channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
@@ -1342,7 +1341,7 @@ class GEBModel(GridModel):
         data_arrays = []
         for name, fn in self.model_structure[name].items():
             with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
-                data_arrays.append(da.load())
+                data_arrays.append(da.load().squeeze())
             # with xr.load_dataarray(Path(self.root) / fn, decode_cf=False) as da:
             #     data_arrays.append(da.rename(name))
         ds = xr.merge(data_arrays)
