@@ -1,4 +1,4 @@
-.. currentmodule:: hydromt_sfincs
+.. currentmodule:: geb_sfincs
 
 
 .. _api_reference:
@@ -9,7 +9,7 @@ API reference
 
 .. _api_model:
 
-SFINCS model class
+GEB model class
 ==================
 
 Initialize
@@ -18,7 +18,7 @@ Initialize
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel
+   GEBModel
 
 .. _components:
 
@@ -28,42 +28,33 @@ Setup components
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel.setup_config
-   SfincsModel.setup_region
-   SfincsModel.setup_grid
-   SfincsModel.setup_grid_from_region
-   SfincsModel.setup_dep
-   SfincsModel.setup_mask_active
-   SfincsModel.setup_mask_bounds
-   SfincsModel.setup_manning_roughness
-   SfincsModel.setup_constant_infiltration
-   SfincsModel.setup_cn_infiltration
-   SfincsModel.setup_cn_infiltration_with_kr
-   SfincsModel.setup_subgrid
-   SfincsModel.setup_river_inflow
-   SfincsModel.setup_river_outflow
-   SfincsModel.setup_observation_points
-   SfincsModel.setup_structures
-   SfincsModel.setup_drainage_structures
-   SfincsModel.setup_waterlevel_forcing
-   SfincsModel.setup_waterlevel_bnd_from_mask
-   SfincsModel.setup_discharge_forcing
-   SfincsModel.setup_discharge_forcing_from_grid
-   SfincsModel.setup_precip_forcing
-   SfincsModel.setup_precip_forcing_from_grid
-   SfincsModel.setup_pressure_forcing_from_grid
-   SfincsModel.setup_wind_forcing
-   SfincsModel.setup_wind_forcing_from_grid
-   SfincsModel.setup_tiles
-
-Plot methods
-------------
-
-.. autosummary::
-   :toctree: _generated/
-
-   SfincsModel.plot_basemap
-   SfincsModel.plot_forcing
+   GEBModel.setup_config
+   GEBModel.setup_region
+   GEBModel.setup_grid
+   GEBModel.setup_grid_from_region
+   GEBModel.setup_dep
+   GEBModel.setup_mask_active
+   GEBModel.setup_mask_bounds
+   GEBModel.setup_manning_roughness
+   GEBModel.setup_constant_infiltration
+   GEBModel.setup_cn_infiltration
+   GEBModel.setup_cn_infiltration_with_kr
+   GEBModel.setup_subgrid
+   GEBModel.setup_river_inflow
+   GEBModel.setup_river_outflow
+   GEBModel.setup_observation_points
+   GEBModel.setup_structures
+   GEBModel.setup_drainage_structures
+   GEBModel.setup_waterlevel_forcing
+   GEBModel.setup_waterlevel_bnd_from_mask
+   GEBModel.setup_discharge_forcing
+   GEBModel.setup_discharge_forcing_from_grid
+   GEBModel.setup_precip_forcing
+   GEBModel.setup_precip_forcing_from_grid
+   GEBModel.setup_pressure_forcing_from_grid
+   GEBModel.setup_wind_forcing
+   GEBModel.setup_wind_forcing_from_grid
+   GEBModel.setup_tiles
 
 Attributes
 ----------
@@ -71,17 +62,17 @@ Attributes
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel.region
-   SfincsModel.mask
-   SfincsModel.crs
-   SfincsModel.res
-   SfincsModel.root
-   SfincsModel.config
-   SfincsModel.grid
-   SfincsModel.geoms
-   SfincsModel.forcing
-   SfincsModel.states
-   SfincsModel.results
+   GEBModel.region
+   GEBModel.mask
+   GEBModel.crs
+   GEBModel.res
+   GEBModel.root
+   GEBModel.config
+   GEBModel.grid
+   GEBModel.geoms
+   GEBModel.forcing
+   GEBModel.states
+   GEBModel.results
 
 High level methods
 ------------------
@@ -89,11 +80,11 @@ High level methods
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel.read
-   SfincsModel.write
-   SfincsModel.build
-   SfincsModel.update
-   SfincsModel.set_root
+   GEBModel.read
+   GEBModel.write
+   GEBModel.build
+   GEBModel.update
+   GEBModel.set_root
 
 Low level methods
 -----------------
@@ -101,10 +92,9 @@ Low level methods
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel.update_grid_from_config
-   SfincsModel.update_spatial_attrs
-   SfincsModel.set_forcing_1d
-   SfincsModel.get_model_time
+   GEBModel.update_grid_from_config
+   GEBModel.update_spatial_attrs
+   GEBModel.get_model_time
 
 General methods
 ---------------
@@ -112,37 +102,37 @@ General methods
 .. autosummary::
    :toctree: _generated/
 
-   SfincsModel.setup_config
-   SfincsModel.get_config
-   SfincsModel.set_config
-   SfincsModel.read_config
-   SfincsModel.write_config
+   GEBModel.setup_config
+   GEBModel.get_config
+   GEBModel.set_config
+   GEBModel.read_config
+   GEBModel.write_config
 
-   SfincsModel.set_grid
-   SfincsModel.read_grid
-   SfincsModel.write_grid
+   GEBModel.set_grid
+   GEBModel.read_grid
+   GEBModel.write_grid
 
-   SfincsModel.read_subgrid
-   SfincsModel.write_subgrid
+   GEBModel.read_subgrid
+   GEBModel.write_subgrid
 
-   SfincsModel.set_geoms
-   SfincsModel.read_geoms
-   SfincsModel.write_geoms
+   GEBModel.set_geoms
+   GEBModel.read_geoms
+   GEBModel.write_geoms
 
-   SfincsModel.set_forcing
-   SfincsModel.read_forcing
-   SfincsModel.write_forcing
+   GEBModel.set_forcing
+   GEBModel.read_forcing
+   GEBModel.write_forcing
 
-   SfincsModel.set_states
-   SfincsModel.read_states
-   SfincsModel.write_states
+   GEBModel.set_states
+   GEBModel.read_states
+   GEBModel.write_states
 
-   SfincsModel.set_results
-   SfincsModel.read_results
+   GEBModel.set_results
+   GEBModel.read_results
 
 .. _workflows:
 
-SFINCS workflows
+GEB workflows
 ================
 
 .. autosummary::
@@ -163,7 +153,7 @@ SFINCS workflows
 
 .. _methods:
 
-SFINCS low-level methods
+GEB low-level methods
 ========================
 
 Input/Output methods
@@ -190,29 +180,3 @@ Input/Output methods
    utils.write_drn
    utils.read_sfincs_map_results
    utils.read_sfincs_his_results
-
-Utilities
----------
-
-.. autosummary::
-   :toctree: _generated/
-
-   utils.parse_datetime
-   utils.gdf2linestring
-   utils.linestring2gdf
-   utils.gdf2polygon
-   utils.polygon2gdf
-   utils.get_bounds_vector
-   utils.mask2gdf
-   utils.rotated_grid 
-
-Visualization
--------------
-
-.. autosummary::
-   :toctree: _generated/
-
-   plots.plot_basemap
-   plots.plot_forcing
-   utils.downscale_floodmap
-   workflows.downscale_floodmap_webmercator

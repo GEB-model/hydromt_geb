@@ -890,7 +890,7 @@ class GEBModel(GridModel):
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
-        datasets = [xr.open_dataset(download_path / file, chunks={'time': 10}) for file in parse_files]
+        datasets = [xr.open_dataset(download_path / file, chunks={'time': 365}) for file in parse_files]
         coords_first_dataset = datasets[0].coords
         for dataset in datasets:
             # make sure all datasets have more or less the same coordinates
@@ -1036,7 +1036,7 @@ class GEBModel(GridModel):
                     hurs.name = 'hurs'
                     hurs.to_netcdf(fn)
                 else:
-                    hurs = xr.open_dataset(fn, chunks={'time': 10})['hurs']
+                    hurs = xr.open_dataset(fn, chunks={'time': 365})['hurs']
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f'{year}-{month:02d}')
         
