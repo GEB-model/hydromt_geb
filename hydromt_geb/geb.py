@@ -272,8 +272,7 @@ class GEBModel(GridModel):
         
         land_use = self.data_catalog.get_rasterdataset(
             "esa_worldcover_2020_v100",
-            bbox=[80.1545,15.4513,81.1592,16.132],
-            # geom=self.geoms['areamaps/regions'],
+            geom=self.geoms['areamaps/regions'],
             buffer=200 # 2 km buffer
         )
         reprojected_land_use = land_use.raster.reproject_like(
@@ -1013,7 +1012,8 @@ class GEBModel(GridModel):
             ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
-            self.set_forcing(var, name=f'climate/{variable}')
+            # TODO: Why is compute here needed? Now it's not lazy anymore after this, but it is so slow otherwise...
+            self.set_forcing(var.compute(), name=f'climate/{variable}')
 
     def setup_hurs(self, starttime, endtime):
         hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
