@@ -15,6 +15,7 @@ import xarray as xr
 from collections import defaultdict
 import rioxarray as rxr
 from urllib.parse import urlparse
+from dask.diagnostics import ProgressBar
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -1012,8 +1013,7 @@ class GEBModel(GridModel):
             ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
-            # TODO: Why is compute here needed? Now it's not lazy anymore after this, but it is so slow otherwise...
-            self.set_forcing(var.compute(), name=f'climate/{variable}')
+            self.set_forcing(var, name=f'climate/{variable}')
 
     def setup_hurs(self, starttime, endtime):
         hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
@@ -1224,13 +1224,15 @@ class GEBModel(GridModel):
         self._assert_write_mode
         self.logger.info("Write forcing files")
         for var in self.forcing:
+            self.logger.info(f"Write {var}")
             forcing = self.forcing[var]
             fn = var + '.nc'
             self.model_structure['forcing'][var] = fn
             fp = Path(self.root, fn)
             fp.parent.mkdir(parents=True, exist_ok=True)
             forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-            forcing.to_netcdf(fp, mode='w')
+            with ProgressBar():
+                forcing.to_netcdf(fp, mode='w', engine="netcdf4", encoding={forcing.name: {'chunksizes': (1, forcing.y.size, forcing.x.size), "zlib": True, "complevel": 9}})
 
     def write_table(self):
         if len(self.table) == 0:
