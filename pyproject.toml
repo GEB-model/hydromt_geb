@@ -28,10 +28,6 @@ dynamic = ['version', 'description']
 test = [
 ]
 doc = [
-    'sphinx-design',
-    'ipython',
-    'nbsphinx',
-    'pydata-sphinx-theme'
 ]
 full = [
 ]
