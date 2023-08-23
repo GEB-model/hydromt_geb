@@ -448,12 +448,12 @@ class GEBModel(GridModel):
 
         return ds.isel(bounds), bounds
 
-    def setup_farmers(self, irrigation_sources=None, n_seasons=1):
+    def setup_farmers_from_csv(self, csv_path, irrigation_sources=None, n_seasons=1):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
-        farmers = pd.read_csv(Path(self.root, '..', 'preprocessing', 'agents', 'farmers', 'farmers.csv'), index_col=0)
+        farmers = pd.read_csv(csv_path, index_col=0)
         
         for region_id in regions['region_id']:
             self.logger.info(f"Creating farms for region {region_id}")
@@ -875,6 +875,8 @@ class GEBModel(GridModel):
                         self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
                     elif response['status'] == 'queued':
                         self.logger.debug("Data preparation queued on ISIMIP server, waiting 60 seconds before retrying")
+                    elif response['status'] == 'failed':
+                        self.logger.debug("ISIMIP internal server error, waiting 60 seconds before retrying")
                     else:
                         raise ValueError(f"Could not download files: {response['status']}")
                 time.sleep(60)
