@@ -6,8 +6,10 @@ import hydromt.workflows
 from dateutil.relativedelta import relativedelta
 import logging
 import os
+import math
 import requests
 import time
+import random
 import json
 import numpy as np
 import pandas as pd
@@ -29,7 +31,7 @@ from calendar import monthrange
 import matplotlib.pyplot as plt
 from isimip_client.client import ISIMIPClient
 
-from .workflows import repeat_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, calculate_cell_area
+from .workflows import repeat_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, get_farm_distribution, calculate_cell_area
 
 logger = logging.getLogger(__name__)
 
@@ -448,12 +450,11 @@ class GEBModel(GridModel):
 
         return ds.isel(bounds), bounds
 
-    def setup_farmers_from_csv(self, csv_path, irrigation_sources=None, n_seasons=1):
+    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
-        farmers = pd.read_csv(csv_path, index_col=0)
         
         for region_id in regions['region_id']:
             self.logger.info(f"Creating farms for region {region_id}")
@@ -508,6 +509,257 @@ class GEBModel(GridModel):
 
         for column in farmers.columns:
             self.set_binary(farmers[column], name=f'agents/farmers/{column}')
+
+    def setup_farmers_from_csv(self, path, irrigation_sources=None, n_seasons=1):
+        farmers = pd.read_csv(path, index_col=0)
+        self.setup_farmers(farmers, irrigation_sources, n_seasons)
+
+    def setup_farmers_simple(self, irrigation_sources, region_id_column='UID', country_iso3_column='ISO3'):
+        SIZE_CLASSES_BOUNDARIES = {
+            '< 1 Ha': (0, 10000),
+            '1 - 2 Ha': (10000, 20000),
+            '2 - 5 Ha': (20000, 50000),
+            '5 - 10 Ha': (50000, 100000),
+            '10 - 20 Ha': (100000, 200000),
+            '20 - 50 Ha': (200000, 500000),
+            '50 - 100 Ha': (500000, 1000000),
+            '100 - 200 Ha': (1000000, 2000000),
+            '200 - 500 Ha': (2000000, 5000000),
+            '500 - 1000 Ha': (5000000, 10000000),
+            '> 1000 Ha': (10000000, 20000000)
+        }
+
+        cultivated_land = self.region_subgrid.grid['landsurface/full_region_cultivated_land']
+
+        regions_grid = self.region_subgrid.grid['areamaps/region_subgrid']
+
+        cell_area = self.region_subgrid.grid['areamaps/region_cell_area_subgrid']
+
+        regions_shapes = self.geoms['areamaps/regions']
+        assert country_iso3_column in regions_shapes.columns, f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
+
+        farm_sizes_per_country = self.data_catalog.get_dataframe('lowder_farm_sizes').dropna(subset=['Total'], axis=0).drop(['empty', 'income class'], axis=1)
+        farm_sizes_per_country['Country'] = farm_sizes_per_country['Country'].ffill()
+        # Remove preceding and trailing white space from country names
+        farm_sizes_per_country['Country'] = farm_sizes_per_country['Country'].str.strip()
+        farm_sizes_per_country['Census Year'] = farm_sizes_per_country['Country'].ffill()
+
+        # convert country names to ISO3 codes
+        iso3_codes = {
+            "Albania": "ALB",
+            "Algeria": "DZA",
+            "American Samoa": "ASM",
+            "Argentina": "ARG",
+            "Austria": "AUT",
+            "Bahamas": "BHS",
+            "Barbados": "BRB",
+            "Belgium": "BEL",
+            "Brazil": "BRA",
+            "Bulgaria": "BGR",
+            "Burkina Faso": "BFA",
+            "Chile": "CHL",
+            "Colombia": "COL",
+            "Côte d'Ivoire": "CIV",
+            "Croatia": "HRV",
+            "Cyprus": "CYP",
+            "Czech Republic": "CZE",
+            "Democratic Republic of the Congo": "COD",
+            "Denmark": "DNK",
+            "Dominica": "DMA",
+            "Ecuador": "ECU",
+            "Egypt": "EGY",
+            "Estonia": "EST",
+            "Ethiopia": "ETH",
+            "Fiji": "FJI",
+            "Finland": "FIN",
+            "France": "FRA",
+            "French Polynesia": "PYF",
+            "Georgia": "GEO",
+            "Germany": "DEU",
+            "Greece": "GRC",
+            "Grenada": "GRD",
+            "Guam": "GUM",
+            "Guatemala": "GTM",
+            "Guinea": "GIN",
+            "Honduras": "HND",
+            "India": "IND",
+            "Indonesia": "IDN",
+            "Iran (Islamic Republic of)": "IRN",
+            "Ireland": "IRL",
+            "Italy": "ITA",
+            "Japan": "JPN",
+            "Jamaica": "JAM",
+            "Jordan": "JOR",
+            "Korea, Rep. of": "KOR",
+            "Kyrgyzstan": "KGZ",
+            "Lao People's Democratic Republic": "LAO",
+            "Latvia": "LVA",
+            "Lebanon": "LBN",
+            "Lithuania": "LTU",
+            "Luxembourg": "LUX",
+            "Malta": "MLT",
+            "Morocco": "MAR",
+            "Myanmar": "MMR",
+            "Namibia": "NAM",
+            "Nepal": "NPL",
+            "Netherlands": "NLD",
+            "Nicaragua": "NIC",
+            "Northern Mariana Islands": "MNP",
+            "Norway": "NOR",
+            "Pakistan": "PAK",
+            "Panama": "PAN",
+            "Paraguay": "PRY",
+            "Peru": "PER",
+            "Philippines": "PHL",
+            "Poland": "POL",
+            "Portugal": "PRT",
+            "Puerto Rico": "PRI",
+            "Qatar": "QAT",
+            "Romania": "ROU",
+            "Saint Lucia": "LCA",
+            "Saint Vincent and the Grenadines": "VCT",
+            "Samoa": "WSM",
+            "Senegal": "SEN",
+            "Serbia": "SRB",
+            "Sweden": "SWE",
+            "Switzerland": "CHE",
+            "Thailand": "THA",
+            "Trinidad and Tobago": "TTO",
+            "Turkey": "TUR",
+            "Uganda": "UGA",
+            "United Kingdom": "GBR",
+            "United States of America": "USA",
+            "Uruguay": "URY",
+            "Venezuela (Bolivarian Republic of)": "VEN",
+            "Virgin Islands, United States": "VIR",
+            "Yemen": "YEM",
+            "Cook Islands": "COK",
+            "French Guiana": "GUF",
+            "Guadeloupe": "GLP",
+            "Martinique": "MTQ",
+            "Réunion": "REU",
+            "Canada": "CAN",
+            "China": "CHN",
+            "Guinea Bissau": "GNB",
+            "Hungary": "HUN",
+            "Lesotho": "LSO",
+            "Libya": "LBY",
+            "Malawi": "MWI",
+            "Mozambique": "MOZ",
+            "New Zealand": "NZL",
+            "Slovakia": "SVK",
+            "Slovenia": "SVN",
+            "Spain": "ESP",
+            "St. Kitts & Nevis": "KNA",
+            "Viet Nam": "VNM",
+            "Australia": "AUS",
+            "Djibouti": "DJI",
+            "Mali": "MLI",
+            "Togo": "TGO",
+            "Zambia": "ZMB"
+        }
+        farm_sizes_per_country['ISO3'] = farm_sizes_per_country['Country'].map(iso3_codes)
+        assert not farm_sizes_per_country['ISO3'].isna().any(), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
+
+        all_agents = []
+        for _, region in regions_shapes.iterrows():
+            UID = region[region_id_column]
+            country_ISO3 = region[country_iso3_column]
+            self.logger.debug(f'Processing region {UID} in {country_ISO3}')
+
+            cultivated_land_region = ((regions_grid == UID) & (cultivated_land == True))
+            total_cultivated_land_area_lu = (((regions_grid == UID) & (cultivated_land == True)) * cell_area).sum()
+            average_cell_area_region = cell_area.where(((regions_grid == UID) & (cultivated_land == True))).mean()
+
+            country_farm_sizes = farm_sizes_per_country.loc[(farm_sizes_per_country['ISO3'] == country_ISO3)].drop(['Country', "Census Year", "Total"], axis=1)
+            assert len(country_farm_sizes) == 2, f'Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}'
+            
+            n_holdings = country_farm_sizes.loc[
+                country_farm_sizes['Holdings/ agricultural area'] == 'Holdings'
+            ].iloc[0].drop(['Holdings/ agricultural area', 'ISO3']).replace('..', '0').astype(np.int64)
+            agricultural_area_db_ha = country_farm_sizes.loc[
+                country_farm_sizes['Holdings/ agricultural area'] == 'Agricultural area (Ha) '
+            ].iloc[0].drop(['Holdings/ agricultural area', 'ISO3']).replace('..', '0').astype(np.int64)
+            agricultural_area_db = agricultural_area_db_ha * 10000
+            avg_size_class = agricultural_area_db / n_holdings
+            
+            total_cultivated_land_area_db = agricultural_area_db.sum()
+
+            n_cells_per_size_class = pd.Series(0, index=n_holdings.index)
+
+            for size_class in agricultural_area_db.index:
+                if n_holdings[size_class] > 0:  # if no holdings, no need to calculate
+                    n_holdings[size_class] = n_holdings[size_class] * (total_cultivated_land_area_lu / total_cultivated_land_area_db)
+                    n_cells_per_size_class.loc[size_class] = n_holdings[size_class] * avg_size_class[size_class] / average_cell_area_region
+                    assert not np.isnan(n_cells_per_size_class.loc[size_class])
+
+            assert math.isclose(cultivated_land_region.sum(), n_cells_per_size_class.sum())
+            
+            whole_cells_per_size_class = (n_cells_per_size_class // 1).astype(int)
+            leftover_cells_per_size_class = n_cells_per_size_class % 1
+            whole_cells = whole_cells_per_size_class.sum()
+            n_missing_cells = cultivated_land_region.sum() - whole_cells
+            assert n_missing_cells <= len(agricultural_area_db)
+
+            index = list(zip(leftover_cells_per_size_class.index, leftover_cells_per_size_class % 1))
+            n_cells_to_add = sorted(index, key=lambda x: x[1], reverse=True)[:n_missing_cells.compute().item()]
+            whole_cells_per_size_class.loc[[p[0] for p in n_cells_to_add]] += 1
+
+            region_agents = []
+            for size_class in whole_cells_per_size_class.index:
+                
+                # if no cells for this size class, just continue
+                if whole_cells_per_size_class.loc[size_class] == 0:
+                    continue
+                
+                min_size_m2, max_size_m2 = SIZE_CLASSES_BOUNDARIES[size_class]
+
+                min_size_cells = int(min_size_m2 / average_cell_area_region)
+                min_size_cells = max(min_size_cells, 1)  # farm can never be smaller than one cell
+                max_size_cells = int(max_size_m2 / average_cell_area_region) - 1  # otherwise they overlap with next size class
+                mean_cells_per_agent = int(avg_size_class[size_class] / average_cell_area_region)
+
+                if mean_cells_per_agent < min_size_cells or mean_cells_per_agent > max_size_cells:  # there must be an error in the data, thus assume centred
+                    mean_cells_per_agent = (min_size_cells + max_size_cells) // 2
+
+                number_of_agents_size_class = round(n_holdings[size_class].compute().item())
+                # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
+                if number_of_agents_size_class == 0 and whole_cells_per_size_class[size_class] > 0:
+                    number_of_agents_size_class = 1
+
+                population = pd.DataFrame(index=range(number_of_agents_size_class))
+                
+                offset = whole_cells_per_size_class[size_class] - number_of_agents_size_class * mean_cells_per_agent
+
+                n_farms_size_class, farm_sizes_size_class = get_farm_distribution(number_of_agents_size_class, min_size_cells, max_size_cells, mean_cells_per_agent, offset)
+                assert n_farms_size_class.sum() == number_of_agents_size_class
+                assert (farm_sizes_size_class > 0).all()
+                assert (n_farms_size_class * farm_sizes_size_class).sum() == whole_cells_per_size_class[size_class]
+                farm_sizes = farm_sizes_size_class.repeat(n_farms_size_class)
+                np.random.shuffle(farm_sizes)
+                population['area_n_cells'] = farm_sizes
+                region_agents.append(population)
+
+                assert population['area_n_cells'].sum() == whole_cells_per_size_class[size_class]
+
+            region_agents = pd.concat(region_agents, ignore_index=True)
+            region_agents['region_id'] = UID
+            all_agents.append(region_agents)
+
+        farmers = pd.concat(all_agents, ignore_index=True)
+        # randomly sample from crops        
+        farmers['season_#1_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
+        farmers['season_#2_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
+        farmers['season_#3_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
+        # randomly sample from irrigation sources
+        farmers['irrigation_source']= random.choices(list(irrigation_sources.keys()), k=len(farmers))
+
+        farmers['household_size'] = random.choices([1, 2, 3, 4, 5, 6, 7], k=len(farmers))
+
+        farmers['daily_non_farm_income_family'] = random.choices([50, 100, 200, 500], k=len(farmers))
+        farmers['daily_consumption_per_capita'] = random.choices([50, 100, 200, 500], k=len(farmers))
+
+        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def setup_mannings(self):
         self.logger.info("Setting up Manning's coefficient")
