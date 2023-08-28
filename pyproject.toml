@@ -12,7 +12,7 @@ dependencies = [
     "xesmf",
 ]
 requires-python = ">=3.8" # fix tests to support older versions
-readme = "README.rst"
+readme = "README.md"
 classifiers = [
     # https://pypi.python.org/pypi?%3Aaction=list_classifiers
     "Development Status :: 1 - Beta",
