@@ -185,6 +185,7 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
         raise Exception(f"Could not fit {n} farmers with mean {mean} and offset {offset}.")
 
 def get_farm_distribution(n, x0, x1, mean, offset):
+    assert x0 * n <= n * mean + offset <= x1 * n, "There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size."  # make sure there is a solution to the problem.
     assert mean >= x0
     assert mean <= x1
 
