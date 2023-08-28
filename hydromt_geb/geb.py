@@ -1331,6 +1331,7 @@ class GEBModel(GridModel):
         self.set_forcing(hurs_output, 'climate/hurs')
 
     def setup_wind(self, starttime, endtime):
+        # Can this be done with hydromt?
         global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
         # TODO: Gives memory errors when loading from disk.
         # global_wind_atlas = self.data_catalog.get_rasterdataset(
