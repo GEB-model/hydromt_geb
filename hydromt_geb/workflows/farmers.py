@@ -109,7 +109,7 @@ def create_farms(agents: pd.DataFrame, cultivated_land_tehsil: np.ndarray, farm_
     
     return farms
 
-def fits(n, estimate, farm_sizes, mean, offset):
+def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
     target_area = n * mean + offset
     n_farms = (estimate // 1).astype(int)
     estimated_area_int = (n_farms * farm_sizes).sum()
@@ -251,7 +251,7 @@ def get_farm_distribution(n, x0, x1, mean, offset):
                 break
             growth_factor *= difference
         
-        n_farms, farm_sizes = fits(n, estimate, farm_sizes, mean, offset)
+        n_farms, farm_sizes = fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset)
         assert n == n_farms.sum()
         estimated_area_int = (n_farms * farm_sizes).sum()
         assert estimated_area_int == target_area
