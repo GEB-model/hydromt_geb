@@ -1033,10 +1033,10 @@ class GEBModel(GridModel):
         ), name='routing/lakesreservoirs/subcommand_areas')
 
         # set all lakes with command area to reservoir
-
         waterbodies['volume_flood'] = waterbodies['volume_total']
         waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
-        waterbodies = waterbodies.merge(relative_area_in_region, left_index=True, right_index=True)
+        # set relative area in region for command area. If no command area, set this is set to nan.
+        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
 
         custom_reservoir_capacity = self.data_catalog.get_geodataframe("custom_reservoir_capacity").set_index('waterbody_id')
         custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
