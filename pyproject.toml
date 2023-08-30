@@ -10,6 +10,7 @@ authors = [
 dependencies = [
     "s3fs",
     "xesmf",
+    "hydromt>=0.8.0"
 ]
 requires-python = ">=3.8" # fix tests to support older versions
 readme = "README.md"
@@ -32,22 +33,5 @@ doc = [
 full = [
 ]
 
-[project.urls]
-Documentation = "https://jensdebruijn.github.io/hydromt_geb/"
-Source = "https://github.com/jensdebruijn/hydromt_geb"
-
 [project.entry-points."hydromt.models"]
 geb = "hydromt_geb.geb:GEBModel"
-
-[tool.black]
-line-length = 88
-target-version = ['py38']
-
-[tool.flit.sdist]
-include = ["hydromt_geb"]
-exclude = ["docs", "examples", "envs", "tests", "binder", ".github", "sandbox"]
-
-[tool.pytest.ini_options]
-filterwarnings = [
-    "ignore:distutils Version classes are deprecated:DeprecationWarning",
-]
