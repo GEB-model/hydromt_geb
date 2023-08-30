@@ -9,6 +9,7 @@ authors = [
 ]
 dependencies = [
     "s3fs",
+    "esmpy>=8.4.2",
     "xesmf",
     "hydromt>=0.8.0"
 ]
