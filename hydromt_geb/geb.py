@@ -18,6 +18,7 @@ from collections import defaultdict
 import rioxarray as rxr
 from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
+from typing import Union, Any
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -81,8 +82,8 @@ class GEBModel(GridModel):
         self,
         region: dict,
         sub_grid_factor: int,
-        hydrography_fn: Optional[str] = None,
-        basin_index_fn: Optional[str] = None,
+        hydrography_fn: str,
+        basin_index_fn: str,
     ) -> xr.DataArray:
         """Creates a 2D regular grid or reads an existing grid.
         An 2D regular grid will be created from a geometry (geom_fn) or bbox. If an existing
@@ -97,19 +98,16 @@ class GEBModel(GridModel):
             Dictionary describing region of interest, e.g.:
             * {'basin': [x, y]}
 
-            Region must be of kind [grid, bbox, geom, basin, subbasin, interbasin].
+            Region must be of kind [basin, subbasin].
+        sub_grid_factor : int
+            GEB implements a subgrid. This parameter determines the factor by which the subgrid is smaller than the original grid.
         hydrography_fn : str
-            Name of data source for hydrography data. Required if region is of kind 'basin', 'subbasin' or 'interbasin'.
+            Name of data source for hydrography data.
         basin_index_fn : str
             Name of data source with basin (bounding box) geometries associated with
-            the 'basins' layer of `hydrography_fn`. Only required if the `region` is
-            based on a (sub)(inter)basins without a 'bounds' argument.
-
-        Returns
-        -------
-        grid : xr.DataArray
-            Generated grid mask.
+            the 'basins' layer of `hydrography_fn`.
         """
+
         assert sub_grid_factor > 10, "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
         assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
         self.subgrid_factor = sub_grid_factor
@@ -178,13 +176,71 @@ class GEBModel(GridModel):
         self.subgrid.set_grid(submask)
         self.subgrid.factor = sub_grid_factor
 
+    def setup_cell_area_map(self) -> None:
+        """
+        Sets up the cell area map for the model.
+
+        Raises
+        ------
+        ValueError
+            If the grid mask is not available.
+
+        Notes
+        -----
+        This method prepares the cell area map for the model by calculating the area of each cell in the grid. It first
+        retrieves the grid mask from the `areamaps/grid_mask` attribute of the grid, and then calculates the cell area
+        using the `calculate_cell_area()` function. The resulting cell area map is then set as the `areamaps/cell_area`
+        attribute of the grid.
+
+        Additionally, this method sets up a subgrid for the cell area map by creating a new grid with the same extent as
+        the subgrid, and then repeating the cell area values from the main grid to the subgrid using the `repeat_grid()`
+        function, and correcting for the subgrid factor. Thus, every subgrid cell within a grid cell has the same value.
+        The resulting subgrid cell area map is then set as the `areamaps/sub_cell_area` attribute of the subgrid.
+        """
+        self.logger.info(f"Preparing cell area map.")
+        mask = self.grid['areamaps/grid_mask'].raster
+        affine = mask.transform
+
+        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area', lazy=True)
+        cell_area.data = calculate_cell_area(affine, mask.shape)
+        self.set_grid(cell_area)
+
+        sub_cell_area = hydromt.raster.full(
+            self.subgrid.grid.raster.coords,
+            nodata=cell_area.raster.nodata,
+            dtype=cell_area.dtype,
+            name='areamaps/sub_cell_area',
+            lazy=True
+        )
+
+        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
+        self.subgrid.set_grid(sub_cell_area)
+
     def setup_crops(
             self,
-            crop_ids,
-            crop_variables,
-            crop_prices=None,
-            cultivation_costs=None,
+            crop_ids: dict,
+            crop_variables: dict,
+            crop_prices=Optional[Union[str, dict[str, Any]]] = None,
+            cultivation_costs=Optional[Union[str, Dict[str, Any]]] = None,
         ):
+        """
+        Sets up the crops data for the model.
+
+        Parameters
+        ----------
+        crop_ids : dict
+            A dictionary of crop IDs and names.
+        crop_variables : dict
+            A dictionary of crop variables and their values.
+        crop_prices : str or dict, optional
+            The file path or dictionary of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
+            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+            IDs and their prices.
+        cultivation_costs : str or dict, optional
+            The file path or dictionary of cultivation costs. If a file path is provided, the file is loaded and parsed as
+            JSON. The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of
+            crop IDs and their cultivation costs.
+        """
         self.logger.info(f"Preparing crops data")
         self.set_dict(crop_ids, name='crops/crop_ids')
         self.set_dict(crop_variables, name='crops/crop_variables')
@@ -221,27 +277,332 @@ class GEBModel(GridModel):
                 }
             self.set_dict(cultivation_costs, name='crops/cultivation_costs')
 
-    def setup_cell_area_map(self):
-        self.logger.info(f"Preparing cell area map.")
-        mask = self.grid['areamaps/grid_mask'].raster
-        affine = mask.transform
+    def setup_mannings(self) -> None:
+        """
+        Sets up the Manning's coefficient for the model.
 
-        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area', lazy=True)
-        cell_area.data = calculate_cell_area(affine, mask.shape)
-        self.set_grid(cell_area)
+        Notes
+        -----
+        This method sets up the Manning's coefficient for the model by calculating the coefficient based on the cell area
+        and topography of the grid. It first calculates the upstream area of each cell in the grid using the
+        `routing/kinematic/upstream_area` attribute of the grid. It then calculates the coefficient using the formula:
 
-        sub_cell_area = hydromt.raster.full(
-            self.subgrid.grid.raster.coords,
-            nodata=cell_area.raster.nodata,
-            dtype=cell_area.dtype,
-            name='areamaps/sub_cell_area',
-            lazy=True
+            C = 0.025 + 0.015 * (2 * A / U) + 0.030 * (Z / 2000)
+
+        where C is the Manning's coefficient, A is the cell area, U is the upstream area, and Z is the elevation of the cell.
+
+        The resulting Manning's coefficient is then set as the `routing/kinematic/mannings` attribute of the grid using the
+        `set_grid()` method.
+        """
+        self.logger.info("Setting up Manning's coefficient")
+        a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
+        a = xr.where(a > 1, 1, a)
+        b = self.grid['landsurface/topo/elevation'] / 2000
+        b = xr.where(b > 1, 1, b)
+        
+        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings', lazy=True)
+        mannings.data = 0.025 + 0.015 * a + 0.030 * b
+        self.set_grid(mannings)
+
+    def setup_channel_width(self, minimum_width: float) -> None:
+        """
+        Sets up the channel width for the model.
+
+        Parameters
+        ----------
+        minimum_width : float
+            The minimum channel width in meters.
+
+        Notes
+        -----
+        This method sets up the channel width for the model by calculating the width of each channel based on the upstream
+        area of each cell in the grid. It first retrieves the upstream area of each cell from the `routing/kinematic/upstream_area`
+        attribute of the grid, and then calculates the channel width using the formula:
+
+            W = A / 500
+
+        where W is the channel width, and A is the upstream area of the cell. The resulting channel width is then set as
+        the `routing/kinematic/channel_width` attribute of the grid using the `set_grid()` method.
+
+        Additionally, this method sets a minimum channel width by replacing any channel width values that are less than the
+        minimum width with the minimum width.
+        """
+        self.logger.info("Setting up channel width")
+        channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
+        channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
+        
+        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width', lazy=True)
+        channel_width.data = channel_width_data
+        
+        self.set_grid(channel_width)
+
+    def setup_channel_depth(self) -> None:
+        """
+        Sets up the channel depth for the model.
+
+        Raises
+        ------
+        AssertionError
+            If the upstream area of any cell in the grid is less than or equal to zero.
+
+        Notes
+        -----
+        This method sets up the channel depth for the model by calculating the depth of each channel based on the upstream
+        area of each cell in the grid. It first retrieves the upstream area of each cell from the `routing/kinematic/upstream_area`
+        attribute of the grid, and then calculates the channel depth using the formula:
+
+            D = 0.27 * A ** 0.26
+
+        where D is the channel depth, and A is the upstream area of the cell. The resulting channel depth is then set as
+        the `routing/kinematic/channel_depth` attribute of the grid using the `set_grid()` method.
+
+        Additionally, this method raises an `AssertionError` if the upstream area of any cell in the grid is less than or
+        equal to zero. This is done to ensure that the upstream area is a positive value, which is required for the channel
+        depth calculation to be valid.
+        """
+        self.logger.info("Setting up channel depth")
+        assert ((self.grid['routing/kinematic/upstream_area'] > 0) | ~self.grid.mask).all()
+        channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
+        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
+        channel_depth.data = channel_depth_data
+        self.set_grid(channel_depth)
+
+    def setup_channel_ratio(self) -> None:
+        """
+        Sets up the channel ratio for the model.
+
+        Raises
+        ------
+        AssertionError
+            If the channel length of any cell in the grid is less than or equal to zero, or if the channel ratio of any
+            cell in the grid is less than zero.
+
+        Notes
+        -----
+        This method sets up the channel ratio for the model by calculating the ratio of the channel area to the cell area
+        for each cell in the grid. It first retrieves the channel width and length from the `routing/kinematic/channel_width`
+        and `routing/kinematic/channel_length` attributes of the grid, and then calculates the channel area using the
+        product of the width and length. It then calculates the channel ratio by dividing the channel area by the cell area
+        retrieved from the `areamaps/cell_area` attribute of the grid.
+
+        The resulting channel ratio is then set as the `routing/kinematic/channel_ratio` attribute of the grid using the
+        `set_grid()` method. Any channel ratio values that are greater than 1 are replaced with 1 (i.e., the whole cell is a channel).
+
+        Additionally, this method raises an `AssertionError` if the channel length of any cell in the grid is less than or
+        equal to zero, or if the channel ratio of any cell in the grid is less than zero. These checks are done to ensure
+        that the channel length and ratio are positive values, which are required for the channel ratio calculation to be
+        valid.
+        """
+        self.logger.info("Setting up channel ratio")
+        assert ((self.grid['routing/kinematic/channel_length'] > 0) | ~self.grid.mask).all()
+        channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
+        channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
+        channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
+        assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
+        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
+        channel_ratio.data = channel_ratio_data
+        self.set_grid(channel_ratio)
+
+    def setup_elevation_STD(self) -> None:
+        """
+        Sets up the standard deviation of elevation for the model.
+        
+        Notes
+        -----
+        This method sets up the standard deviation of elevation for the model by retrieving high-resolution elevation data
+        from the MERIT dataset and calculating the standard deviation of elevation for each cell in the grid. 
+        
+        MERIT data has a half cell offset. Therefore, this function first corrects for this offset.  It then selects the
+        high-resolution elevation data from the MERIT dataset using the grid coordinates of the model, and calculates the
+        standard deviation of elevation for each cell in the grid using the `np.std()` function.
+
+        The resulting standard deviation of elevation is then set as the `landsurface/topo/elevation_STD` attribute of
+        the grid using the `set_grid()` method.
+        """
+        self.logger.info("Setting up elevation standard deviation")
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
+        # There is a half degree offset in MERIT data
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
         )
 
-        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
-        self.subgrid.set_grid(sub_cell_area)
+        # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
+        MERIT_ul = MERIT.assign_coords(
+            x=MERIT.coords['x'] - MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+        )
+
+        scaling = 10
+
+        # find the upper left corner of the grid cells in self.grid
+        y_step = self.grid.get_index('y')[1] - self.grid.get_index('y')[0]
+        x_step = self.grid.get_index('x')[1] - self.grid.get_index('x')[0]
+        upper_left_y = self.grid.get_index('y')[0] - y_step / 2
+        upper_left_x = self.grid.get_index('x')[0] - x_step / 2
+        
+        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT.rio.resolution()[1] / 100)
+        assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        ymin = ymin.argmax()
+        ymax = ymin + self.grid.mask.shape[0] * scaling
+        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT.rio.resolution()[0] / 100)
+        assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        xmin = xmin.argmax()
+        xmax = xmin + self.grid.mask.shape[1] * scaling
+
+        # select data from MERIT using the grid coordinates
+        high_res_elevation_data = MERIT.isel(
+            y=slice(ymin, ymax),
+            x=slice(xmin, xmax)
+        )
+
+        self.MERIT_grid.set_grid(MERIT.isel(
+            y=slice(ymin-1, ymax+1),
+            x=slice(xmin-1, xmax+1)
+        ), name='landsurface/topo/subgrid_elevation')
+
+        elevation_per_cell = (
+            high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
+        ).swapaxes(1, 2).reshape(-1, scaling, scaling))
+
+        elevation_per_cell = high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling).swapaxes(1, 2)
+
+        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD', lazy=True)
+        standard_deviation.data = np.std(elevation_per_cell, axis=(2,3))
+        self.set_grid(standard_deviation)
+
+    def setup_soil_parameters(self, interpolation_method='nearest') -> None:
+        """
+        Sets up the soil parameters for the model.
+
+        Parameters
+        ----------
+        interpolation_method : str, optional
+            The interpolation method to use when interpolating the soil parameters. Default is 'nearest'.
+
+        Notes
+        -----
+        This method sets up the soil parameters for the model by retrieving soil data from the CWATM dataset and interpolating
+        the data to the model grid. It first retrieves the soil dataset from the `data_catalog`, and
+        then retrieves the soil parameters and storage depth data for each soil layer. It then interpolates the data to the
+        model grid using the specified interpolation method and sets the resulting grids as attributes of the model.
+
+        Additionally, this method sets up the percolation impeded and crop group data by retrieving the corresponding data
+        from the soil dataset and interpolating it to the model grid.
+
+        The resulting soil parameters are set as attributes of the model with names of the form 'soil/{parameter}{soil_layer}',
+        where {parameter} is the name of the soil parameter (e.g. 'alpha', 'ksat', etc.) and {soil_layer} is the index of the
+        soil layer (1-3; 1 is the top layer). The storage depth data is set as attributes of the model with names of the
+        form 'soil/storage_depth{soil_layer}'. The percolation impeded and crop group data are set as attributes of the model
+        with names 'soil/percolation_impeded' and 'soil/cropgrp', respectively.
+        """
+        self.logger.info('Setting up soil parameters')
+        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
+        for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
+            for soil_layer in range(1, 4):
+                ds = soil_ds[f'{parameter}{soil_layer}_5min']
+                self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/{parameter}{soil_layer}')
+
+        for soil_layer in range(1, 3):
+            ds = soil_ds[f'storageDepth{soil_layer}']
+            self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/storage_depth{soil_layer}')
+
+        ds = soil_ds['percolationImp']
+        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/percolation_impeded')
+        ds = soil_ds['cropgrp']
+        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
+
+    def setup_land_use_parameters(self, interpolation_method='nearest') -> None:
+        """
+        Sets up the land use parameters for the model.
+
+        Parameters
+        ----------
+        interpolation_method : str, optional
+            The interpolation method to use when interpolating the land use parameters. Default is 'nearest'.
+
+        Notes
+        -----
+        This method sets up the land use parameters for the model by retrieving land use data from the CWATM dataset and
+        interpolating the data to the model grid. It first retrieves the land use dataset from the `data_catalog`, and 
+        then retrieves the maximum root depth and root fraction data for each land use type. It then
+        interpolates the data to the model grid using the specified interpolation method and sets the resulting grids as
+        attributes of the model with names of the form 'landcover/{land_use_type}/{parameter}_{land_use_type}', where
+        {land_use_type} is the name of the land use type (e.g. 'forest', 'grassland', etc.) and {parameter} is the name of
+        the land use parameter (e.g. 'maxRootDepth', 'rootFraction1', etc.).
+
+        Additionally, this method sets up the crop coefficient and interception capacity data for each land use type by
+        retrieving the corresponding data from the land use dataset and interpolating it to the model grid. The crop
+        coefficient data is set as attributes of the model with names of the form 'landcover/{land_use_type}/cropCoefficient{land_use_type_netcdf_name}_10days',
+        where {land_use_type_netcdf_name} is the name of the land use type in the CWATM dataset. The interception capacity
+        data is set as attributes of the model with names of the form 'landcover/{land_use_type}/interceptCap{land_use_type_netcdf_name}_10days',
+        where {land_use_type_netcdf_name} is the name of the land use type in the CWATM dataset.
+
+        The resulting land use parameters are set as attributes of the model with names of the form 'landcover/{land_use_type}/{parameter}_{land_use_type}',
+        where {land_use_type} is the name of the land use type (e.g. 'forest', 'grassland', etc.) and {parameter} is the name of
+        the land use parameter (e.g. 'maxRootDepth', 'rootFraction1', etc.). The crop coefficient data is set as attributes
+        of the model with names of the form 'landcover/{land_use_type}/cropCoefficient{land_use_type_netcdf_name}_10days',
+        where {land_use_type_netcdf_name} is the name of the land use type in the CWATM dataset. The interception capacity
+        data is set as attributes of the model with names of the form 'landcover/{land_use_type}/interceptCap{land_use_type_netcdf_name}_10days',
+        where {land_use_type_netcdf_name} is the name of the land use type in the CWATM dataset.
+        """
+        self.logger.info('Setting up land use parameters')
+        for land_use_type, land_use_type_netcdf_name in (
+            ('forest', 'Forest'),
+            ('grassland', 'Grassland'),
+            ('irrPaddy', 'irrPaddy'),
+            ('irrNonPaddy', 'irrNonPaddy'),
+        ):
+            self.logger.info(f'Setting up land use parameters for {land_use_type}')
+            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min")
+            
+            for parameter in ('maxRootDepth', 'rootFraction1'):
+                self.set_grid(
+                    self.interpolate(land_use_ds[parameter], interpolation_method),
+                    name=f'landcover/{land_use_type}/{parameter}_{land_use_type}'
+                )
+            
+            parameter = f'cropCoefficient{land_use_type_netcdf_name}_10days'               
+            self.set_forcing(
+                self.interpolate(land_use_ds[parameter], interpolation_method),
+                name=f'landcover/{land_use_type}/{parameter}'
+            )
+            if land_use_type in ('forest', 'grassland'):
+                parameter = f'interceptCap{land_use_type_netcdf_name}_10days'               
+                self.set_forcing(
+                    self.interpolate(land_use_ds[parameter], interpolation_method),
+                    name=f'landcover/{land_use_type}/{parameter}'
+                )
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
+        """
+        Sets up the (administrative) regions and land use data for GEB. The regions can be used for multiple purposes,
+        for example for creating the agents in the model, assigning unique crop prices and other economic variables
+        per region and for aggregating the results.
+
+        Parameters
+        ----------
+        region_database : str, optional
+            The name of the region database to use. Default is 'gadm_level1'.
+        unique_region_id : str, optional
+            The name of the column in the region database that contains the unique region ID. Default is 'UID',
+            which is the unique identifier for the GADM database.
+        river_threshold : int, optional
+            The threshold value to use when identifying rivers in the MERIT dataset. Default is 100.
+
+        Notes
+        -----
+        This method sets up the regions and land use data for the hydrological model. It first retrieves the region data from
+        the specified region database and sets it as a geometry in the model. It then pads the subgrid to cover the entire
+        region and retrieves the land use data from the ESA WorldCover dataset. The land use data is reprojected to the
+        padded subgrid and the region ID is rasterized onto the subgrid. The cell area for each region is calculated and
+        set as a grid in the model. The MERIT dataset is used to identify rivers, which are set as a grid in the model. The
+        land use data is reclassified into five classes and set as a grid in the model. Finally, the cultivated land is
+        identified and set as a grid in the model.
+
+        The resulting grids are set as attributes of the model with names of the form 'areamaps/{grid_name}' or
+        'landsurface/{grid_name}'.
+        """
         self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
@@ -370,6 +731,210 @@ class GEBModel(GridModel):
 
         # Same workaround as above
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
+
+    def setup_waterbodies(self):
+        """
+        Sets up the waterbodies for the hydrological model.
+
+        Notes
+        -----
+        This method sets up the waterbodies for the hydrological model. It first retrieves the waterbody data from the
+        specified data catalog and sets it as a geometry in the model. It then rasterizes the waterbody data onto the model
+        grid and the subgrid using the `rasterize` method of the `raster` object. The resulting grids are set as attributes
+        of the model with names of the form 'routing/lakesreservoirs/{grid_name}'.
+
+        The method also retrieves the reservoir command area data from the data catalog and calculates the area of each
+        command area that falls within the model region. The `waterbody_id` key is used to do the matching between these
+        databases. The relative area of each command area within the model region is calculated and set as a column in
+        the waterbody data. The method sets all lakes with a command area to be reservoirs and updates the waterbody data
+        with any custom reservoir capacity data from the data catalog.
+
+        TODO: Make the reservoir command area data optional.
+
+        The resulting waterbody data is set as a table in the model with the name 'routing/lakesreservoirs/basin_lakes_data'.
+        """
+        self.logger.info('Setting up waterbodies')
+        waterbodies = self.data_catalog.get_geodataframe(
+            "hydro_lakes",
+            geom=self.staticgeoms['areamaps/region'],
+            predicate="intersects",
+            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
+        ).set_index('waterbody_id')
+
+        self.set_grid(self.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=0,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/lakesResID')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=0,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/sublakesResID')
+
+        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
+        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
+        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
+        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
+        command_areas['area'] = command_areas.to_crs(3857).area
+        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
+        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
+        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
+        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
+
+        self.set_grid(self.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/command_areas')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/subcommand_areas')
+
+        # set all lakes with command area to reservoir
+        waterbodies['volume_flood'] = waterbodies['volume_total']
+        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+        # set relative area in region for command area. If no command area, set this is set to nan.
+        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
+
+        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
+        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
+
+        waterbodies.update(custom_reservoir_capacity)
+        waterbodies = waterbodies.drop('geometry', axis=1)
+
+        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
+
+    def setup_water_demand(self):
+        """
+        Sets up the water demand data for the hydrological model.
+
+        Notes
+        -----
+        This method sets up the water demand data for the hydrological model. It retrieves the domestic, industry, and
+        livestock water demand data from the specified data catalog and sets it as forcing data in the model. The domestic
+        water demand and consumption data are retrieved from the 'cwatm_domestic_water_demand' dataset, while the industry
+        water demand and consumption data are retrieved from the 'cwatm_industry_water_demand' dataset. The livestock water
+        consumption data is retrieved from the 'cwatm_livestock_water_demand' dataset.
+
+        The domestic water demand and consumption data are provided at a monthly time step, while the industry water demand
+        and consumption data are provided at an annual time step. The livestock water consumption data is provided at a
+        monthly time step, but is assumed to be constant over the year.
+
+        The resulting water demand data is set as forcing data in the model with names of the form 'water_demand/{demand_type}'.
+        """
+        self.logger.info('Setting up water demand')
+        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
+        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
+        domestic_water_demand.name = 'domestic_water_demand'
+        self.set_forcing(domestic_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_demand')
+
+        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
+        domestic_water_consumption.name = 'domestic_water_consumption'
+        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
+        self.set_forcing(domestic_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_consumption')
+
+        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
+        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
+        industry_water_demand.name = 'industry_water_demand'
+        self.set_forcing(industry_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_demand')
+
+        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
+        industry_water_consumption.name = 'industry_water_consumption'
+        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
+        self.set_forcing(industry_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_consumption')
+
+        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
+        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
+        livestock_water_consumption.name = 'livestock_water_consumption'
+        self.set_forcing(livestock_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/livestock_water_consumption')
+
+    def setup_modflow(self, epsg: int, resolution: float):
+        """
+        Sets up the MODFLOW grid for the hydrological model.
+
+        Parameters
+        ----------
+        epsg : int
+            The EPSG code for the coordinate reference system of the model grid.
+        resolution : float
+            The resolution of the model grid in meters.
+
+        Notes
+        -----
+        This method sets up the MODFLOW grid for the hydrological model. These grids don't match because one is based on
+        a geographic coordinate reference system and the other is based on a projected coordinate reference system. Therefore,
+        this function creates a projected MODFLOW grid and then calculates the intersection between the model grid and the MODFLOW
+        grid.
+
+        It first retrieves the MODFLOW mask from the `get_modflow_transform_and_shape` function, which calculates the affine
+        transform and shape of the MODFLOW grid based on the resolution and EPSG code of the model grid. The MODFLOW mask is
+        created using the `full_from_transform` method of the `raster` object, which creates a binary grid with the same affine
+        transform and shape as the MODFLOW grid.
+
+        The method then creates an intersection between the model grid and the MODFLOW grid using the `create_indices`
+        function. The resulting indices are used to match cells between the model grid and the MODFLOW grid. The indices
+        are saved for use in the model.
+
+        Finally, the elevation data for the MODFLOW grid is retrieved from the MERIT dataset and reprojected to the MODFLOW
+        grid using the `reproject_like` method of the `raster` object. The resulting elevation grid is set as a grid in the
+        model with the name 'groundwater/modflow/modflow_elevation'.
+        """
+        self.logger.info("Setting up MODFLOW")
+        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
+            self.grid.mask,
+            4326,
+            epsg,
+            resolution
+        )
+        modflow_mask = hydromt.raster.full_from_transform(
+            modflow_affine,
+            MODFLOW_shape,
+            nodata=0,
+            dtype=np.int8,
+            name=f'groundwater/modflow/modflow_mask',
+            crs=epsg,
+            lazy=True
+        )
+
+        intersection = create_indices(
+            self.grid.mask.raster.transform,
+            self.grid.mask.raster.shape,
+            4326,
+            modflow_affine,
+            MODFLOW_shape,
+            epsg
+        )
+
+        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
+        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
+        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
+        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
+        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
+
+        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
+        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
+
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
+        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
+        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT_x_step / 2,
+            y=MERIT.coords['y'] + MERIT_y_step / 2
+        )
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
+
+        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
 
     def setup_economic_data(self):
         self.logger.info('Setting up economic data')
@@ -761,99 +1326,6 @@ class GEBModel(GridModel):
 
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
-    def setup_mannings(self):
-        self.logger.info("Setting up Manning's coefficient")
-        a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
-        a = xr.where(a > 1, 1, a)
-        b = self.grid['landsurface/topo/elevation'] / 2000
-        b = xr.where(b > 1, 1, b)
-        
-        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings', lazy=True)
-        mannings.data = 0.025 + 0.015 * a + 0.030 * b
-        self.set_grid(mannings)
-
-    def setup_channel_width(self, minimum_width):
-        self.logger.info("Setting up channel width")
-        channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
-        channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
-        
-        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width', lazy=True)
-        channel_width.data = channel_width_data
-        
-        self.set_grid(channel_width)
-
-    def setup_channel_depth(self):
-        self.logger.info("Setting up channel depth")
-        assert ((self.grid['routing/kinematic/upstream_area'] > 0) | ~self.grid.mask).all()
-        channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
-        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
-        channel_depth.data = channel_depth_data
-        self.set_grid(channel_depth)
-
-    def setup_channel_ratio(self):
-        self.logger.info("Setting up channel ratio")
-        assert ((self.grid['routing/kinematic/channel_length'] > 0) | ~self.grid.mask).all()
-        channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
-        channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
-        channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
-        assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
-        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
-        channel_ratio.data = channel_ratio_data
-        self.set_grid(channel_ratio)
-
-    def setup_elevation_STD(self):
-        self.logger.info("Setting up elevation standard deviation")
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
-        # There is a half degree offset in MERIT data
-        MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
-            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
-        )
-
-        # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
-        MERIT_ul = MERIT.assign_coords(
-            x=MERIT.coords['x'] - MERIT.rio.resolution()[0] / 2,
-            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
-        )
-
-        scaling = 10
-
-        # find the upper left corner of the grid cells in self.grid
-        y_step = self.grid.get_index('y')[1] - self.grid.get_index('y')[0]
-        x_step = self.grid.get_index('x')[1] - self.grid.get_index('x')[0]
-        upper_left_y = self.grid.get_index('y')[0] - y_step / 2
-        upper_left_x = self.grid.get_index('x')[0] - x_step / 2
-        
-        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT.rio.resolution()[1] / 100)
-        assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
-        ymin = ymin.argmax()
-        ymax = ymin + self.grid.mask.shape[0] * scaling
-        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT.rio.resolution()[0] / 100)
-        assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
-        xmin = xmin.argmax()
-        xmax = xmin + self.grid.mask.shape[1] * scaling
-
-        # select data from MERIT using the grid coordinates
-        high_res_elevation_data = MERIT.isel(
-            y=slice(ymin, ymax),
-            x=slice(xmin, xmax)
-        )
-
-        self.MERIT_grid.set_grid(MERIT.isel(
-            y=slice(ymin-1, ymax+1),
-            x=slice(xmin-1, xmax+1)
-        ), name='landsurface/topo/subgrid_elevation')
-
-        elevation_per_cell = (
-            high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
-        ).swapaxes(1, 2).reshape(-1, scaling, scaling))
-
-        elevation_per_cell = high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling).swapaxes(1, 2)
-
-        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD', lazy=True)
-        standard_deviation.data = np.std(elevation_per_cell, axis=(2,3))
-        self.set_grid(standard_deviation)
-
     def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
         return ds.interp(
             method=interpolation_method,
@@ -862,189 +1334,6 @@ class GEBModel(GridModel):
                 xdim: self.grid.coords['x'].values
             }
         )
-    
-    def setup_modflow(self, epsg, resolution):
-        self.logger.info("Setting up MODFLOW")
-        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid.mask,
-            4326,
-            epsg,
-            resolution
-        )
-        modflow_mask = hydromt.raster.full_from_transform(
-            modflow_affine,
-            MODFLOW_shape,
-            nodata=0,
-            dtype=np.int8,
-            name=f'groundwater/modflow/modflow_mask',
-            crs=epsg,
-            lazy=True
-        )
-
-        intersection = create_indices(
-            self.grid.mask.raster.transform,
-            self.grid.mask.raster.shape,
-            4326,
-            modflow_affine,
-            MODFLOW_shape,
-            epsg
-        )
-
-        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
-        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
-        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
-        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
-        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
-
-        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
-        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
-
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
-        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
-        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
-        MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT_x_step / 2,
-            y=MERIT.coords['y'] + MERIT_y_step / 2
-        )
-        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
-
-        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
-
-    def setup_soil_parameters(self, interpolation_method='nearest'):
-        self.logger.info('Setting up soil parameters')
-        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
-        for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
-            for soil_layer in range(1, 4):
-                ds = soil_ds[f'{parameter}{soil_layer}_5min']
-                self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/{parameter}{soil_layer}')
-
-        for soil_layer in range(1, 3):
-            ds = soil_ds[f'storageDepth{soil_layer}']
-            self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/storage_depth{soil_layer}')
-
-        ds = soil_ds['percolationImp']
-        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/percolation_impeded')
-        ds = soil_ds['cropgrp']
-        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
-
-    def setup_land_use_parameters(self, interpolation_method='nearest'):
-        self.logger.info('Setting up land use parameters')
-        for land_use_type, land_use_type_netcdf_name in (
-            ('forest', 'Forest'),
-            ('grassland', 'Grassland'),
-            ('irrPaddy', 'irrPaddy'),
-            ('irrNonPaddy', 'irrNonPaddy'),
-        ):
-            self.logger.info(f'Setting up land use parameters for {land_use_type}')
-            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min")
-            
-            for parameter in ('maxRootDepth', 'rootFraction1'):
-                self.set_grid(
-                    self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f'landcover/{land_use_type}/{parameter}_{land_use_type}'
-                )
-            
-            parameter = f'cropCoefficient{land_use_type_netcdf_name}_10days'               
-            self.set_forcing(
-                self.interpolate(land_use_ds[parameter], interpolation_method),
-                name=f'landcover/{land_use_type}/{parameter}'
-            )
-            if land_use_type in ('forest', 'grassland'):
-                parameter = f'interceptCap{land_use_type_netcdf_name}_10days'               
-                self.set_forcing(
-                    self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f'landcover/{land_use_type}/{parameter}'
-                )
-
-    def setup_water_demand(self):
-        self.logger.info('Setting up water demand')
-        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
-        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
-        domestic_water_demand.name = 'domestic_water_demand'
-        self.set_forcing(domestic_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_demand')
-
-        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
-        domestic_water_consumption.name = 'domestic_water_consumption'
-        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
-        self.set_forcing(domestic_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_consumption')
-
-        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
-        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
-        industry_water_demand.name = 'industry_water_demand'
-        self.set_forcing(industry_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_demand')
-
-        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
-        industry_water_consumption.name = 'industry_water_consumption'
-        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
-        self.set_forcing(industry_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_consumption')
-
-        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
-        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
-        livestock_water_consumption.name = 'livestock_water_consumption'
-        self.set_forcing(livestock_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/livestock_water_consumption')
-
-    def setup_waterbodies(self):
-        self.logger.info('Setting up waterbodies')
-        waterbodies = self.data_catalog.get_geodataframe(
-            "hydro_lakes",
-            geom=self.staticgeoms['areamaps/region'],
-            predicate="intersects",
-            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
-        ).set_index('waterbody_id')
-
-        self.set_grid(self.grid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/lakesResID')
-        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/sublakesResID')
-
-        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
-        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
-        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
-        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
-        command_areas['area'] = command_areas.to_crs(3857).area
-        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
-        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
-        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
-        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
-
-        self.set_grid(self.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/command_areas')
-        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/subcommand_areas')
-
-        # set all lakes with command area to reservoir
-        waterbodies['volume_flood'] = waterbodies['volume_total']
-        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
-        # set relative area in region for command area. If no command area, set this is set to nan.
-        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
-
-        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
-        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
-
-        waterbodies.update(custom_reservoir_capacity)
-        waterbodies = waterbodies.drop('geometry', axis=1)
-
-        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
 
     def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0):
         # if starttime is specified, endtime must be specified as well
