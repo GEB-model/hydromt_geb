@@ -129,7 +129,7 @@ class GEBModel(GridModel):
                 **region
             )
             region.update(xy=xy)
-            ds_hydro = ds_org.raster.clip_geom(geom)
+            ds_hydro = ds_org.raster.clip_geom(geom, mask=True)
         else:
             raise ValueError(
                 f"Region for grid must of kind [basin, subbasin], kind {kind} not understood."
@@ -1038,7 +1038,7 @@ class GEBModel(GridModel):
         # set relative area in region for command area. If no command area, set this is set to nan.
         waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
 
-        custom_reservoir_capacity = self.data_catalog.get_geodataframe("custom_reservoir_capacity").set_index('waterbody_id')
+        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
         custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
 
         waterbodies.update(custom_reservoir_capacity)
