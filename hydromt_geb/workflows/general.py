@@ -18,6 +18,20 @@ def calculate_cell_area(affine_transform, shape):
     height_m = distance_1_degree_latitude * abs(affine_transform.e)
     return (width_m * height_m)
 
+def clip_with_grid(ds, mask):
+    assert ds.shape == mask.shape
+    cells_along_y = mask.sum(dim='x').values.ravel()
+    miny = (cells_along_y > 0).argmax().item()
+    maxy = cells_along_y.size - (cells_along_y[::-1] > 0).argmax().item()
+    
+    cells_along_x = mask.sum(dim='y').values.ravel()
+    minx = (cells_along_x > 0).argmax().item()
+    maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
+
+    bounds = {'y': slice(miny, maxy), 'x': slice(minx, maxx)}
+
+    return ds.isel(bounds), bounds
+
 def pad_xy(
     self,
     minx: float,

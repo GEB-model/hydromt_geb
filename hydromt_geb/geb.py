@@ -18,7 +18,7 @@ from collections import defaultdict
 import rioxarray as rxr
 from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
-from typing import Union, Any
+from typing import Union, Any, Dict
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -27,12 +27,11 @@ if os.name == 'nt':
 import xesmf as xe
 from affine import Affine
 import geopandas as gpd
-from datetime import timedelta, datetime, date
+from datetime import date, datetime
 from calendar import monthrange
-import matplotlib.pyplot as plt
 from isimip_client.client import ISIMIPClient
 
-from .workflows import repeat_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, get_farm_distribution, calculate_cell_area
+from .workflows import repeat_grid, clip_with_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, get_farm_distribution, calculate_cell_area
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +219,8 @@ class GEBModel(GridModel):
             self,
             crop_ids: dict,
             crop_variables: dict,
-            crop_prices=Optional[Union[str, dict[str, Any]]] = None,
-            cultivation_costs=Optional[Union[str, Dict[str, Any]]] = None,
+            crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
+            cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
         ):
         """
         Sets up the crops data for the model.
@@ -574,6 +573,557 @@ class GEBModel(GridModel):
                     name=f'landcover/{land_use_type}/{parameter}'
                 )
 
+    def setup_waterbodies(self):
+        """
+        Sets up the waterbodies for GEB.
+
+        Notes
+        -----
+        This method sets up the waterbodies for GEB. It first retrieves the waterbody data from the
+        specified data catalog and sets it as a geometry in the model. It then rasterizes the waterbody data onto the model
+        grid and the subgrid using the `rasterize` method of the `raster` object. The resulting grids are set as attributes
+        of the model with names of the form 'routing/lakesreservoirs/{grid_name}'.
+
+        The method also retrieves the reservoir command area data from the data catalog and calculates the area of each
+        command area that falls within the model region. The `waterbody_id` key is used to do the matching between these
+        databases. The relative area of each command area within the model region is calculated and set as a column in
+        the waterbody data. The method sets all lakes with a command area to be reservoirs and updates the waterbody data
+        with any custom reservoir capacity data from the data catalog.
+
+        TODO: Make the reservoir command area data optional.
+
+        The resulting waterbody data is set as a table in the model with the name 'routing/lakesreservoirs/basin_lakes_data'.
+        """
+        self.logger.info('Setting up waterbodies')
+        waterbodies = self.data_catalog.get_geodataframe(
+            "hydro_lakes",
+            geom=self.staticgeoms['areamaps/region'],
+            predicate="intersects",
+            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
+        ).set_index('waterbody_id')
+
+        self.set_grid(self.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=0,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/lakesResID')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            waterbodies,
+            col_name='waterbody_id',
+            nodata=0,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/sublakesResID')
+
+        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
+        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
+        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
+        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
+        command_areas['area'] = command_areas.to_crs(3857).area
+        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
+        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
+        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
+        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
+
+        self.set_grid(self.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/command_areas')
+        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
+            command_areas,
+            col_name='waterbody_id',
+            nodata=-1,
+            all_touched=True,
+            dtype=np.int32
+        ), name='routing/lakesreservoirs/subcommand_areas')
+
+        # set all lakes with command area to reservoir
+        waterbodies['volume_flood'] = waterbodies['volume_total']
+        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+        # set relative area in region for command area. If no command area, set this is set to nan.
+        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
+
+        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
+        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
+
+        waterbodies.update(custom_reservoir_capacity)
+        waterbodies = waterbodies.drop('geometry', axis=1)
+
+        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
+
+    def setup_water_demand(self):
+        """
+        Sets up the water demand data for GEB.
+
+        Notes
+        -----
+        This method sets up the water demand data for GEB. It retrieves the domestic, industry, and
+        livestock water demand data from the specified data catalog and sets it as forcing data in the model. The domestic
+        water demand and consumption data are retrieved from the 'cwatm_domestic_water_demand' dataset, while the industry
+        water demand and consumption data are retrieved from the 'cwatm_industry_water_demand' dataset. The livestock water
+        consumption data is retrieved from the 'cwatm_livestock_water_demand' dataset.
+
+        The domestic water demand and consumption data are provided at a monthly time step, while the industry water demand
+        and consumption data are provided at an annual time step. The livestock water consumption data is provided at a
+        monthly time step, but is assumed to be constant over the year.
+
+        The resulting water demand data is set as forcing data in the model with names of the form 'water_demand/{demand_type}'.
+        """
+        self.logger.info('Setting up water demand')
+        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
+        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
+        domestic_water_demand.name = 'domestic_water_demand'
+        self.set_forcing(domestic_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_demand')
+
+        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
+        domestic_water_consumption.name = 'domestic_water_consumption'
+        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
+        self.set_forcing(domestic_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_consumption')
+
+        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
+        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
+        industry_water_demand.name = 'industry_water_demand'
+        self.set_forcing(industry_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_demand')
+
+        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
+        industry_water_consumption.name = 'industry_water_consumption'
+        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
+        self.set_forcing(industry_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_consumption')
+
+        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
+        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
+        livestock_water_consumption.name = 'livestock_water_consumption'
+        self.set_forcing(livestock_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/livestock_water_consumption')
+
+    def setup_modflow(self, epsg: int, resolution: float):
+        """
+        Sets up the MODFLOW grid for GEB.
+
+        Parameters
+        ----------
+        epsg : int
+            The EPSG code for the coordinate reference system of the model grid.
+        resolution : float
+            The resolution of the model grid in meters.
+
+        Notes
+        -----
+        This method sets up the MODFLOW grid for GEB. These grids don't match because one is based on
+        a geographic coordinate reference system and the other is based on a projected coordinate reference system. Therefore,
+        this function creates a projected MODFLOW grid and then calculates the intersection between the model grid and the MODFLOW
+        grid.
+
+        It first retrieves the MODFLOW mask from the `get_modflow_transform_and_shape` function, which calculates the affine
+        transform and shape of the MODFLOW grid based on the resolution and EPSG code of the model grid. The MODFLOW mask is
+        created using the `full_from_transform` method of the `raster` object, which creates a binary grid with the same affine
+        transform and shape as the MODFLOW grid.
+
+        The method then creates an intersection between the model grid and the MODFLOW grid using the `create_indices`
+        function. The resulting indices are used to match cells between the model grid and the MODFLOW grid. The indices
+        are saved for use in the model.
+
+        Finally, the elevation data for the MODFLOW grid is retrieved from the MERIT dataset and reprojected to the MODFLOW
+        grid using the `reproject_like` method of the `raster` object. The resulting elevation grid is set as a grid in the
+        model with the name 'groundwater/modflow/modflow_elevation'.
+        """
+        self.logger.info("Setting up MODFLOW")
+        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
+            self.grid.mask,
+            4326,
+            epsg,
+            resolution
+        )
+        modflow_mask = hydromt.raster.full_from_transform(
+            modflow_affine,
+            MODFLOW_shape,
+            nodata=0,
+            dtype=np.int8,
+            name=f'groundwater/modflow/modflow_mask',
+            crs=epsg,
+            lazy=True
+        )
+
+        intersection = create_indices(
+            self.grid.mask.raster.transform,
+            self.grid.mask.raster.shape,
+            4326,
+            modflow_affine,
+            MODFLOW_shape,
+            epsg
+        )
+
+        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
+        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
+        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
+        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
+        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
+
+        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
+        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
+
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
+        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
+        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
+        MERIT = MERIT.assign_coords(
+            x=MERIT.coords['x'] + MERIT_x_step / 2,
+            y=MERIT.coords['y'] + MERIT_y_step / 2
+        )
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
+
+        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
+
+    def setup_forcing(self, starttime: date, endtime: date):
+        """
+        Sets up the forcing data for GEB.
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the forcing data.
+        endtime : date
+            The end time of the forcing data.
+
+        Notes
+        -----
+        This method sets up the forcing data for GEB. It first downloads the high-resolution variables
+        (precipitation, surface solar radiation, air temperature, maximum air temperature, and minimum air temperature) from
+        the ISIMIP dataset for the specified time period. The data is downloaded using the `setup_high_resolution_variables`
+        method.
+
+        The method then sets up the relative humidity, longwave radiation, pressure, and wind data for the model. The
+        relative humidity data is downloaded from the ISIMIP dataset using the `setup_hurs` method. The longwave radiation
+        data is calculated using the air temperature and relative humidity data and the `calculate_longwave` function. The
+        pressure data is downloaded from the ISIMIP dataset using the `setup_pressure` method. The wind data is downloaded
+        from the ISIMIP dataset using the `setup_wind` method. All these data are first downscaled to the model grid.
+
+        The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
+        """
+        # download source data from ISIMIP
+        self.logger.info('setting up forcing data')
+        high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
+        self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
+        self.logger.info('setting up relative humdity...')
+        self.setup_hurs(starttime, endtime)
+        self.logger.info('setting up longwave radiation...')
+        self.setup_longwave(starttime=starttime, endtime=endtime)
+        self.logger.info('setting up pressure...')
+        self.setup_pressure(starttime, endtime)
+        self.logger.info('setting up wind...')
+        self.setup_wind(starttime, endtime)
+
+    def setup_high_resolution_variables(self, variables: List[str], starttime: date, endtime: date):
+        """
+        Sets up the high-resolution climate variables for GEB.
+
+        Parameters
+        ----------
+        variables : list of str
+            The list of climate variables to set up.
+        starttime : date
+            The start time of the forcing data.
+        endtime : date
+            The end time of the forcing data.
+
+        Notes
+        -----
+        This method sets up the high-resolution climate variables for GEB. It downloads the specified
+        climate variables from the ISIMIP dataset for the specified time period. The data is downloaded using the
+        `download_isimip` method.
+
+        The method renames the longitude and latitude dimensions of the downloaded data to 'x' and 'y', respectively. It
+        then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
+
+        The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
+        """ 
+        for variable in variables:
+            self.logger.info(f'Setting up {variable}...')
+            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+            ds = ds.rename({'lon': 'x', 'lat': 'y'})
+            var = ds[variable].raster.clip_bbox(ds.raster.bounds)
+            self.set_forcing(var, name=f'climate/{variable}')
+
+    def setup_hurs(self, starttime: date, endtime: date):
+        """
+        Sets up the relative humidity data for GEB.
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the relative humidity data in ISO 8601 format (YYYY-MM-DD).
+        endtime : date
+            The end time of the relative humidity data in ISO 8601 format (YYYY-MM-DD).
+
+        Notes
+        -----
+        This method sets up the relative humidity data for GEB. It first downloads the relative humidity
+        data from the ISIMIP dataset for the specified time period using the `download_isimip` method. The data is downloaded
+        at a 30 arcsec resolution.
+
+        The method then downloads the monthly CHELSA-BIOCLIM+ relative humidity data at 30 arcsec resolution from the data
+        catalog. The data is downloaded for each month in the specified time period and is clipped to the bounding box of
+        the downloaded relative humidity data using the `clip_bbox` method of the `raster` object.
+
+        The original ISIMIP data is then downscaled using the monthly CHELSA-BIOCLIM+ data. The downscaling method is adapted
+        from https://github.com/johanna-malle/w5e5_downscale, which was licenced under GNU General Public License v3.0.
+
+        The resulting relative humidity data is set as forcing data in the model with names of the form 'climate/hurs'.
+        """
+        hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        # just taking the years to simplify things
+        start_year = starttime.year
+        end_year = endtime.year
+
+        folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
+        folder.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info("Downloading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
+        hurs_ds_30sec, hurs_time = [], []
+        for year in tqdm(range(start_year, end_year+1)):
+            for month in range(1, 13):
+                fn = folder / f'hurs_{year}_{month:02d}.nc'
+                if not fn.exists():
+                    hurs = self.data_catalog.get_rasterdataset(f'CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}', bbox=hurs_30_min.raster.bounds, buffer=1)
+                    del hurs.attrs['_FillValue']
+                    hurs.name = 'hurs'
+                    hurs.to_netcdf(fn)
+                else:
+                    hurs = xr.open_dataset(fn, chunks={'time': 365})['hurs']
+                hurs_ds_30sec.append(hurs)
+                hurs_time.append(f'{year}-{month:02d}')
+        
+        hurs_ds_30sec = xr.concat(hurs_ds_30sec, dim='time').rename({'x': 'lon', 'y': 'lat'})
+        hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
+        hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
+
+        hurs_output = xr.full_like(self.forcing['climate/tas'], np.nan)
+        hurs_output.name = 'hurs'
+        hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
+
+        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
+        for year in tqdm(range(start_year, end_year+1)):
+            for month in range(1, 13):
+                start_month = datetime(year, month, 1)
+                end_month = datetime(year, month, monthrange(year, month)[1])
+                
+                w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
+                w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                w5e5_regridded_mean = w5e5_regridded.mean(dim='time')  # get monthly mean
+                w5e5_regridded_tr = np.log(w5e5_regridded / (1 - w5e5_regridded))  # assume beta distribuation => logit transform
+                w5e5_regridded_mean_tr = np.log(w5e5_regridded_mean / (1 - w5e5_regridded_mean))  # logit transform
+
+                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.01  # convert to fraction
+                chelsa_tr = np.log(chelsa / (1 - chelsa))  # assume beta distribuation => logit transform
+
+                difference = chelsa_tr - w5e5_regridded_mean_tr
+
+                # apply difference to w5e5
+                w5e5_regridded_tr_corr = w5e5_regridded_tr + difference
+                w5e5_regridded_corr = (1 / (1 + np.exp(-w5e5_regridded_tr_corr))) * 100  # back transform
+                w5e5_regridded_corr.raster.set_crs(4326)
+
+                hurs_output.loc[
+                    dict(time=slice(start_month, end_month))
+                ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
+
+        self.set_forcing(hurs_output, 'climate/hurs')
+
+    def setup_longwave(self, starttime: date, endtime: date):
+        """
+        Sets up the longwave radiation data for GEB.
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the longwave radiation data in ISO 8601 format (YYYY-MM-DD).
+        endtime : date
+            The end time of the longwave radiation data in ISO 8601 format (YYYY-MM-DD).
+
+        Notes
+        -----
+        This method sets up the longwave radiation data for GEB. It first downloads the relative humidity,
+        air temperature, and downward longwave radiation data from the ISIMIP dataset for the specified time period using the
+        `download_isimip` method. The data is downloaded at a 30 arcsec resolution.
+
+        The method then regrids the downloaded data to the target grid using the `xe.Regridder` method. It calculates the
+        saturation vapor pressure, water vapor pressure, clear-sky emissivity, all-sky emissivity, and cloud-based component
+        of emissivity for the coarse and fine grids. It then downscales the longwave radiation data for the fine grid using
+        the calculated all-sky emissivity and Stefan-Boltzmann constant. The downscaling method is adapted
+        from https://github.com/johanna-malle/w5e5_downscale, which was licenced under GNU General Public License v3.0.
+
+        The resulting longwave radiation data is set as forcing data in the model with names of the form 'climate/rlds'.
+        """
+        x1 = 0.43
+        x2 = 5.7
+        sbc = 5.67E-8   # stefan boltzman constant [Js−1 m−2 K−4]
+
+        es0 = 6.11  # reference saturation vapour pressure  [hPa]
+        T0 = 273.15
+        lv = 2.5E6  # latent heat of vaporization of water
+        Rv = 461.5  # gas constant for water vapour [J K kg-1]
+
+        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+
+        hurs_coarse = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
+        tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
+        rlds_coarse = self.download_isimip(product='SecondaryInputData', variable='rlds', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
+        
+        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop('time'), target, 'bilinear')
+
+        hurs_coarse_regridded = regridder(hurs_coarse).rename({'lon': 'x', 'lat': 'y'})
+        tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
+        rlds_coarse_regridded = regridder(rlds_coarse).rename({'lon': 'x', 'lat': 'y'})
+
+        hurs_fine = self.forcing['climate/hurs']
+        tas_fine = self.forcing['climate/tas']
+
+        # now ready for calculation:
+        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded))  # saturation vapor pressure
+        pV_coarse = (hurs_coarse_regridded * es_coarse) / 100  # water vapor pressure [hPa]
+
+        es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine))
+        pV_fine = (hurs_fine * es_fine) / 100  # water vapour pressure [hPa]
+
+        e_cl_coarse = 0.23 + x1 * ((pV_coarse * 100) / tas_coarse_regridded) ** (1 / x2)
+        # e_cl_coarse == clear-sky emissivity w5e5 (pV needs to be in Pa not hPa, hence *100)
+        e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine) ** (1 / x2)
+        # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
+
+        e_as_coarse = rlds_coarse_regridded / (sbc * tas_coarse_regridded ** 4)  # all-sky emissivity w5e5
+        e_as_coarse = xr.where(e_as_coarse > 1, 1, e_as_coarse)  # constrain all-sky emissivity to max 1
+        delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
+        
+        e_as_fine = e_cl_fine + delta_e
+        e_as_fine = xr.where(e_as_fine > 1, 1, e_as_fine)  # constrain all-sky emissivity to max 1
+        lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
+
+        lw_fine.name = 'rlds'
+        self.set_forcing(lw_fine, name='climate/rlds')
+
+    def setup_pressure(self, starttime: date, endtime: date):
+        """
+        Sets up the surface pressure data for GEB.
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the surface pressure data in ISO 8601 format (YYYY-MM-DD).
+        endtime : date
+            The end time of the surface pressure data in ISO 8601 format (YYYY-MM-DD).
+
+        Notes
+        -----
+        This method sets up the surface pressure data for GEB. It then downloads
+        the orography data and surface pressure data from the ISIMIP dataset for the specified time period using the
+        `download_isimip` method. The data is downloaded at a 30 arcsec resolution.
+
+        The method then regrids the orography and surface pressure data to the target grid using the `xe.Regridder` method.
+        It corrects the surface pressure data for orography using the gravitational acceleration, molar mass of
+        dry air, universal gas constant, and sea level standard temperature. The downscaling method is adapted
+        from https://github.com/johanna-malle/w5e5_downscale, which was licenced under GNU General Public License v3.0.
+
+        The resulting surface pressure data is set as forcing data in the model with names of the form 'climate/ps'.
+        """
+        g = 9.80665  # gravitational acceleration [m/s2]
+        M = 0.02896968  # molar mass of dry air [kg/mol]
+        r0 = 8.314462618  # universal gas constant [J/(mol·K)]
+        T0 = 288.16  # Sea level standard temperature  [K]
+
+        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+        pressure_30_min = self.download_isimip(product='SecondaryInputData', variable='psl', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).psl  # some buffer to avoid edge effects / errors in ISIMIP API
+        
+        orography = self.download_isimip(product='InputData', variable='orog', forcing='chelsa-w5e5v1.0', buffer=1).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        regridder = xe.Regridder(orography, target, 'bilinear')
+        orography = regridder(orography).rename({'lon': 'x', 'lat': 'y'})
+
+        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), target, 'bilinear')
+        pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
+        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
+
+        pressure = xr.full_like(self.forcing['climate/hurs'], fill_value=np.nan)
+        pressure.name = 'ps'
+        pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
+        pressure.data = pressure_30_min_regridded_corr
+        self.set_forcing(pressure, name='climate/ps')
+
+    def setup_wind(self, starttime: date, endtime: date):
+        """
+        Sets up the wind data for GEB.
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the wind data in ISO 8601 format (YYYY-MM-DD).
+        endtime : date
+            The end time of the wind data in ISO 8601 format (YYYY-MM-DD).
+
+        Notes
+        -----
+        This method sets up the wind data for GEB. It first downloads the global wind atlas data and
+        regrids it to the target grid using the `xe.Regridder` method. It then downloads the 30-minute average wind data
+        from the ISIMIP dataset for the specified time period and regrids it to the target grid using the `xe.Regridder`
+        method.
+
+        The method then creates a diff layer by assuming that wind follows a Weibull distribution and taking the log
+        transform of the wind data. It then subtracts the log-transformed 30-minute average wind data from the
+        log-transformed global wind atlas data to create the diff layer.
+
+        The method then downloads the wind data from the ISIMIP dataset for the specified time period and regrids it to the
+        target grid using the `xe.Regridder` method. It applies the diff layer to the log-transformed wind data and then
+        exponentiates the result to obtain the corrected wind data. The downscaling method is adapted
+        from https://github.com/johanna-malle/w5e5_downscale, which was licenced under GNU General Public License v3.0.
+
+        The resulting wind data is set as forcing data in the model with names of the form 'climate/wind'.
+        """
+        # Can this be done with hydromt?
+        global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
+        # TODO: Gives memory errors when loading from disk.
+        # global_wind_atlas = self.data_catalog.get_rasterdataset(
+        #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
+        # ).rename({'x': 'lon', 'y': 'lat'})
+        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'}).squeeze()
+        target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
+        regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
+        global_wind_atlas_regridded = regridder(global_wind_atlas)
+
+        wind_30_min_avg = self.download_isimip(
+            product='SecondaryInputData', 
+            variable='sfcwind',
+            starttime=date(2008, 1, 1),
+            endtime=date(2017, 12, 31),
+            forcing='w5e5v2.0',
+            buffer=1
+        ).sfcWind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
+        regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
+        wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
+
+        # create diff layer:
+        # assume wind follows weibull distribution => do log transform
+        wind_30_min_avg_regridded_log = np.log(wind_30_min_avg_regridded)
+
+        global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded)
+
+        diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
+
+        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcWind  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        wind_30min_regridded = regridder_30_min(wind_30_min)
+        wind_30min_regridded_log = np.log(wind_30min_regridded)
+
+        wind_30min_regridded_log_corr = wind_30min_regridded_log + diff_layer
+        wind_30min_regridded_corr = np.exp(wind_30min_regridded_log_corr)
+
+        wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(self.grid.raster.bounds)
+        wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
+        wind_output_clipped.name = 'wind'
+
+        self.set_forcing(wind_output_clipped, 'climate/wind')
+
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
         Sets up the (administrative) regions and land use data for GEB. The regions can be used for multiple purposes,
@@ -592,7 +1142,7 @@ class GEBModel(GridModel):
 
         Notes
         -----
-        This method sets up the regions and land use data for the hydrological model. It first retrieves the region data from
+        This method sets up the regions and land use data for GEB. It first retrieves the region data from
         the specified region database and sets it as a geometry in the model. It then pads the subgrid to cover the entire
         region and retrieves the land use data from the ESA WorldCover dataset. The land use data is reprojected to the
         padded subgrid and the region ID is rasterized onto the subgrid. The cell area for each region is calculated and
@@ -687,7 +1237,7 @@ class GEBModel(GridModel):
         # Assume all cells with at least x upstream cells are rivers.
         rivers = MERIT > river_threshold
         rivers = rivers.astype(np.int32)
-        rivers = rivers.rio.set_nodata(-1)
+        rivers.raster.set_nodata(-1)
         rivers = rivers.raster.reproject_like(reprojected_land_use, method='nearest')
         self.region_subgrid.set_grid(rivers, name='landcover/rivers')
 
@@ -732,214 +1282,26 @@ class GEBModel(GridModel):
         # Same workaround as above
         self.subgrid.set_grid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
-    def setup_waterbodies(self):
-        """
-        Sets up the waterbodies for the hydrological model.
-
-        Notes
-        -----
-        This method sets up the waterbodies for the hydrological model. It first retrieves the waterbody data from the
-        specified data catalog and sets it as a geometry in the model. It then rasterizes the waterbody data onto the model
-        grid and the subgrid using the `rasterize` method of the `raster` object. The resulting grids are set as attributes
-        of the model with names of the form 'routing/lakesreservoirs/{grid_name}'.
-
-        The method also retrieves the reservoir command area data from the data catalog and calculates the area of each
-        command area that falls within the model region. The `waterbody_id` key is used to do the matching between these
-        databases. The relative area of each command area within the model region is calculated and set as a column in
-        the waterbody data. The method sets all lakes with a command area to be reservoirs and updates the waterbody data
-        with any custom reservoir capacity data from the data catalog.
-
-        TODO: Make the reservoir command area data optional.
-
-        The resulting waterbody data is set as a table in the model with the name 'routing/lakesreservoirs/basin_lakes_data'.
-        """
-        self.logger.info('Setting up waterbodies')
-        waterbodies = self.data_catalog.get_geodataframe(
-            "hydro_lakes",
-            geom=self.staticgeoms['areamaps/region'],
-            predicate="intersects",
-            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
-        ).set_index('waterbody_id')
-
-        self.set_grid(self.grid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/lakesResID')
-        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/sublakesResID')
-
-        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
-        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
-        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
-        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
-        command_areas['area'] = command_areas.to_crs(3857).area
-        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
-        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
-        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
-        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
-
-        self.set_grid(self.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/command_areas')
-        self.subgrid.set_grid(self.subgrid.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/subcommand_areas')
-
-        # set all lakes with command area to reservoir
-        waterbodies['volume_flood'] = waterbodies['volume_total']
-        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
-        # set relative area in region for command area. If no command area, set this is set to nan.
-        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
-
-        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
-        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
-
-        waterbodies.update(custom_reservoir_capacity)
-        waterbodies = waterbodies.drop('geometry', axis=1)
-
-        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
-
-    def setup_water_demand(self):
-        """
-        Sets up the water demand data for the hydrological model.
-
-        Notes
-        -----
-        This method sets up the water demand data for the hydrological model. It retrieves the domestic, industry, and
-        livestock water demand data from the specified data catalog and sets it as forcing data in the model. The domestic
-        water demand and consumption data are retrieved from the 'cwatm_domestic_water_demand' dataset, while the industry
-        water demand and consumption data are retrieved from the 'cwatm_industry_water_demand' dataset. The livestock water
-        consumption data is retrieved from the 'cwatm_livestock_water_demand' dataset.
-
-        The domestic water demand and consumption data are provided at a monthly time step, while the industry water demand
-        and consumption data are provided at an annual time step. The livestock water consumption data is provided at a
-        monthly time step, but is assumed to be constant over the year.
-
-        The resulting water demand data is set as forcing data in the model with names of the form 'water_demand/{demand_type}'.
-        """
-        self.logger.info('Setting up water demand')
-        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
-        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
-        domestic_water_demand.name = 'domestic_water_demand'
-        self.set_forcing(domestic_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_demand')
-
-        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
-        domestic_water_consumption.name = 'domestic_water_consumption'
-        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
-        self.set_forcing(domestic_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_consumption')
-
-        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
-        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
-        industry_water_demand.name = 'industry_water_demand'
-        self.set_forcing(industry_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_demand')
-
-        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
-        industry_water_consumption.name = 'industry_water_consumption'
-        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
-        self.set_forcing(industry_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_consumption')
-
-        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
-        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
-        livestock_water_consumption.name = 'livestock_water_consumption'
-        self.set_forcing(livestock_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/livestock_water_consumption')
-
-    def setup_modflow(self, epsg: int, resolution: float):
-        """
-        Sets up the MODFLOW grid for the hydrological model.
-
-        Parameters
-        ----------
-        epsg : int
-            The EPSG code for the coordinate reference system of the model grid.
-        resolution : float
-            The resolution of the model grid in meters.
-
-        Notes
-        -----
-        This method sets up the MODFLOW grid for the hydrological model. These grids don't match because one is based on
-        a geographic coordinate reference system and the other is based on a projected coordinate reference system. Therefore,
-        this function creates a projected MODFLOW grid and then calculates the intersection between the model grid and the MODFLOW
-        grid.
-
-        It first retrieves the MODFLOW mask from the `get_modflow_transform_and_shape` function, which calculates the affine
-        transform and shape of the MODFLOW grid based on the resolution and EPSG code of the model grid. The MODFLOW mask is
-        created using the `full_from_transform` method of the `raster` object, which creates a binary grid with the same affine
-        transform and shape as the MODFLOW grid.
-
-        The method then creates an intersection between the model grid and the MODFLOW grid using the `create_indices`
-        function. The resulting indices are used to match cells between the model grid and the MODFLOW grid. The indices
-        are saved for use in the model.
-
-        Finally, the elevation data for the MODFLOW grid is retrieved from the MERIT dataset and reprojected to the MODFLOW
-        grid using the `reproject_like` method of the `raster` object. The resulting elevation grid is set as a grid in the
-        model with the name 'groundwater/modflow/modflow_elevation'.
-        """
-        self.logger.info("Setting up MODFLOW")
-        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid.mask,
-            4326,
-            epsg,
-            resolution
-        )
-        modflow_mask = hydromt.raster.full_from_transform(
-            modflow_affine,
-            MODFLOW_shape,
-            nodata=0,
-            dtype=np.int8,
-            name=f'groundwater/modflow/modflow_mask',
-            crs=epsg,
-            lazy=True
-        )
-
-        intersection = create_indices(
-            self.grid.mask.raster.transform,
-            self.grid.mask.raster.shape,
-            4326,
-            modflow_affine,
-            MODFLOW_shape,
-            epsg
-        )
-
-        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
-        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
-        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
-        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
-        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
-
-        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
-        self.MODFLOW_grid.set_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
-
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
-        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
-        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
-        MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT_x_step / 2,
-            y=MERIT.coords['y'] + MERIT_y_step / 2
-        )
-        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
-
-        self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
-
     def setup_economic_data(self):
+        """
+        Sets up the economic data for GEB.
+
+        Notes
+        -----
+        This method sets up the lending rates and inflation rates data for GEB. It first retrieves the
+        lending rates and inflation rates data from the World Bank dataset using the `get_geodataframe` method of the
+        `data_catalog` object. It then creates dictionaries to store the data for each region, with the years as the time
+        dimension and the lending rates or inflation rates as the data dimension.
+
+        The lending rates and inflation rates data are converted from percentage to rate by dividing by 100 and adding 1.
+        The data is then stored in the dictionaries with the region ID as the key.
+
+        The resulting lending rates and inflation rates data are set as forcing data in the model with names of the form
+        'economics/lending_rates' and 'economics/inflation_rates', respectively.
+        """
         self.logger.info('Setting up economic data')
-        lending_rates = self.data_catalog.get_geodataframe('wb_lending_rate')
-        inflation_rates = self.data_catalog.get_geodataframe('wb_inflation_rate')
+        lending_rates = self.data_catalog.get_dataframe('wb_lending_rate')
+        inflation_rates = self.data_catalog.get_dataframe('wb_inflation_rate')
 
         lending_rates_dict, inflation_rates_dict = {'data': {}}, { 'data': {}}
         years_lending_rates = [c for c in lending_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
@@ -961,7 +1323,36 @@ class GEBModel(GridModel):
         self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
         self.set_dict(lending_rates_dict, name='economics/lending_rates')
 
-    def setup_well_prices_by_reference_year(self, well_price, upkeep_price_per_m2, reference_year, start_year, end_year):
+    def setup_well_prices_by_reference_year(self, well_price: float, upkeep_price_per_m2: float, reference_year: int, start_year: int, end_year: int):
+        """
+        Sets up the well prices and upkeep prices for the hydrological model based on a reference year.
+
+        Parameters
+        ----------
+        well_price : float
+            The price of a well in the reference year.
+        upkeep_price_per_m2 : float
+            The upkeep price per square meter of a well in the reference year.
+        reference_year : int
+            The reference year for the well prices and upkeep prices.
+        start_year : int
+            The start year for the well prices and upkeep prices.
+        end_year : int
+            The end year for the well prices and upkeep prices.
+
+        Notes
+        -----
+        This method sets up the well prices and upkeep prices for the hydrological model based on a reference year. It first
+        retrieves the inflation rates data from the `economics/inflation_rates` dictionary. It then creates dictionaries to
+        store the well prices and upkeep prices for each region, with the years as the time dimension and the prices as the
+        data dimension.
+
+        The well prices and upkeep prices are calculated by applying the inflation rates to the reference year prices. The
+        resulting prices are stored in the dictionaries with the region ID as the key.
+
+        The resulting well prices and upkeep prices data are set as dictionary with names of the form
+        'economics/well_prices' and 'economics/upkeep_prices_well_per_m2', respectively.
+        """
         self.logger.info('Setting up well prices by reference year')
         # create dictory with prices for well_prices per year by applying inflation rates
         inflation_rates = self.dict['economics/inflation_rates']
@@ -1000,22 +1391,43 @@ class GEBModel(GridModel):
             upkeep_prices_dict['data'][region] = upkeep_prices.tolist()
 
         self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_well_per_m2')
-         
-    def clip_with_grid(self, ds, mask):
-        assert ds.shape == mask.shape
-        cells_along_y = mask.sum(dim='x').values.ravel()
-        miny = (cells_along_y > 0).argmax().item()
-        maxy = cells_along_y.size - (cells_along_y[::-1] > 0).argmax().item()
-        
-        cells_along_x = mask.sum(dim='y').values.ravel()
-        minx = (cells_along_x > 0).argmax().item()
-        maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
-
-        bounds = {'y': slice(miny, maxy), 'x': slice(minx, maxx)}
-
-        return ds.isel(bounds), bounds
 
     def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
+        """
+        Sets up the farmers data for GEB.
+
+        Parameters
+        ----------
+        farmers : pandas.DataFrame
+            A DataFrame containing the farmer data.
+        irrigation_sources : dict, optional
+            A dictionary mapping irrigation source names to IDs.
+        n_seasons : int, optional
+            The number of seasons to simulate.
+
+        Notes
+        -----
+        This method sets up the farmers data for GEB. It first retrieves the region data from the
+        `areamaps/regions` and `areamaps/region_subgrid` grids. It then creates a `farms` grid with the same shape as the
+        `region_subgrid` grid, with a value of -1 for each cell.
+
+        For each region, the method clips the `cultivated_land` grid to the region and creates farms for the region using
+        the `create_farms` function, using these farmlands as well as the dataframe of farmer agents. The resulting farms
+        whose IDs correspondd to the IDs in the farmer dataframe are added to the `farms` grid for the region.
+
+        The method then removes any farms that are outside the study area by using the `region_mask` grid. It then remaps
+        the farmer IDs to a contiguous range of integers starting from 0.
+
+        The resulting farms data is set as agents data in the model with names of the form 'agents/farmers/farms'. The
+        crop names are mapped to IDs using the `crop_name_to_id` dictionary that was previously created. The resulting
+        crop IDs are stored in the `season_#_crop` columns of the `farmers` DataFrame.
+
+        If `irrigation_sources` is provided, the method sets the `irrigation_source` column of the `farmers` DataFrame to
+        the corresponding IDs.
+
+        Finally, the method sets the binary data for each column of the `farmers` DataFrame as agents data in the model
+        with names of the form 'agents/farmers/{column}'.
+        """
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
@@ -1024,7 +1436,7 @@ class GEBModel(GridModel):
         for region_id in regions['region_id']:
             self.logger.info(f"Creating farms for region {region_id}")
             region = regions_raster == region_id
-            region_clip, bounds = self.clip_with_grid(region, region)
+            region_clip, bounds = clip_with_grid(region, region)
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0)
@@ -1043,7 +1455,7 @@ class GEBModel(GridModel):
         cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1))
         cut_farms = cut_farms[cut_farms != -1]
 
-        subgrid_farms = self.clip_with_grid(farms, ~region_mask)[0]
+        subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
 
         subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
         farmers = farmers[~farmers.index.isin(cut_farms)]
@@ -1076,10 +1488,49 @@ class GEBModel(GridModel):
             self.set_binary(farmers[column], name=f'agents/farmers/{column}')
 
     def setup_farmers_from_csv(self, path, irrigation_sources=None, n_seasons=1):
+        """
+        Sets up the farmers data for GEB from a CSV file.
+
+        Parameters
+        ----------
+        path : str
+            The path to the CSV file containing the farmer data.
+        irrigation_sources : dict, optional
+            A dictionary mapping irrigation source names to IDs.
+        n_seasons : int, optional
+            The number of seasons to simulate.
+
+        Notes
+        -----
+        This method sets up the farmers data for GEB from a CSV file. It first reads the farmer data from
+        the CSV file using the `pandas.read_csv` method. The resulting DataFrame is passed to the `setup_farmers` method
+        along with the optional `irrigation_sources` and `n_seasons` parameters.
+
+        See the `setup_farmers` method for more information on how the farmer data is set up in the model.
+        """
         farmers = pd.read_csv(path, index_col=0)
         self.setup_farmers(farmers, irrigation_sources, n_seasons)
 
     def setup_farmers_simple(self, irrigation_sources, region_id_column='UID', country_iso3_column='ISO3'):
+        """
+        Sets up the farmers for tGEB.
+
+        Parameters
+        ----------
+        irrigation_sources : dict
+            A dictionary of irrigation sources and their corresponding water availability in m^3/day.
+        region_id_column : str, optional
+            The name of the column in the region database that contains the region IDs. Default is 'UID'.
+        country_iso3_column : str, optional
+            The name of the column in the region database that contains the country ISO3 codes. Default is 'ISO3'.
+
+        Notes
+        -----
+        This method sets up the farmers for GEB. This is a simplified method that generates an example set of agent data.
+        It first calculates the number of farmers and their farm sizes for each region based on the agricultural data for
+        that region based on theamount of farm land and data from a global database on farm sizes per country. It then
+        randomly assigns crops, irrigation sources, household sizes, and daily incomes and consumption levels to each farmer.
+        """
         SIZE_CLASSES_BOUNDARIES = {
             '< 1 Ha': (0, 10000),
             '1 - 2 Ha': (10000, 20000),
@@ -1091,7 +1542,7 @@ class GEBModel(GridModel):
             '100 - 200 Ha': (1000000, 2000000),
             '200 - 500 Ha': (2000000, 5000000),
             '500 - 1000 Ha': (5000000, 10000000),
-            '> 1000 Ha': (10000000, 20000000)
+            '> 1000 Ha': (10000000, np.inf)
         }
 
         cultivated_land = self.region_subgrid.grid['landsurface/full_region_cultivated_land']
@@ -1336,6 +1787,41 @@ class GEBModel(GridModel):
         )
 
     def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0):
+        """
+        Downloads ISIMIP climate data for GEB.
+
+        Parameters
+        ----------
+        product : str
+            The name of the ISIMIP product to download.
+        variable : str
+            The name of the climate variable to download.
+        forcing : str
+            The name of the climate forcing to download.
+        starttime : date, optional
+            The start date of the data. Default is None.
+        endtime : date, optional
+            The end date of the data. Default is None.
+        resolution : str, optional
+            The resolution of the data to download. Default is None.
+        buffer : int, optional
+            The buffer size in degrees to add to the bounding box of the data to download. Default is 0.
+
+        Returns
+        -------
+        xr.Dataset
+            The downloaded climate data as an xarray dataset.
+
+        Notes
+        -----
+        This method downloads ISIMIP climate data for GEB. It first retrieves the dataset
+        metadata from the ISIMIP repository using the specified `product`, `variable`, `forcing`, and `resolution`
+        parameters. It then downloads the data files that match the specified `starttime` and `endtime` parameters, and
+        extracts them to the specified `download_path` directory.
+
+        The resulting climate data is returned as an xarray dataset. The dataset is assigned the coordinate reference system
+        EPSG:4326, and the spatial dimensions are set to 'lon' and 'lat'.
+        """
         # if starttime is specified, endtime must be specified as well
         assert (starttime is None) == (endtime is None)
         
@@ -1460,209 +1946,6 @@ class GEBModel(GridModel):
         ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
         ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
         return ds
-
-    def setup_forcing(
-            self,
-            starttime,
-            endtime,
-        ):
-        # download source data from ISIMIP
-        self.logger.info('setting up forcing data')
-        high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-        self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
-        self.logger.info('setting up relative humdity...')
-        self.setup_hurs(starttime, endtime)
-        self.logger.info('setting up longwave radiation...')
-        self.setup_longwave(starttime=starttime, endtime=endtime)
-        self.logger.info('setting up pressure...')
-        self.setup_pressure(starttime, endtime)
-        self.logger.info('setting up wind...')
-        self.setup_wind(starttime, endtime)
-
-    def setup_longwave(self, starttime, endtime):
-        x1 = 0.43
-        x2 = 5.7
-        sbc = 5.67E-8   # stefan boltzman constant [Js−1 m−2 K−4]
-
-        es0 = 6.11  # reference saturation vapour pressure  [hPa]
-        T0 = 273.15
-        lv = 2.5E6  # latent heat of vaporization of water
-        Rv = 461.5  # gas constant for water vapour [J K kg-1]
-
-        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
-
-        hurs_coarse = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
-        tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
-        rlds_coarse = self.download_isimip(product='SecondaryInputData', variable='rlds', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
-        
-        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop('time'), target, 'bilinear')
-
-        hurs_coarse_regridded = regridder(hurs_coarse).rename({'lon': 'x', 'lat': 'y'})
-        tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
-        rlds_coarse_regridded = regridder(rlds_coarse).rename({'lon': 'x', 'lat': 'y'})
-
-        hurs_fine = self.forcing['climate/hurs']
-        tas_fine = self.forcing['climate/tas']
-
-        # now ready for calculation:
-        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded))  # saturation vapor pressure
-        pV_coarse = (hurs_coarse_regridded * es_coarse) / 100  # water vapor pressure [hPa]
-
-        es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine))
-        pV_fine = (hurs_fine * es_fine) / 100  # water vapour pressure [hPa]
-
-        e_cl_coarse = 0.23 + x1 * ((pV_coarse * 100) / tas_coarse_regridded) ** (1 / x2)
-        # e_cl_coarse == clear-sky emissivity w5e5 (pV needs to be in Pa not hPa, hence *100)
-        e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine) ** (1 / x2)
-        # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
-
-        e_as_coarse = rlds_coarse_regridded / (sbc * tas_coarse_regridded ** 4)  # all-sky emissivity w5e5
-        e_as_coarse = xr.where(e_as_coarse > 1, 1, e_as_coarse)  # constrain all-sky emissivity to max 1
-        delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
-        
-        e_as_fine = e_cl_fine + delta_e
-        e_as_fine = xr.where(e_as_fine > 1, 1, e_as_fine)  # constrain all-sky emissivity to max 1
-        lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
-
-        lw_fine.name = 'rlds'
-        self.set_forcing(lw_fine, name='climate/rlds')
-
-    def setup_pressure(self, starttime, endtime):
-        g = 9.80665  # gravitational acceleration [m/s2]
-        M = 0.02896968  # molar mass of dry air [kg/mol]
-        r0 = 8.314462618  # universal gas constant [J/(mol·K)]
-        T0 = 288.16  # Sea level standard temperature  [K]
-
-        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
-        pressure_30_min = self.download_isimip(product='SecondaryInputData', variable='psl', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).psl  # some buffer to avoid edge effects / errors in ISIMIP API
-        
-        orography = self.download_isimip(product='InputData', variable='orog', forcing='chelsa-w5e5v1.0', buffer=1).orog  # some buffer to avoid edge effects / errors in ISIMIP API
-        regridder = xe.Regridder(orography, target, 'bilinear')
-        orography = regridder(orography).rename({'lon': 'x', 'lat': 'y'})
-
-        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), target, 'bilinear')
-        pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
-        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
-
-        pressure = xr.full_like(self.forcing['climate/hurs'], fill_value=np.nan)
-        pressure.name = 'ps'
-        pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
-        pressure.data = pressure_30_min_regridded_corr
-        self.set_forcing(pressure, name='climate/ps')
-
-    def setup_high_resolution_variables(self, variables, starttime, endtime):
-        for variable in variables:
-            self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
-            ds = ds.rename({'lon': 'x', 'lat': 'y'})
-            var = ds[variable].raster.clip_bbox(ds.raster.bounds)
-            self.set_forcing(var, name=f'climate/{variable}')
-
-    def setup_hurs(self, starttime, endtime):
-        hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
-
-        # just taking the years to simplify things
-        start_year = starttime.year
-        end_year = endtime.year
-
-        folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
-        folder.mkdir(parents=True, exist_ok=True)
-
-        self.logger.info("Downloading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
-        hurs_ds_30sec, hurs_time = [], []
-        for year in tqdm(range(start_year, end_year+1)):
-            for month in range(1, 13):
-                fn = folder / f'hurs_{year}_{month:02d}.nc'
-                if not fn.exists():
-                    hurs = self.data_catalog.get_rasterdataset(f'CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}', bbox=hurs_30_min.raster.bounds, buffer=1)
-                    del hurs.attrs['_FillValue']
-                    hurs.name = 'hurs'
-                    hurs.to_netcdf(fn)
-                else:
-                    hurs = xr.open_dataset(fn, chunks={'time': 365})['hurs']
-                hurs_ds_30sec.append(hurs)
-                hurs_time.append(f'{year}-{month:02d}')
-        
-        hurs_ds_30sec = xr.concat(hurs_ds_30sec, dim='time').rename({'x': 'lon', 'y': 'lat'})
-        hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
-        hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
-
-        hurs_output = xr.full_like(self.forcing['climate/tas'], np.nan)
-        hurs_output.name = 'hurs'
-        hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
-
-        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
-        for year in tqdm(range(start_year, end_year+1)):
-            for month in range(1, 13):
-                start_month = datetime(year, month, 1)
-                end_month = datetime(year, month, monthrange(year, month)[1])
-                
-                w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
-                w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
-                w5e5_regridded_mean = w5e5_regridded.mean(dim='time')  # get monthly mean
-                w5e5_regridded_tr = np.log(w5e5_regridded / (1 - w5e5_regridded))  # assume beta distribuation => logit transform
-                w5e5_regridded_mean_tr = np.log(w5e5_regridded_mean / (1 - w5e5_regridded_mean))  # logit transform
-
-                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.01  # convert to fraction
-                chelsa_tr = np.log(chelsa / (1 - chelsa))  # assume beta distribuation => logit transform
-
-                difference = chelsa_tr - w5e5_regridded_mean_tr
-
-                # apply difference to w5e5
-                w5e5_regridded_tr_corr = w5e5_regridded_tr + difference
-                w5e5_regridded_corr = (1 / (1 + np.exp(-w5e5_regridded_tr_corr))) * 100  # back transform
-                w5e5_regridded_corr.raster.set_crs(4326)
-
-                hurs_output.loc[
-                    dict(time=slice(start_month, end_month))
-                ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
-
-        self.set_forcing(hurs_output, 'climate/hurs')
-
-    def setup_wind(self, starttime, endtime):
-        # Can this be done with hydromt?
-        global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
-        # TODO: Gives memory errors when loading from disk.
-        # global_wind_atlas = self.data_catalog.get_rasterdataset(
-        #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
-        # ).rename({'x': 'lon', 'y': 'lat'})
-        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'}).squeeze()
-        target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
-        regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
-        global_wind_atlas_regridded = regridder(global_wind_atlas)
-
-        wind_30_min_avg = self.download_isimip(
-            product='SecondaryInputData', 
-            variable='sfcwind',
-            starttime=date(2008, 1, 1),
-            endtime=date(2017, 12, 31),
-            forcing='w5e5v2.0',
-            buffer=1
-        ).sfcWind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
-        regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
-        wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
-
-        # create diff layer:
-        # assume wind follows weibull distribution => do log transform
-        wind_30_min_avg_regridded_log = np.log(wind_30_min_avg_regridded)
-
-        global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded)
-
-        diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
-
-        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcWind  # some buffer to avoid edge effects / errors in ISIMIP API
-
-        wind_30min_regridded = regridder_30_min(wind_30_min)
-        wind_30min_regridded_log = np.log(wind_30min_regridded)
-
-        wind_30min_regridded_log_corr = wind_30min_regridded_log + diff_layer
-        wind_30min_regridded_corr = np.exp(wind_30min_regridded_log_corr)
-
-        wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(self.grid.raster.bounds)
-        wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
-        wind_output_clipped.name = 'wind'
-
-        self.set_forcing(wind_output_clipped, 'climate/wind')
 
     def add_grid_to_model_structure(self, grid: xr.Dataset, name: str) -> None:
         for var_name in grid.data_vars:
