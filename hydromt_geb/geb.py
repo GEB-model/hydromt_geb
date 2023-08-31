@@ -10,6 +10,7 @@ import math
 import requests
 import time
 import random
+import zipfile
 import json
 import numpy as np
 import pandas as pd
@@ -1856,7 +1857,7 @@ class GEBModel(GridModel):
 
         if variable == 'orog':
             assert len(files) == 1
-            filename = files[0]['name'].replace('_global', f'_global_lat{ymin}to{ymax}lon{xmin}to{xmax}')  # global should be included due to error in ISIMIP API
+            filename = files[0]['name'].replace('_global', '')  # global should be included due to error in ISIMIP API
             parse_files = [filename]
             if not (download_path / filename).exists():
                 download_files = [files[0]['path']]
@@ -1887,12 +1888,8 @@ class GEBModel(GridModel):
                     raise ValueError(f'could not parse date {date} from file {name}')
 
                 if not (end_date < starttime or start_date > endtime):
-                    if "_global" in file['name']:
-                        downloaded_file = file['name'].replace('_global', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}')
-                    else:
-                        downloaded_file = file['name'].replace('.nc', f'_lat{ymin}to{ymax}lon{xmin}to{xmax}.nc')
-                    parse_files.append(downloaded_file)
-                    if not (download_path / downloaded_file).exists():
+                    parse_files.append(file['name'].replace('_global', ''))
+                    if not (download_path / file['name']).exists():
                         download_files.append(file['path'])
 
         if download_files:
@@ -1920,9 +1917,28 @@ class GEBModel(GridModel):
                 response['file_url'],
                 path=download_path,
                 validate=False,
-                extract=True
+                extract=False
             )
             self.logger.info("Download finished")
+            # remove zip file
+            zip_file = (download_path / Path(urlparse(response['file_url']).path.split('/')[-1]))
+            # make sure the file exists
+            assert zip_file.exists()
+            # Open the zip file
+            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                # Get a list of all the files in the zip file
+                file_list = [f for f in zip_ref.namelist() if f.endswith('.nc')]
+                # Extract each file one by one
+                for i, file_name in enumerate(file_list):
+                    # Rename the file
+                    zip_ref.getinfo(file_name).filename = file_name.replace(f'_lat{ymin}to{ymax}lon{xmin}to{xmax}', '')
+                    # Extract the file
+                    if os.name == 'nt':
+                        assert not (len(str(download_path / file_name)) > 260), f"File path too long: {download_path / file_name}"
+                    else:
+                        max_path_length = os.pathconf('/', 'PC_PATH_MAX')
+                        assert not (len(str(download_path / file_name)) > max_path_length), f"File path too long: {download_path / file_name}"
+                    zip_ref.extract(file_name, path=download_path)
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
