@@ -1204,8 +1204,10 @@ class GEBModel(GridModel):
         self.grid['areamaps/cell_area']
         padded_cell_area = self.grid['areamaps/cell_area'].rio.pad_box(*region_bounds)
 
+        # calculate the cell area for the grid for the entire region
         region_cell_area = calculate_cell_area(padded_cell_area.raster.transform, padded_cell_area.shape)
 
+        # create subgrid for entire region
         region_cell_area_subgrid = hydromt.raster.full_from_transform(
             padded_cell_area.raster.transform * Affine.scale(1 / self.subgrid.factor),
             (padded_cell_area.raster.shape[0] * self.subgrid.factor, padded_cell_area.raster.shape[1] * self.subgrid.factor), 
@@ -1216,11 +1218,17 @@ class GEBModel(GridModel):
             lazy=True
         )
 
+        # calculate the cell area for the subgrid for the entire region
         region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
-        region_cell_area_subgrid_clipped_to_region = region_cell_area_subgrid.raster.clip_bbox((pad_minx, pad_miny, pad_maxx, pad_maxy))
+
+        # create new subgrid for the region without padding
+        region_cell_area_subgrid_clipped_to_region = hydromt.raster.full(region_raster.raster.coords, nodata=np.nan, dtype=padded_cell_area.dtype, name='areamaps/sub_grid_mask', crs=region_raster.raster.crs, lazy=True)
         
-        # TODO: Why is everything set to nan if not using values?
-        self.region_subgrid.set_grid(region_cell_area_subgrid_clipped_to_region.values, name='areamaps/region_cell_area_subgrid')
+        # remove padding from region subgrid
+        region_cell_area_subgrid_clipped_to_region.data = region_cell_area_subgrid.raster.clip_bbox((pad_minx, pad_miny, pad_maxx, pad_maxy))
+
+        # set the cell area for the region subgrid
+        self.region_subgrid.set_grid(region_cell_area_subgrid_clipped_to_region, name='areamaps/region_cell_area_subgrid')
 
         MERIT = self.data_catalog.get_rasterdataset(
             "merit_hydro",
