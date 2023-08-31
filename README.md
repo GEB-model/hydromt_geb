@@ -10,7 +10,7 @@ GEB, the Geographic Environmental and Behavioural model, is a coupled agent-base
 The model is build using widely used hydrological model CWatM and the agent-based model Honeybees for high-performance ABMs in Python. Some of the behavioral components of the model are based on ADOPT.
 
 ## Why HydroMT-GEB?
-Setting up hydrological models typically requires many (manual) steps to process input data and might therefore be time consuming and hard to reproduce. Especially improving models based on global geospatial datasets, which are rapidly becoming available at increasingly high resolutions, might be challenging. HydroMT-GEB aims to make the model building process **fast**, **modular** and **reproducible**. In the future, this tool will also  facilitate the analysis of GEB model results.
+Setting up hydrological models typically requires many (manual) steps to process input data and might therefore be time consuming and hard to reproduce. Especially improving models based on global geospatial datasets, which are rapidly becoming available at increasingly high resolutions, might be challenging. HydroMT-GEB aims to make the model building process fast, modular and reproducible. In the future, this tool will also  facilitate the analysis of GEB model results.
 
 ## How to use HydroMT-GEB?
 A description on how to use this tool for creating GEB's input data is given in [GEB's repository](https://github.com/jensdebruijn/GEB).
