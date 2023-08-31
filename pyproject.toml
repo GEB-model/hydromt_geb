@@ -8,12 +8,14 @@ authors = [
     {name = "Jens de Bruijn", email = "jens.de.bruijn@vu.nl"},
 ]
 dependencies = [
-    "s3fs",
+    "s3fs>=2023.6.0",
     "esmpy>=8.4.2",
-    "xesmf",
-    "hydromt>=0.8.0"
+    "xesmf>=0.7.1",
+    "hydromt>=0.8.0",
+    "tqdm>=4.66.1",
+    "isimip-client>=1.0.1"
 ]
-requires-python = ">=3.8" # fix tests to support older versions
+requires-python = ">=3.8"
 readme = "README.md"
 classifiers = [
     # https://pypi.python.org/pypi?%3Aaction=list_classifiers
