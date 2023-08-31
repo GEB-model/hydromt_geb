@@ -1263,13 +1263,12 @@ class GEBModel(GridModel):
                     90: 1, # herbaceous wetland
                     95: 5, # mangroves
                     100: 1, # moss and lichen
-                }, orient='index'
+                }, orient='index', columns=['GEB_land_use_class']
             ),
-        )[0]  # TODO: check why dataset is returned instead of dataarray, also need again setting of no data and crs
-        # set rivers to 5 (permanent water bodies)
-        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)
-        hydro_land_use.rio.set_crs(reprojected_land_use.rio.crs)
-        hydro_land_use.rio.set_nodata(-1)
+        )['GEB_land_use_class']
+        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)  # set rivers to 5 (permanent water bodies)
+        hydro_land_use.raster.set_nodata(-1)
+        hydro_land_use.raster.set_crs(reprojected_land_use.raster.crs)  # set crs to match reprojected land use TODO: Maybe this could be included in hydromt automatically?
         
         self.region_subgrid.set_grid(hydro_land_use, name='landsurface/full_region_land_use_classes')
 
