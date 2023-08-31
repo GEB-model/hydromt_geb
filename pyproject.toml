@@ -6,6 +6,7 @@ build-backend = "flit_core.buildapi"
 name = "hydromt_geb"
 authors = [
     {name = "Jens de Bruijn", email = "jens.de.bruijn@vu.nl"},
+    {name = "Maurice Kalthof", email = "w.m.l.kalthof@vu.nl"},
 ]
 dependencies = [
     "s3fs>=2023.6.0",
