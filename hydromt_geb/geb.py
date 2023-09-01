@@ -1400,6 +1400,75 @@ class GEBModel(GridModel):
 
         self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_well_per_m2')
 
+    def setup_drip_irrigation_prices_by_reference_year(self, drip_irrigation_price: float, upkeep_price_per_m2: float, reference_year: int, start_year: int, end_year: int):
+        """
+        Sets up the drip_irrigation prices and upkeep prices for the hydrological model based on a reference year.
+
+        Parameters
+        ----------
+        drip_irrigation_price : float
+            The price of a drip_irrigation in the reference year.
+        upkeep_price_per_m2 : float
+            The upkeep price per square meter of a drip_irrigation in the reference year.
+        reference_year : int
+            The reference year for the drip_irrigation prices and upkeep prices.
+        start_year : int
+            The start year for the drip_irrigation prices and upkeep prices.
+        end_year : int
+            The end year for the drip_irrigation prices and upkeep prices.
+
+        Notes
+        -----
+        This method sets up the drip_irrigation prices and upkeep prices for the hydrological model based on a reference year. It first
+        retrieves the inflation rates data from the `economics/inflation_rates` dictionary. It then creates dictionaries to
+        store the drip_irrigation prices and upkeep prices for each region, with the years as the time dimension and the prices as the
+        data dimension.
+
+        The drip_irrigation prices and upkeep prices are calculated by applying the inflation rates to the reference year prices. The
+        resulting prices are stored in the dictionaries with the region ID as the key.
+
+        The resulting drip_irrigation prices and upkeep prices data are set as dictionary with names of the form
+        'economics/drip_irrigation_prices' and 'economics/upkeep_prices_drip_irrigation_per_m2', respectively.
+        """
+        self.logger.info('Setting up drip_irrigation prices by reference year')
+        # create dictory with prices for drip_irrigation_prices per year by applying inflation rates
+        inflation_rates = self.dict['economics/inflation_rates']
+        regions = list(inflation_rates['data'].keys())
+
+        drip_irrigation_prices_dict = {
+            'time': list(range(start_year, end_year + 1)),
+            'data': {}
+        }
+        for region in regions:
+            drip_irrigation_prices = pd.Series(index=range(start_year, end_year + 1))
+            drip_irrigation_prices.loc[reference_year] = drip_irrigation_price
+            
+            for year in range(reference_year + 1, end_year + 1):
+                drip_irrigation_prices.loc[year] = drip_irrigation_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+            for year in range(reference_year -1, start_year -1, -1):
+                drip_irrigation_prices.loc[year] = drip_irrigation_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+
+            drip_irrigation_prices_dict['data'][region] = drip_irrigation_prices.tolist()
+
+        self.set_dict(drip_irrigation_prices_dict, name='economics/drip_irrigation_prices')
+            
+        upkeep_prices_dict = {
+            'time': list(range(start_year, end_year + 1)),
+            'data': {}
+        }
+        for region in regions:
+            upkeep_prices = pd.Series(index=range(start_year, end_year + 1))
+            upkeep_prices.loc[reference_year] = upkeep_price_per_m2
+            
+            for year in range(reference_year + 1, end_year + 1):
+                upkeep_prices.loc[year] = upkeep_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+            for year in range(reference_year -1, start_year -1, -1):
+                upkeep_prices.loc[year] = upkeep_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+
+            upkeep_prices_dict['data'][region] = upkeep_prices.tolist()
+
+        self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_drip_irrigation_per_m2')
+
     def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
         """
         Sets up the farmers data for GEB.
@@ -1934,10 +2003,10 @@ class GEBModel(GridModel):
                     zip_ref.getinfo(file_name).filename = file_name.replace(f'_lat{ymin}to{ymax}lon{xmin}to{xmax}', '')
                     # Extract the file
                     if os.name == 'nt':
-                        assert not (len(str(download_path / file_name)) > 260), f"File path too long: {download_path / file_name}"
+                        assert not (len(str(download_path / zip_ref.getinfo(file_name).filename)) > 260), f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
                     else:
                         max_path_length = os.pathconf('/', 'PC_PATH_MAX')
-                        assert not (len(str(download_path / file_name)) > max_path_length), f"File path too long: {download_path / file_name}"
+                        assert not (len(str(download_path / zip_ref.getinfo(file_name).filename)) > max_path_length), f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
                     zip_ref.extract(file_name, path=download_path)
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
