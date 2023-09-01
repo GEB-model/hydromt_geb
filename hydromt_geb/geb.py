@@ -1926,7 +1926,7 @@ class GEBModel(GridModel):
 
         if variable == 'orog':
             assert len(files) == 1
-            filename = files[0]['name'].replace('_global', '')  # global should be included due to error in ISIMIP API
+            filename = files[0]['name'] # global should be included due to error in ISIMIP API .replace('_global', '') 
             parse_files = [filename]
             if not (download_path / filename).exists():
                 download_files = [files[0]['path']]
