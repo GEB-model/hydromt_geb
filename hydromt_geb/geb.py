@@ -15,7 +15,6 @@ import json
 import numpy as np
 import pandas as pd
 import xarray as xr
-from collections import defaultdict
 import rioxarray as rxr
 from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
@@ -76,7 +75,7 @@ class GEBModel(GridModel):
         self.binary = {}
         self.dict = {}
 
-        self.model_structure = defaultdict(dict)
+        self.model_structure = {}
 
     def setup_grid(
         self,
@@ -2040,6 +2039,8 @@ class GEBModel(GridModel):
         return ds
 
     def add_grid_to_model_structure(self, grid: xr.Dataset, name: str) -> None:
+        if name not in self.model_structure:
+            self.model_structure[name] = {}
         for var_name in grid.data_vars:
             self.model_structure[name][var_name] = var_name + '.tif'
         
@@ -2068,6 +2069,8 @@ class GEBModel(GridModel):
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
+        if 'forcing' not in self.model_structure:
+            self.model_structure['forcing'] = {}
         for var in self.forcing:
             self.logger.info(f"Write {var}")
             forcing = self.forcing[var]
@@ -2084,6 +2087,8 @@ class GEBModel(GridModel):
             self.logger.debug("No table data found, skip writing.")
         else:
             self._assert_write_mode
+            if 'table' not in self.model_structure:
+                self.model_structure['table'] = {}
             for name, data in self.table.items():
                 fn = os.path.join(name + '.csv')
                 self.model_structure['table'][name] = fn
@@ -2095,6 +2100,8 @@ class GEBModel(GridModel):
             self.logger.debug("No table data found, skip writing.")
         else:
             self._assert_write_mode
+            if 'binary' not in self.model_structure:
+                self.model_structure['binary'] = {}
             for name, data in self.binary.items():
                 fn = os.path.join(name + '.npz')
                 self.model_structure['binary'][name] = fn
@@ -2106,6 +2113,8 @@ class GEBModel(GridModel):
             self.logger.debug("No table data found, skip writing.")
         else:
             self._assert_write_mode
+            if 'dict' not in self.model_structure:
+                self.model_structure['dict'] = {}
             for name, data in self.dict.items():
                 fn = os.path.join(name + '.json')
                 self.model_structure['dict'][name] = fn
@@ -2129,16 +2138,19 @@ class GEBModel(GridModel):
         if len(self._geoms) == 0:
             self.logger.debug("No geoms data found, skip writing.")
             return
-        self._assert_write_mode
-        if "driver" not in kwargs:
-            kwargs.update(driver="GeoJSON")
-        for name, gdf in self._geoms.items():
-            self.logger.debug(f"Writing file {fn.format(name=name)}")
-            self.model_structure["geoms"][name] = fn.format(name=name)
-            _fn = os.path.join(self.root, fn.format(name=name))
-            if not os.path.isdir(os.path.dirname(_fn)):
-                os.makedirs(os.path.dirname(_fn))
-            gdf.to_file(_fn, **kwargs)
+        else:
+            self._assert_write_mode
+            if "geoms" not in self.model_structure:
+                self.model_structure["geoms"] = {}
+            if "driver" not in kwargs:
+                kwargs.update(driver="GeoJSON")
+            for name, gdf in self._geoms.items():
+                self.logger.debug(f"Writing file {fn.format(name=name)}")
+                self.model_structure["geoms"][name] = fn.format(name=name)
+                _fn = os.path.join(self.root, fn.format(name=name))
+                if not os.path.isdir(os.path.dirname(_fn)):
+                    os.makedirs(os.path.dirname(_fn))
+                gdf.to_file(_fn, **kwargs)
 
     def set_table(self, table, name):
         self.table[name] = table
@@ -2164,27 +2176,33 @@ class GEBModel(GridModel):
         self.write_model_structure()
 
     def read_model_structure(self):
-        with open(Path(self.root, "model_structure.json"), "r") as f:
-            self.model_structure = json.load(f)
+        if len(self.model_structure) == 0:
+            with open(Path(self.root, "model_structure.json"), "r") as f:
+                self.model_structure = json.load(f)
 
     def read_geoms(self):
+        self.read_model_structure()
         for name, fn in self.model_structure["geoms"].items():
             self._geoms[name] = gpd.read_file(Path(self.root, fn))
 
     def read_binary(self):
+        self.read_model_structure()
         for name, fn in self.model_structure["binary"].items():
             self.binary[name] = np.load(Path(self.root, fn))["data"]
     
     def read_table(self):
+        self.read_model_structure()
         for name, fn in self.model_structure["table"].items():
             self.table[name] = pd.read_csv(Path(self.root, fn))
 
     def read_dict(self):
+        self.read_model_structure()
         for name, fn in self.model_structure["dict"].items():
             with open(Path(self.root, fn), "r") as f:
                 self.dict[name] = json.load(f)
 
     def read_grid_from_disk(self, grid, name: str) -> None:
+        self.read_model_structure()
         data_arrays = []
         for name, fn in self.model_structure[name].items():
             with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
