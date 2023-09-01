@@ -138,12 +138,11 @@ class GEBModel(GridModel):
         
         ldd = ds_hydro['flwdir'].raster.reclassify(
             reclass_table=pd.DataFrame(
-                index=[0, 1, 2, 4, 8, 16, 32, 64, 128],
-                data={"ldd": [5, 6, 3, 2, 1, 4, 7, 8, 9]}
+                index=[0, 1, 2, 4, 8, 16, 32, 64, 128, ds_hydro['flwdir'].raster.nodata],
+                data={"ldd": [5, 6, 3, 2, 1, 4, 7, 8, 9, 0]}
             ),
             method="exact"
         )['ldd']
-        ldd.raster.set_nodata(0)
         
         self.set_grid(ldd, name='routing/kinematic/ldd')
         self.set_grid(ds_hydro['uparea'], name='routing/kinematic/upstream_area')
@@ -883,7 +882,7 @@ class GEBModel(GridModel):
         folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
         folder.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info("Downloading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
+        self.logger.info("Downloading/reading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
         hurs_ds_30sec, hurs_time = [], []
         for year in tqdm(range(start_year, end_year+1)):
             for month in range(1, 13):
@@ -1083,7 +1082,7 @@ class GEBModel(GridModel):
         """
         # Can this be done with hydromt?
         global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
-        # TODO: Gives memory errors when loading from disk.
+        # TODO: Load from https in hydromt once supported: https://github.com/Deltares/hydromt/issues/499
         # global_wind_atlas = self.data_catalog.get_rasterdataset(
         #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
         # ).rename({'x': 'lon', 'y': 'lat'})
@@ -1958,7 +1957,7 @@ class GEBModel(GridModel):
 
                 if not (end_date < starttime or start_date > endtime):
                     parse_files.append(file['name'].replace('_global', ''))
-                    if not (download_path / file['name']).exists():
+                    if not (download_path / file['name'].replace('_global', '')).exists():
                         download_files.append(file['path'])
 
         if download_files:
@@ -2000,13 +1999,14 @@ class GEBModel(GridModel):
                 # Extract each file one by one
                 for i, file_name in enumerate(file_list):
                     # Rename the file
-                    zip_ref.getinfo(file_name).filename = file_name.replace(f'_lat{ymin}to{ymax}lon{xmin}to{xmax}', '')
+                    new_file_name = file_name.replace(f'_lat{ymin}to{ymax}lon{xmin}to{xmax}', '')
+                    zip_ref.getinfo(file_name).filename = new_file_name
                     # Extract the file
                     if os.name == 'nt':
-                        assert not (len(str(download_path / zip_ref.getinfo(file_name).filename)) > 260), f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
+                        max_file_path_length = 260
                     else:
-                        max_path_length = os.pathconf('/', 'PC_PATH_MAX')
-                        assert not (len(str(download_path / zip_ref.getinfo(file_name).filename)) > max_path_length), f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
+                        max_file_path_length = os.pathconf('/', 'PC_PATH_MAX')
+                    assert len(str(download_path / new_file_name)) <= max_file_path_length, f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
                     zip_ref.extract(file_name, path=download_path)
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
