@@ -1251,7 +1251,7 @@ class GEBModel(GridModel):
 
         hydro_land_use = reprojected_land_use.raster.reclassify(
             pd.DataFrame.from_dict({
-                    0: 5,  # no data, set to permanent water bodies because ocean
+                    reprojected_land_use.raster.nodata: 5,  # no data, set to permanent water bodies because ocean
                     10: 0, # tree cover
                     20: 1, # shrubland
                     30: 1, # grassland
