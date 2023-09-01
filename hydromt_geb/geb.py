@@ -1267,7 +1267,6 @@ class GEBModel(GridModel):
         )['GEB_land_use_class']
         hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)  # set rivers to 5 (permanent water bodies)
         hydro_land_use.raster.set_nodata(-1)
-        hydro_land_use.raster.set_crs(reprojected_land_use.raster.crs)  # set crs to match reprojected land use TODO: Maybe this could be included in hydromt automatically?
         
         self.region_subgrid.set_grid(hydro_land_use, name='landsurface/full_region_land_use_classes')
 
