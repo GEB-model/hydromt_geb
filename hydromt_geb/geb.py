@@ -2248,6 +2248,12 @@ class GEBModel(GridModel):
         self.read_grid_from_disk(self.MERIT_grid, 'MERIT_grid')
         self.read_grid_from_disk(self.MODFLOW_grid, 'MODFLOW_grid')
 
+    def read_forcing(self) -> None:
+        self.read_model_structure()
+        for name, fn in self.model_structure['forcing'].items():
+            with xr.open_dataset(Path(self.root) / fn, chunks={'time': 365})[name.split('/')[-1]] as da:
+                self.set_forcing(da.load(), name=name)
+
     def read(self):
         self.read_model_structure()
         
@@ -2256,5 +2262,4 @@ class GEBModel(GridModel):
         self.read_table()
         self.read_dict()
         self.read_grid()
-
         self.read_forcing()
