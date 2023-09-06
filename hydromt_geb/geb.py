@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
 
+import xclim.indices as xci
+
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
     os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
@@ -806,7 +808,7 @@ class GEBModel(GridModel):
         self.logger.info('setting up forcing data')
         high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
         self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
-        self.logger.info('setting up relative humdity...')
+        self.logger.info('setting up relative humidity...')
         self.setup_hurs(starttime, endtime)
         self.logger.info('setting up longwave radiation...')
         self.setup_longwave(starttime=starttime, endtime=endtime)
@@ -814,6 +816,7 @@ class GEBModel(GridModel):
         self.setup_pressure(starttime, endtime)
         self.logger.info('setting up wind...')
         self.setup_wind(starttime, endtime)
+   
 
     def setup_high_resolution_variables(self, variables: List[str], starttime: date, endtime: date):
         """
@@ -1122,6 +1125,33 @@ class GEBModel(GridModel):
         wind_output_clipped.name = 'wind'
 
         self.set_forcing(wind_output_clipped, 'climate/wind')
+
+    def setup_SPEI(self):
+        self.logger.info('setting up SPEI...')
+        pr_data = self.forcing['climate/pr']
+        tasmin_data = self.forcing['climate/tasmin']
+        tasmax_data = self.forcing['climate/tasmax']
+
+        pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
+
+        # Round the coordinates 
+        pet['y'] = np.round(pet['y'], 3)
+        pet['x'] = np.round(pet['x'], 3)
+        pr_data['y'] = np.round(pr_data['y'], 3)
+        pr_data['x'] = np.round(pr_data['x'], 3)
+
+        # Compute the potential evapotranspiration
+        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet, method='BR65')
+
+        wb_cal = water_budget.sel(time=slice('1985-01-01', '1995-12-31'))
+
+        # Compute the SPEI
+        spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
+        # spei = spei.compute()
+        spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
+        spei.name = 'spei'
+
+        self.set_forcing(spei, name = 'climate/spei')
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
