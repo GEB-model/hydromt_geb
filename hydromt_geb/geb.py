@@ -1602,7 +1602,7 @@ class GEBModel(GridModel):
         for column in farmers.columns:
             self.set_binary(farmers[column], name=f'agents/farmers/{column}')
 
-    def setup_farmers_from_csv(self, path, irrigation_sources=None, n_seasons=1):
+    def setup_farmers_from_csv(self, path=None, irrigation_sources=None, n_seasons=1):
         """
         Sets up the farmers data for GEB from a CSV file.
 
@@ -1623,6 +1623,8 @@ class GEBModel(GridModel):
 
         See the `setup_farmers` method for more information on how the farmer data is set up in the model.
         """
+        if path is None:
+            path = Path(self.root).parent / 'preprocessing' / 'agents' / 'farmers' / 'farmers.csv'
         farmers = pd.read_csv(path, index_col=0)
         self.setup_farmers(farmers, irrigation_sources, n_seasons)
 
