@@ -778,7 +778,12 @@ class GEBModel(GridModel):
 
         self.MODFLOW_grid.set_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
 
-    def setup_forcing(self, starttime: date, endtime: date):
+    def setup_forcing(
+            self,
+            starttime: date,
+            endtime: date,
+            data_source: str='isimip',
+        ):
         """
         Sets up the forcing data for GEB.
 
@@ -788,37 +793,43 @@ class GEBModel(GridModel):
             The start time of the forcing data.
         endtime : date
             The end time of the forcing data.
+        data_source : str, optional
+            The data source to use for the forcing data. Default is 'isimip'.
 
         Notes
         -----
         This method sets up the forcing data for GEB. It first downloads the high-resolution variables
         (precipitation, surface solar radiation, air temperature, maximum air temperature, and minimum air temperature) from
-        the ISIMIP dataset for the specified time period. The data is downloaded using the `setup_high_resolution_variables`
+        the ISIMIP dataset for the specified time period. The data is downloaded using the `setup_high_resolution_variables_isimip`
         method.
 
         The method then sets up the relative humidity, longwave radiation, pressure, and wind data for the model. The
-        relative humidity data is downloaded from the ISIMIP dataset using the `setup_hurs` method. The longwave radiation
+        relative humidity data is downloaded from the ISIMIP dataset using the `setup_hurs_isimip` method. The longwave radiation
         data is calculated using the air temperature and relative humidity data and the `calculate_longwave` function. The
-        pressure data is downloaded from the ISIMIP dataset using the `setup_pressure` method. The wind data is downloaded
-        from the ISIMIP dataset using the `setup_wind` method. All these data are first downscaled to the model grid.
+        pressure data is downloaded from the ISIMIP dataset using the `setup_pressure_isimip` method. The wind data is downloaded
+        from the ISIMIP dataset using the `setup_wind_isimip` method. All these data are first downscaled to the model grid.
 
         The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
         """
-        # download source data from ISIMIP
-        self.logger.info('setting up forcing data')
-        high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-        self.setup_high_resolution_variables(high_res_variables, starttime, endtime)
-        self.logger.info('setting up relative humidity...')
-        self.setup_hurs(starttime, endtime)
-        self.logger.info('setting up longwave radiation...')
-        self.setup_longwave(starttime=starttime, endtime=endtime)
-        self.logger.info('setting up pressure...')
-        self.setup_pressure(starttime, endtime)
-        self.logger.info('setting up wind...')
-        self.setup_wind(starttime, endtime)
-   
+        if data_source == 'isimip':
+            # download source data from ISIMIP
+            self.logger.info('setting up forcing data')
+            high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
+            self.setup_high_resolution_variables_isimip(high_res_variables, starttime, endtime)
+            self.logger.info('setting up relative humidity...')
+            self.setup_hurs_isimip(starttime, endtime)
+            self.logger.info('setting up longwave radiation...')
+            self.setup_longwave_isimip(starttime=starttime, endtime=endtime)
+            self.logger.info('setting up pressure...')
+            self.setup_pressure_isimip(starttime, endtime)
+            self.logger.info('setting up wind...')
+            self.setup_wind_isimip(starttime, endtime)
+        elif data_source == 'cmip':
+            pass
+        else:
+            raise ValueError(f'Unknown data source: {data_source}')
 
-    def setup_high_resolution_variables(self, variables: List[str], starttime: date, endtime: date):
+    def setup_high_resolution_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
         """
         Sets up the high-resolution climate variables for GEB.
 
@@ -849,7 +860,7 @@ class GEBModel(GridModel):
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             self.set_forcing(var, name=f'climate/{variable}')
 
-    def setup_hurs(self, starttime: date, endtime: date):
+    def setup_hurs_isimip(self, starttime: date, endtime: date):
         """
         Sets up the relative humidity data for GEB.
 
@@ -935,7 +946,7 @@ class GEBModel(GridModel):
 
         self.set_forcing(hurs_output, 'climate/hurs')
 
-    def setup_longwave(self, starttime: date, endtime: date):
+    def setup_longwave_isimip(self, starttime: date, endtime: date):
         """
         Sets up the longwave radiation data for GEB.
 
@@ -1007,7 +1018,7 @@ class GEBModel(GridModel):
         lw_fine.name = 'rlds'
         self.set_forcing(lw_fine, name='climate/rlds')
 
-    def setup_pressure(self, starttime: date, endtime: date):
+    def setup_pressure_isimip(self, starttime: date, endtime: date):
         """
         Sets up the surface pressure data for GEB.
 
@@ -1053,7 +1064,7 @@ class GEBModel(GridModel):
         pressure.data = pressure_30_min_regridded_corr
         self.set_forcing(pressure, name='climate/ps')
 
-    def setup_wind(self, starttime: date, endtime: date):
+    def setup_wind_isimip(self, starttime: date, endtime: date):
         """
         Sets up the wind data for GEB.
 
