@@ -824,6 +824,11 @@ class GEBModel(GridModel):
             self.setup_pressure_isimip(starttime, endtime)
             self.logger.info('setting up wind...')
             self.setup_wind_isimip(starttime, endtime)
+
+        # if snap_to_mask:
+        #     reference = self.grid
+        # else:
+        #     reference = self.grid.mask
         elif data_source == 'cmip':
             pass
         else:
@@ -855,7 +860,7 @@ class GEBModel(GridModel):
         """ 
         for variable in variables:
             self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
+            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec', snap_to_mask=True)
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             self.set_forcing(var, name=f'climate/{variable}')
@@ -918,7 +923,7 @@ class GEBModel(GridModel):
         hurs_output.name = 'hurs'
         hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
 
-        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop('time'), hurs_ds_30sec.isel(time=0).drop('time'), "bilinear")
+        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop_vars('time'), hurs_ds_30sec.isel(time=0).drop_vars('time'), "bilinear")
         for year in tqdm(range(start_year, end_year+1)):
             for month in range(1, 13):
                 start_month = datetime(year, month, 1)
@@ -1903,7 +1908,7 @@ class GEBModel(GridModel):
             }
         )
 
-    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0):
+    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0, snap_to_mask=False):
         """
         Downloads ISIMIP climate data for GEB.
 
@@ -1945,6 +1950,14 @@ class GEBModel(GridModel):
         client = ISIMIPClient()
         download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / variable
         download_path.mkdir(parents=True, exist_ok=True)
+        
+        ## Code to get data from disk rather than server.
+        # parse_files = []
+        # for file in os.listdir(download_path):
+        #     if file.endswith('.nc'):
+        #         fp = download_path / file
+        #         parse_files.append(fp)
+
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
             simulation_round='ISIMIP3a',
@@ -2052,17 +2065,31 @@ class GEBModel(GridModel):
             # remove zip file
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
-        datasets = [xr.open_dataset(download_path / file, chunks={'time': 365}) for file in parse_files]
-        coords_first_dataset = datasets[0].coords
+        datasets = [
+            xr.open_dataset(download_path / file, chunks={'time': 365})#.rename({'lat': 'y', 'lon': 'x'})
+            for file in parse_files
+        ]
+
+        # make sure y is decreasing rather than increasing
+        datasets = [
+            dataset.reindex(lat = dataset.lat[::-1]) if dataset.lat[0] < dataset.lat[-1] else dataset
+            for dataset in datasets   
+        ]
+        
+        if snap_to_mask:
+            reference = self.grid.mask.rename(y='lat', x='lon')
+        else:
+            reference = datasets[0]
+
         for dataset in datasets:
             # make sure all datasets have more or less the same coordinates
-            assert np.isclose(dataset.coords['lat'].values, coords_first_dataset['lat'].values, atol=abs(datasets[0].rio.resolution()[1] / 100), rtol=0).all()
-            assert np.isclose(dataset.coords['lon'].values, coords_first_dataset['lon'].values, atol=abs(datasets[0].rio.resolution()[0] / 100), rtol=0).all()
+            assert np.isclose(dataset.coords['lat'].values, reference['lat'].values, atol=abs(datasets[0].rio.resolution()[1] / 50), rtol=0).all()
+            assert np.isclose(dataset.coords['lon'].values, reference['lon'].values, atol=abs(datasets[0].rio.resolution()[0] / 50), rtol=0).all()
 
         datasets = [
             ds.assign_coords(
-                lon=coords_first_dataset['lon'],
-                lat=coords_first_dataset['lat'],
+                lon=reference['lon'].values,
+                lat=reference['lat'].values,
                 inplace=True
             ) for ds in datasets
         ]
