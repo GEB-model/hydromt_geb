@@ -834,6 +834,15 @@ class GEBModel(GridModel):
         else:
             raise ValueError(f'Unknown data source: {data_source}')
 
+    def snap_to_grid(self, ds, reference, relative_tollerance=0.02):
+        # make sure all datasets have more or less the same coordinates
+        assert np.isclose(ds.coords['y'].values, reference['y'].values, atol=abs(ds.rio.resolution()[1] * relative_tollerance), rtol=0).all()
+        assert np.isclose(ds.coords['x'].values, reference['x'].values, atol=abs(ds.rio.resolution()[0] * relative_tollerance), rtol=0).all()
+        return ds.assign_coords(
+            x=reference['x'].values,
+            y=reference['y'].values,
+        )
+
     def setup_high_resolution_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
         """
         Sets up the high-resolution climate variables for GEB.
@@ -863,6 +872,7 @@ class GEBModel(GridModel):
             ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec', snap_to_mask=True)
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
+            var = self.snap_to_grid(var, self.grid.mask)
             self.set_forcing(var, name=f'climate/{variable}')
 
     def setup_hurs_isimip(self, starttime: date, endtime: date):
@@ -949,6 +959,7 @@ class GEBModel(GridModel):
                     dict(time=slice(start_month, end_month))
                 ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
 
+        hurs_output = self.snap_to_grid(hurs_output, self.grid.mask)
         self.set_forcing(hurs_output, 'climate/hurs')
 
     def setup_longwave_isimip(self, starttime: date, endtime: date):
@@ -1021,6 +1032,7 @@ class GEBModel(GridModel):
         lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
 
         lw_fine.name = 'rlds'
+        lw_fine = self.snap_to_grid(lw_fine, self.grid.mask)
         self.set_forcing(lw_fine, name='climate/rlds')
 
     def setup_pressure_isimip(self, starttime: date, endtime: date):
@@ -1067,6 +1079,8 @@ class GEBModel(GridModel):
         pressure.name = 'ps'
         pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
         pressure.data = pressure_30_min_regridded_corr
+        
+        pressure = self.snap_to_grid(pressure, self.grid.mask)
         self.set_forcing(pressure, name='climate/ps')
 
     def setup_wind_isimip(self, starttime: date, endtime: date):
@@ -1140,6 +1154,7 @@ class GEBModel(GridModel):
         wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
         wind_output_clipped.name = 'wind'
 
+        wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid.mask)
         self.set_forcing(wind_output_clipped, 'climate/wind')
 
     def setup_SPEI(self):
@@ -1148,13 +1163,13 @@ class GEBModel(GridModel):
         tasmin_data = self.forcing['climate/tasmin']
         tasmax_data = self.forcing['climate/tasmax']
 
-        pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
+        # assert input data have the same coordinates
+        assert np.array_equal(pr_data.x, tasmin_data.x)
+        assert np.array_equal(pr_data.x, tasmax_data.x)
+        assert np.array_equal(pr_data.y, tasmax_data.y)
+        assert np.array_equal(pr_data.y, tasmax_data.y)
 
-        # Round the coordinates 
-        pet['y'] = np.round(pet['y'], 4)
-        pet['x'] = np.round(pet['x'], 4)
-        pr_data['y'] = np.round(pr_data['y'], 4)
-        pr_data['x'] = np.round(pr_data['x'], 4)
+        pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
 
         # Compute the potential evapotranspiration
         water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet, method='BR65')
@@ -1163,7 +1178,6 @@ class GEBModel(GridModel):
 
         # Compute the SPEI
         spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget, wb_cal = wb_cal, freq = "MS", window = 3, dist = 'gamma', method = 'APP')
-        # spei = spei.compute()
         spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
         spei.name = 'spei'
 
@@ -2076,7 +2090,7 @@ class GEBModel(GridModel):
             for dataset in datasets   
         ]
         
-        if snap_to_mask:
+        if False:
             reference = self.grid.mask.rename(y='lat', x='lon')
         else:
             reference = datasets[0]
