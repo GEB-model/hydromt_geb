@@ -1667,6 +1667,10 @@ class GEBModel(GridModel):
             The name of the column in the region database that contains the region IDs. Default is 'UID'.
         country_iso3_column : str, optional
             The name of the column in the region database that contains the country ISO3 codes. Default is 'ISO3'.
+        risk_aversion_mean : float, optional
+            The mean of the normal distribution from which the risk aversion values are sampled. Default is 1.5.
+        risk_aversion_standard_deviation : float, optional
+            The standard deviation of the normal distribution from which the risk aversion values are sampled. Default is 0.5.
 
         Notes
         -----
@@ -1674,6 +1678,8 @@ class GEBModel(GridModel):
         It first calculates the number of farmers and their farm sizes for each region based on the agricultural data for
         that region based on theamount of farm land and data from a global database on farm sizes per country. It then
         randomly assigns crops, irrigation sources, household sizes, and daily incomes and consumption levels to each farmer.
+
+        A paper that reports risk aversion values for 75 countries is this one: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2646134
         """
         SIZE_CLASSES_BOUNDARIES = {
             '< 1 Ha': (0, 10000),
