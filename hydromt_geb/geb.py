@@ -1648,7 +1648,14 @@ class GEBModel(GridModel):
         farmers = pd.read_csv(path, index_col=0)
         self.setup_farmers(farmers, irrigation_sources, n_seasons)
 
-    def setup_farmers_simple(self, irrigation_sources, region_id_column='UID', country_iso3_column='ISO3'):
+    def setup_farmers_simple(
+        self,
+        irrigation_sources,
+        region_id_column='UID',
+        country_iso3_column='ISO3',
+        risk_aversion_mean=1.5,
+        risk_aversion_standard_deviation=0.5,
+    ):
         """
         Sets up the farmers for tGEB.
 
@@ -1911,6 +1918,7 @@ class GEBModel(GridModel):
 
         farmers['daily_non_farm_income_family'] = random.choices([50, 100, 200, 500], k=len(farmers))
         farmers['daily_consumption_per_capita'] = random.choices([50, 100, 200, 500], k=len(farmers))
+        farmers['risk_aversion'] = np.random.normal(loc=risk_aversion_mean, scale=risk_aversion_standard_deviation, size=len(farmers))
 
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
