@@ -1172,12 +1172,15 @@ class GEBModel(GridModel):
         pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet, method='BR65')
+        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet)
 
-        wb_cal = water_budget.sel(time=slice('1981-01-01', '2010-01-01'))
+        water_budget_positive = water_budget - 1.01*water_budget.min()
+        water_budget_positive.attrs = {'units': 'kg m-2 s-1'}
+
+        wb_cal = water_budget_positive.sel(time=slice('1981-01-01', '2010-01-01'))
 
         # Compute the SPEI
-        spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
+        spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget_positive, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
         # spei = spei.compute()
         spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
         spei.name = 'spei'
