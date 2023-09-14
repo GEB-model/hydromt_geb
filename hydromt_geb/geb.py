@@ -1660,7 +1660,7 @@ class GEBModel(GridModel):
         risk_aversion_standard_deviation=0.5,
     ):
         """
-        Sets up the farmers for tGEB.
+        Sets up the farmers for GEB.
 
         Parameters
         ----------
