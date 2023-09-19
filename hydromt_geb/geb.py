@@ -21,6 +21,7 @@ from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
 
 import xclim.indices as xci
+from scipy.stats import genextreme
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -1169,7 +1170,13 @@ class GEBModel(GridModel):
         assert np.array_equal(pr_data.y, tasmax_data.y)
         assert np.array_equal(pr_data.y, tasmax_data.y)
 
+        # PET needs latitude, needs to be named latitude 
+        tasmin_data = tasmin_data.rename({'x': 'longitude','y': 'latitude'})
+        tasmax_data = tasmax_data.rename({'x': 'longitude','y': 'latitude'})
+
         pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
+        # Revert lon/lat to x/y
+        pet = pet.rename({'longitude': 'x','latitude': 'y'})
 
         # Compute the potential evapotranspiration
         water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet)
@@ -1186,6 +1193,62 @@ class GEBModel(GridModel):
         spei.name = 'spei'
 
         self.set_forcing(spei, name = 'climate/spei')
+
+    def setup_GEV(self):
+        self.logger.info('calculating GEV parameters...')
+        spei_data = self.forcing['climate/spei']
+
+        # invert the values and take the max 
+        SPEI_changed = spei_data * -1
+
+        # Group the data by year and find the maximum monthly sum for each year
+        SPEI_yearly_max = SPEI_changed.groupby('time.year').max(dim='time')
+
+        ## Prepare the dataset for the new input values 
+        NCfile_Empty = xr.Dataset(coords=spei_data.coords, attrs=spei_data.attrs)
+        NCfile_Empty =  NCfile_Empty.drop_vars('time')
+
+        attributes = ['shape', 'loc', 'scale']
+        gev_datasets = {attr: NCfile_Empty.copy() for attr in attributes}
+
+        data_shape = (NCfile_Empty.dims['y'], NCfile_Empty.dims['x'])
+
+        for attr, dataset in gev_datasets.items():
+            data = np.zeros(data_shape, dtype=np.float32)
+            dataset[attr] = xr.DataArray(
+                data,
+                coords={
+                    'y': NCfile_Empty['y'],
+                    'x': NCfile_Empty['x'],
+                },
+                dims=('y', 'x'),
+            )
+
+        gev_shape, gev_loc, gev_scale = [gev_datasets[attr] for attr in attributes]
+
+        # Get the latitude and longitude values
+        latitude = SPEI_yearly_max.coords['y'].values
+        longitude = SPEI_yearly_max.coords['x'].values
+
+        ## Fill the new netCDF file with the GEV parameters 
+
+        for lat_index, lat_value in enumerate(latitude):
+            for lon_index, lon_value in enumerate(longitude):
+                pixel_data = SPEI_yearly_max.values[:, lat_index, lon_index]
+                array_spei = np.array(pixel_data)
+                shape, loc, scale = genextreme.fit(array_spei)
+
+                gev_shape['shape'][lat_index, lon_index] = np.array(shape)
+                gev_loc['loc'][lat_index, lon_index] = np.array(loc)
+                gev_scale['scale'][lat_index, lon_index] = np.array(scale)
+
+        gev_shape.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_shape'}
+        gev_loc.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_loc'}
+        gev_scale.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_scale'}
+
+        self.set_grid(gev_shape['shape'], name = 'climate/gev_shape')
+        self.set_grid(gev_loc['loc'], name = 'climate/gev_loc')
+        self.set_grid(gev_scale['scale'], name = 'climate/gev_scale')
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
