@@ -1581,6 +1581,7 @@ class GEBModel(GridModel):
             # TODO: Why does nodata value disappear?                  
             farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
+            assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
 
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
         
@@ -1593,6 +1594,7 @@ class GEBModel(GridModel):
         cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1))
         cut_farms = cut_farms[cut_farms != -1]
 
+        assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
 
         subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
@@ -2334,4 +2336,4 @@ class GEBModel(GridModel):
         self.read_table()
         self.read_dict()
         self.read_grid()
-        self.read_forcing()
+        # self.read_forcing()
