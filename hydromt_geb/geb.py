@@ -784,6 +784,8 @@ class GEBModel(GridModel):
             starttime: date,
             endtime: date,
             data_source: str='isimip',
+            resolution_arcsec: int=30,
+            forcing: str='chelsa-w5e5v1.0',
         ):
         """
         Sets up the forcing data for GEB.
@@ -801,37 +803,37 @@ class GEBModel(GridModel):
         -----
         This method sets up the forcing data for GEB. It first downloads the high-resolution variables
         (precipitation, surface solar radiation, air temperature, maximum air temperature, and minimum air temperature) from
-        the ISIMIP dataset for the specified time period. The data is downloaded using the `setup_high_resolution_variables_isimip`
+        the ISIMIP dataset for the specified time period. The data is downloaded using the `setup_30arcsec_variables_isimip`
         method.
 
         The method then sets up the relative humidity, longwave radiation, pressure, and wind data for the model. The
-        relative humidity data is downloaded from the ISIMIP dataset using the `setup_hurs_isimip` method. The longwave radiation
+        relative humidity data is downloaded from the ISIMIP dataset using the `setup_hurs_isimip_30arcsec` method. The longwave radiation
         data is calculated using the air temperature and relative humidity data and the `calculate_longwave` function. The
-        pressure data is downloaded from the ISIMIP dataset using the `setup_pressure_isimip` method. The wind data is downloaded
-        from the ISIMIP dataset using the `setup_wind_isimip` method. All these data are first downscaled to the model grid.
+        pressure data is downloaded from the ISIMIP dataset using the `setup_pressure_isimip_30arcsec` method. The wind data is downloaded
+        from the ISIMIP dataset using the `setup_wind_isimip_30arcsec` method. All these data are first downscaled to the model grid.
 
         The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
         """
         if data_source == 'isimip':
-            # download source data from ISIMIP
-            self.logger.info('setting up forcing data')
-            high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-            self.setup_high_resolution_variables_isimip(high_res_variables, starttime, endtime)
-            self.logger.info('setting up relative humidity...')
-            self.setup_hurs_isimip(starttime, endtime)
-            self.logger.info('setting up longwave radiation...')
-            self.setup_longwave_isimip(starttime=starttime, endtime=endtime)
-            self.logger.info('setting up pressure...')
-            self.setup_pressure_isimip(starttime, endtime)
-            self.logger.info('setting up wind...')
-            self.setup_wind_isimip(starttime, endtime)
-
-        # if snap_to_mask:
-        #     reference = self.grid
-        # else:
-        #     reference = self.grid.mask
+            if resolution_arcsec == 30:
+                assert forcing == 'chelsa-w5e5v1.0', 'Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution'
+                # download source data from ISIMIP
+                self.logger.info('setting up forcing data')
+                high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
+                self.setup_30arcsec_variables_isimip(high_res_variables, starttime, endtime)
+                self.logger.info('setting up relative humidity...')
+                self.setup_hurs_isimip_30arcsec(starttime, endtime)
+                self.logger.info('setting up longwave radiation...')
+                self.setup_longwave_isimip_30arcsec(starttime=starttime, endtime=endtime)
+                self.logger.info('setting up pressure...')
+                self.setup_pressure_isimip_30arcsec(starttime, endtime)
+                self.logger.info('setting up wind...')
+                self.setup_wind_isimip_30arcsec(starttime, endtime)
+            elif resolution_arcsec == 1800:
+                variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin', 'hurs', 'rlds', 'ps', 'sfcwind']
+                self.setup_1800arcsec_variables_isimip(forcing, variables, starttime, endtime)
         elif data_source == 'cmip':
-            pass
+            raise NotImplementedError('CMIP forcing data is not yet supported')
         else:
             raise ValueError(f'Unknown data source: {data_source}')
 
@@ -844,7 +846,39 @@ class GEBModel(GridModel):
             y=reference['y'].values,
         )
 
-    def setup_high_resolution_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
+    def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date):
+        """
+        Sets up the high-resolution climate variables for GEB.
+
+        Parameters
+        ----------
+        variables : list of str
+            The list of climate variables to set up.
+        starttime : date
+            The start time of the forcing data.
+        endtime : date
+            The end time of the forcing data.
+
+        Notes
+        -----
+        This method sets up the high-resolution climate variables for GEB. It downloads the specified
+        climate variables from the ISIMIP dataset for the specified time period. The data is downloaded using the
+        `download_isimip` method.
+
+        The method renames the longitude and latitude dimensions of the downloaded data to 'x' and 'y', respectively. It
+        then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
+
+        The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
+        """ 
+        for variable in variables:
+            self.logger.info(f'Setting up {variable}...')
+            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1, snap_to_mask=False)
+            ds = ds.rename({'lon': 'x', 'lat': 'y'})
+            var = ds[variable].raster.clip_bbox(ds.raster.bounds)
+            var = self.interpolate(var, 'linear')
+            self.set_forcing(var, name=f'climate/{variable}')
+
+    def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
         """
         Sets up the high-resolution climate variables for GEB.
 
@@ -876,7 +910,7 @@ class GEBModel(GridModel):
             var = self.snap_to_grid(var, self.grid.mask)
             self.set_forcing(var, name=f'climate/{variable}')
 
-    def setup_hurs_isimip(self, starttime: date, endtime: date):
+    def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
         """
         Sets up the relative humidity data for GEB.
 
@@ -963,7 +997,7 @@ class GEBModel(GridModel):
         hurs_output = self.snap_to_grid(hurs_output, self.grid.mask)
         self.set_forcing(hurs_output, 'climate/hurs')
 
-    def setup_longwave_isimip(self, starttime: date, endtime: date):
+    def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date):
         """
         Sets up the longwave radiation data for GEB.
 
@@ -1036,7 +1070,7 @@ class GEBModel(GridModel):
         lw_fine = self.snap_to_grid(lw_fine, self.grid.mask)
         self.set_forcing(lw_fine, name='climate/rlds')
 
-    def setup_pressure_isimip(self, starttime: date, endtime: date):
+    def setup_pressure_isimip_30arcsec(self, starttime: date, endtime: date):
         """
         Sets up the surface pressure data for GEB.
 
@@ -1084,7 +1118,7 @@ class GEBModel(GridModel):
         pressure = self.snap_to_grid(pressure, self.grid.mask)
         self.set_forcing(pressure, name='climate/ps')
 
-    def setup_wind_isimip(self, starttime: date, endtime: date):
+    def setup_wind_isimip_30arcsec(self, starttime: date, endtime: date):
         """
         Sets up the wind data for GEB.
 
@@ -2074,6 +2108,11 @@ class GEBModel(GridModel):
         xmax += buffer
         ymax += buffer
 
+        # xmin = round(xmin)
+        # ymin = round(ymin)
+        # xmax = round(xmax)
+        # ymax = round(ymax)
+
         if variable == 'orog':
             assert len(files) == 1
             filename = files[0]['name'] # global should be included due to error in ISIMIP API .replace('_global', '') 
@@ -2099,10 +2138,10 @@ class GEBModel(GridModel):
                 elif len(date) == 6:
                     start_date = datetime.strptime(date, '%Y%m').date()
                     end_date = start_date + relativedelta(months=1) - relativedelta(days=1)
-                # elif len(date) == 4:
-                #     start_year = int((splitted_filename[-2]))
-                #     end_year = int(date[:4])
-                #     month = None
+                elif len(date) == 4:  # is year
+                    assert splitted_filename[-2].isdigit()
+                    start_date = datetime.strptime(splitted_filename[-2], '%Y').date()
+                    end_date = datetime.strptime(date, '%Y').date()
                 else:
                     raise ValueError(f'could not parse date {date} from file {name}')
 
@@ -2150,7 +2189,25 @@ class GEBModel(GridModel):
                 # Extract each file one by one
                 for i, file_name in enumerate(file_list):
                     # Rename the file
-                    new_file_name = file_name.replace(f'_lat{ymin}to{ymax}lon{xmin}to{xmax}', '')
+                    bounds_str = ''
+                    if isinstance(ymin, float):
+                        bounds_str += f'_lat{ymin}'
+                    else:
+                        bounds_str += f'_lat{ymin:.1f}'
+                    if isinstance(ymax, float):
+                        bounds_str += f'to{ymax}'
+                    else:
+                        bounds_str += f'to{ymax:.1f}'
+                    if isinstance(xmin, float):
+                        bounds_str += f'lon{xmin}'
+                    else:
+                        bounds_str += f'lon{xmin:.1f}'
+                    if isinstance(xmax, float):
+                        bounds_str += f'to{xmax}'
+                    else:
+                        bounds_str += f'to{xmax:.1f}'
+                    assert bounds_str in file_name
+                    new_file_name = file_name.replace(bounds_str, '')
                     zip_ref.getinfo(file_name).filename = new_file_name
                     # Extract the file
                     if os.name == 'nt':
@@ -2173,11 +2230,7 @@ class GEBModel(GridModel):
             for dataset in datasets   
         ]
         
-        if False:
-            reference = self.grid.mask.rename(y='lat', x='lon')
-        else:
-            reference = datasets[0]
-
+        reference = datasets[0]
         for dataset in datasets:
             # make sure all datasets have more or less the same coordinates
             assert np.isclose(dataset.coords['lat'].values, reference['lat'].values, atol=abs(datasets[0].rio.resolution()[1] / 50), rtol=0).all()
