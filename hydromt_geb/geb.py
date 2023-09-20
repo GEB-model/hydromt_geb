@@ -786,6 +786,8 @@ class GEBModel(GridModel):
             data_source: str='isimip',
             resolution_arcsec: int=30,
             forcing: str='chelsa-w5e5v1.0',
+            scenario_name: str=None,
+            ssp=None
         ):
         """
         Sets up the forcing data for GEB.
@@ -814,28 +816,36 @@ class GEBModel(GridModel):
 
         The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
         """
+
+        folder = 'climate'
+        if scenario_name is not None:
+            folder = f'{folder}/{scenario_name}'
+
         if data_source == 'isimip':
             if resolution_arcsec == 30:
                 assert forcing == 'chelsa-w5e5v1.0', 'Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution'
                 # download source data from ISIMIP
                 self.logger.info('setting up forcing data')
                 high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-                self.setup_30arcsec_variables_isimip(high_res_variables, starttime, endtime)
+                self.setup_30arcsec_variables_isimip(high_res_variables, starttime, endtime, folder=folder)
                 self.logger.info('setting up relative humidity...')
-                self.setup_hurs_isimip_30arcsec(starttime, endtime)
+                self.setup_hurs_isimip_30arcsec(starttime, endtime, folder=folder)
                 self.logger.info('setting up longwave radiation...')
-                self.setup_longwave_isimip_30arcsec(starttime=starttime, endtime=endtime)
+                self.setup_longwave_isimip_30arcsec(starttime=starttime, endtime=endtime, folder=folder)
                 self.logger.info('setting up pressure...')
-                self.setup_pressure_isimip_30arcsec(starttime, endtime)
+                self.setup_pressure_isimip_30arcsec(starttime, endtime, folder=folder)
                 self.logger.info('setting up wind...')
-                self.setup_wind_isimip_30arcsec(starttime, endtime)
+                self.setup_wind_isimip_30arcsec(starttime, endtime, folder=folder)
             elif resolution_arcsec == 1800:
                 variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin', 'hurs', 'rlds', 'ps', 'sfcwind']
-                self.setup_1800arcsec_variables_isimip(forcing, variables, starttime, endtime)
+                self.setup_1800arcsec_variables_isimip(forcing, variables, starttime, endtime, ssp=ssp, folder=folder)
         elif data_source == 'cmip':
             raise NotImplementedError('CMIP forcing data is not yet supported')
         else:
             raise ValueError(f'Unknown data source: {data_source}')
+
+        self.setup_SPEI(folder)
+        self.setup_GEV(folder)
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02):
         # make sure all datasets have more or less the same coordinates
@@ -846,7 +856,7 @@ class GEBModel(GridModel):
             y=reference['y'].values,
         )
 
-    def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date):
+    def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date, ssp: str, folder: str):
         """
         Sets up the high-resolution climate variables for GEB.
 
@@ -858,6 +868,50 @@ class GEBModel(GridModel):
             The start time of the forcing data.
         endtime : date
             The end time of the forcing data.
+        folder: str
+            The folder to save the forcing data in.
+
+        Notes
+        -----
+        This method sets up the high-resolution climate variables for GEB. It downloads the specified
+        climate variables from the ISIMIP dataset for the specified time period. The data is downloaded using the
+        `download_isimip` method.
+
+        The method renames the longitude and latitude dimensions of the downloaded data to 'x' and 'y', respectively. It
+        then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
+
+        The resulting climate variables are set as forcing data in the model with names of the form '{folder}/{variable_name}'.
+        """ 
+        for variable in variables:
+            self.logger.info(f'Setting up {variable}...')
+            first_year_future_climate = 2015
+            var = []
+            if endtime.year < first_year_future_climate or starttime.year < first_year_future_climate:  # isimip cutoff date between historic and future climate
+                ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario='historical', variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
+                var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
+            if starttime.year >= first_year_future_climate or endtime.year >= first_year_future_climate:
+                assert ssp is not None, 'ssp must be specified for future climate'
+                ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
+                var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
+            
+            var = xr.concat(var, dim='time')
+            var = var.rename({'lon': 'x', 'lat': 'y'})
+            self.set_forcing(var, name=f'{folder}/{variable}')
+
+    def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date, folder: str):
+        """
+        Sets up the high-resolution climate variables for GEB.
+
+        Parameters
+        ----------
+        variables : list of str
+            The list of climate variables to set up.
+        starttime : date
+            The start time of the forcing data.
+        endtime : date
+            The end time of the forcing data.
+        folder: str
+            The folder to save the forcing data in.
 
         Notes
         -----
@@ -872,45 +926,13 @@ class GEBModel(GridModel):
         """ 
         for variable in variables:
             self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1, snap_to_mask=False)
-            ds = ds.rename({'lon': 'x', 'lat': 'y'})
-            var = ds[variable].raster.clip_bbox(ds.raster.bounds)
-            var = self.interpolate(var, 'linear')
-            self.set_forcing(var, name=f'climate/{variable}')
-
-    def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
-        """
-        Sets up the high-resolution climate variables for GEB.
-
-        Parameters
-        ----------
-        variables : list of str
-            The list of climate variables to set up.
-        starttime : date
-            The start time of the forcing data.
-        endtime : date
-            The end time of the forcing data.
-
-        Notes
-        -----
-        This method sets up the high-resolution climate variables for GEB. It downloads the specified
-        climate variables from the ISIMIP dataset for the specified time period. The data is downloaded using the
-        `download_isimip` method.
-
-        The method renames the longitude and latitude dimensions of the downloaded data to 'x' and 'y', respectively. It
-        then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
-
-        The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
-        """ 
-        for variable in variables:
-            self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec', snap_to_mask=True)
+            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             var = self.snap_to_grid(var, self.grid.mask)
-            self.set_forcing(var, name=f'climate/{variable}')
+            self.set_forcing(var, name=f'{folder}/{variable}')
 
-    def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date, folder: str):
         """
         Sets up the relative humidity data for GEB.
 
@@ -920,6 +942,8 @@ class GEBModel(GridModel):
             The start time of the relative humidity data in ISO 8601 format (YYYY-MM-DD).
         endtime : date
             The end time of the relative humidity data in ISO 8601 format (YYYY-MM-DD).
+        folder: str
+            The folder to save the forcing data in.
 
         Notes
         -----
@@ -942,14 +966,14 @@ class GEBModel(GridModel):
         start_year = starttime.year
         end_year = endtime.year
 
-        folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
-        folder.mkdir(parents=True, exist_ok=True)
+        chelsa_folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
+        chelsa_folder.mkdir(parents=True, exist_ok=True)
 
         self.logger.info("Downloading/reading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
         hurs_ds_30sec, hurs_time = [], []
         for year in tqdm(range(start_year, end_year+1)):
             for month in range(1, 13):
-                fn = folder / f'hurs_{year}_{month:02d}.nc'
+                fn = chelsa_folder / f'hurs_{year}_{month:02d}.nc'
                 if not fn.exists():
                     hurs = self.data_catalog.get_rasterdataset(f'CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}', bbox=hurs_30_min.raster.bounds, buffer=1)
                     del hurs.attrs['_FillValue']
@@ -995,9 +1019,9 @@ class GEBModel(GridModel):
                 ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
 
         hurs_output = self.snap_to_grid(hurs_output, self.grid.mask)
-        self.set_forcing(hurs_output, 'climate/hurs')
+        self.set_forcing(hurs_output, f'{folder}/hurs')
 
-    def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date, folder: str):
         """
         Sets up the longwave radiation data for GEB.
 
@@ -1007,6 +1031,8 @@ class GEBModel(GridModel):
             The start time of the longwave radiation data in ISO 8601 format (YYYY-MM-DD).
         endtime : date
             The end time of the longwave radiation data in ISO 8601 format (YYYY-MM-DD).
+        folder: str
+            The folder to save the forcing data in.
 
         Notes
         -----
@@ -1031,7 +1057,7 @@ class GEBModel(GridModel):
         lv = 2.5E6  # latent heat of vaporization of water
         Rv = 461.5  # gas constant for water vapour [J K kg-1]
 
-        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+        target = self.forcing[f'{folder}/hurs'].rename({'x': 'lon', 'y': 'lat'})
 
         hurs_coarse = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
         tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
@@ -1043,8 +1069,8 @@ class GEBModel(GridModel):
         tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
         rlds_coarse_regridded = regridder(rlds_coarse).rename({'lon': 'x', 'lat': 'y'})
 
-        hurs_fine = self.forcing['climate/hurs']
-        tas_fine = self.forcing['climate/tas']
+        hurs_fine = self.forcing[f'{folder}/hurs']
+        tas_fine = self.forcing[f'{folder}/tas']
 
         # now ready for calculation:
         es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded))  # saturation vapor pressure
@@ -1068,9 +1094,9 @@ class GEBModel(GridModel):
 
         lw_fine.name = 'rlds'
         lw_fine = self.snap_to_grid(lw_fine, self.grid.mask)
-        self.set_forcing(lw_fine, name='climate/rlds')
+        self.set_forcing(lw_fine, name=f'{folder}/rlds')
 
-    def setup_pressure_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_pressure_isimip_30arcsec(self, starttime: date, endtime: date, folder: str):
         """
         Sets up the surface pressure data for GEB.
 
@@ -1080,6 +1106,8 @@ class GEBModel(GridModel):
             The start time of the surface pressure data in ISO 8601 format (YYYY-MM-DD).
         endtime : date
             The end time of the surface pressure data in ISO 8601 format (YYYY-MM-DD).
+        folder: str
+            The folder to save the forcing data in.
 
         Notes
         -----
@@ -1099,7 +1127,7 @@ class GEBModel(GridModel):
         r0 = 8.314462618  # universal gas constant [J/(mol·K)]
         T0 = 288.16  # Sea level standard temperature  [K]
 
-        target = self.forcing['climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+        target = self.forcing[f'{folder}/hurs'].rename({'x': 'lon', 'y': 'lat'})
         pressure_30_min = self.download_isimip(product='SecondaryInputData', variable='psl', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).psl  # some buffer to avoid edge effects / errors in ISIMIP API
         
         orography = self.download_isimip(product='InputData', variable='orog', forcing='chelsa-w5e5v1.0', buffer=1).orog  # some buffer to avoid edge effects / errors in ISIMIP API
@@ -1110,15 +1138,15 @@ class GEBModel(GridModel):
         pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
         pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
 
-        pressure = xr.full_like(self.forcing['climate/hurs'], fill_value=np.nan)
+        pressure = xr.full_like(self.forcing[f'{folder}/hurs'], fill_value=np.nan)
         pressure.name = 'ps'
         pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
         pressure.data = pressure_30_min_regridded_corr
         
         pressure = self.snap_to_grid(pressure, self.grid.mask)
-        self.set_forcing(pressure, name='climate/ps')
+        self.set_forcing(pressure, name=f'{folder}/ps')
 
-    def setup_wind_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_wind_isimip_30arcsec(self, starttime: date, endtime: date, folder: str):
         """
         Sets up the wind data for GEB.
 
@@ -1128,6 +1156,8 @@ class GEBModel(GridModel):
             The start time of the wind data in ISO 8601 format (YYYY-MM-DD).
         endtime : date
             The end time of the wind data in ISO 8601 format (YYYY-MM-DD).
+        folder: str
+            The folder to save the forcing data in.
 
         Notes
         -----
@@ -1190,13 +1220,13 @@ class GEBModel(GridModel):
         wind_output_clipped.name = 'wind'
 
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid.mask)
-        self.set_forcing(wind_output_clipped, 'climate/wind')
+        self.set_forcing(wind_output_clipped, f'{folder}/wind')
 
-    def setup_SPEI(self):
+    def setup_SPEI(self, folder):
         self.logger.info('setting up SPEI...')
-        pr_data = self.forcing['climate/pr']
-        tasmin_data = self.forcing['climate/tasmin']
-        tasmax_data = self.forcing['climate/tasmax']
+        pr_data = self.forcing[f'{folder}/pr']
+        tasmin_data = self.forcing[f'{folder}/tasmin']
+        tasmax_data = self.forcing[f'{folder}/tasmax']
 
         # assert input data have the same coordinates
         assert np.array_equal(pr_data.x, tasmin_data.x)
@@ -1226,11 +1256,11 @@ class GEBModel(GridModel):
         spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
         spei.name = 'spei'
 
-        self.set_forcing(spei, name = 'climate/spei')
+        self.set_forcing(spei, name = f'{folder}/spei')
 
-    def setup_GEV(self):
+    def setup_GEV(self, folder):
         self.logger.info('calculating GEV parameters...')
-        spei_data = self.forcing['climate/spei']
+        spei_data = self.forcing[f'{folder}/spei']
 
         # invert the values and take the max 
         SPEI_changed = spei_data * -1
@@ -1280,9 +1310,9 @@ class GEBModel(GridModel):
         gev_loc.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_loc'}
         gev_scale.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_scale'}
 
-        self.set_grid(gev_shape['shape'], name = 'climate/gev_shape')
-        self.set_grid(gev_loc['loc'], name = 'climate/gev_loc')
-        self.set_grid(gev_scale['scale'], name = 'climate/gev_scale')
+        self.set_grid(gev_shape['shape'], name = f'{folder}/gev_shape')
+        self.set_grid(gev_loc['loc'], name = f'{folder}/gev_loc')
+        self.set_grid(gev_scale['scale'], name = f'{folder}/gev_scale')
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
@@ -2039,7 +2069,7 @@ class GEBModel(GridModel):
             }
         )
 
-    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, resolution=None, buffer=0, snap_to_mask=False):
+    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, simulation_round='ISIMIP3a', climate_scenario='obsclim', resolution=None, buffer=0):
         """
         Downloads ISIMIP climate data for GEB.
 
@@ -2091,10 +2121,10 @@ class GEBModel(GridModel):
 
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
-            simulation_round='ISIMIP3a',
+            simulation_round=simulation_round,
             product=product,
             climate_forcing=forcing,
-            climate_scenario='obsclim',
+            climate_scenario=climate_scenario,
             climate_variable=variable,
             resolution=resolution,
         )
