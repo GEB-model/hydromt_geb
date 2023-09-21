@@ -2073,13 +2073,15 @@ class GEBModel(GridModel):
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
-        return ds.interp(
+        out_ds = ds.interp(
             method=interpolation_method,
             **{
-                ydim: self.grid.coords['y'],
-                xdim: self.grid.coords['x']
+                ydim: self.grid.y.rename({'y': ydim}),
+                xdim: self.grid.x.rename({'x': xdim})
             }
         )
+        assert len(ds.dims) == len(out_ds.dims)
+        return out_ds
 
     def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, simulation_round='ISIMIP3a', climate_scenario='obsclim', resolution=None, buffer=0):
         """
