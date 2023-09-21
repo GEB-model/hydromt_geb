@@ -601,7 +601,7 @@ class GEBModel(GridModel):
         self.logger.info('Setting up waterbodies')
         waterbodies = self.data_catalog.get_geodataframe(
             "hydro_lakes",
-            geom=self.staticgeoms['areamaps/region'],
+            geom=self.geoms['areamaps/region'],
             predicate="intersects",
             variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
         ).set_index('waterbody_id')
@@ -1350,7 +1350,7 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
-            geom=self.staticgeoms['areamaps/region'],
+            geom=self.geoms['areamaps/region'],
             predicate="intersects",
         ).rename(columns={unique_region_id: 'region_id'})
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
