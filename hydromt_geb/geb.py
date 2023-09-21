@@ -2500,4 +2500,4 @@ class GEBModel(GridModel):
         self.read_table()
         self.read_dict()
         self.read_grid()
-        # self.read_forcing()
+        self.read_forcing()
