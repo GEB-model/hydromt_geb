@@ -1271,52 +1271,61 @@ class GEBModel(GridModel):
 
         # Group the data by year and find the maximum monthly sum for each year
         SPEI_yearly_max = SPEI_changed.groupby('time.year').max(dim='time')
+        SPEI_yearly_max = SPEI_yearly_max.rename({'year': 'time'})
 
-        ## Prepare the dataset for the new input values 
-        NCfile_Empty = xr.Dataset(coords=spei_data.coords, attrs=spei_data.attrs)
-        NCfile_Empty =  NCfile_Empty.drop_vars('time')
+        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
+        GEV.name = 'gev'
+        
+        self.set_grid(GEV.sel(dparams='c'), name = f'{folder}/gev_c')
+        self.set_grid(GEV.sel(dparams='loc'), name = f'{folder}/gev_loc')
+        self.set_grid(GEV.sel(dparams='scale'), name = f'{folder}/gev_scale')
 
-        attributes = ['shape', 'loc', 'scale']
-        gev_datasets = {attr: NCfile_Empty.copy() for attr in attributes}
 
-        data_shape = (NCfile_Empty.dims['y'], NCfile_Empty.dims['x'])
+        # ## Prepare the dataset for the new input values 
+        # NCfile_Empty = xr.Dataset(coords=spei_data.coords, attrs=spei_data.attrs)
+        # NCfile_Empty =  NCfile_Empty.drop_vars('time')
 
-        for attr, dataset in gev_datasets.items():
-            data = np.zeros(data_shape, dtype=np.float32)
-            dataset[attr] = xr.DataArray(
-                data,
-                coords={
-                    'y': NCfile_Empty['y'],
-                    'x': NCfile_Empty['x'],
-                },
-                dims=('y', 'x'),
-            )
+        # attributes = ['shape', 'loc', 'scale']
+        # gev_datasets = {attr: NCfile_Empty.copy() for attr in attributes}
 
-        gev_shape, gev_loc, gev_scale = [gev_datasets[attr] for attr in attributes]
+        # data_shape = (NCfile_Empty.dims['y'], NCfile_Empty.dims['x'])
 
-        # Get the latitude and longitude values
-        latitude = SPEI_yearly_max.coords['y'].values
-        longitude = SPEI_yearly_max.coords['x'].values
+        # for attr, dataset in gev_datasets.items():
+        #     data = np.zeros(data_shape, dtype=np.float32)
+        #     dataset[attr] = xr.DataArray(
+        #         data,
+        #         coords={
+        #             'y': NCfile_Empty['y'],
+        #             'x': NCfile_Empty['x'],
+        #         },
+        #         dims=('y', 'x'),
+        #     )
 
-        ## Fill the new netCDF file with the GEV parameters 
+        # gev_shape, gev_loc, gev_scale = [gev_datasets[attr] for attr in attributes]
 
-        for lat_index, lat_value in enumerate(latitude):
-            for lon_index, lon_value in enumerate(longitude):
-                pixel_data = SPEI_yearly_max.values[:, lat_index, lon_index]
-                array_spei = np.array(pixel_data)
-                shape, loc, scale = genextreme.fit(array_spei)
+        # # Get the latitude and longitude values
+        # latitude = SPEI_yearly_max.coords['y'].values
+        # longitude = SPEI_yearly_max.coords['x'].values
 
-                gev_shape['shape'][lat_index, lon_index] = np.array(shape)
-                gev_loc['loc'][lat_index, lon_index] = np.array(loc)
-                gev_scale['scale'][lat_index, lon_index] = np.array(scale)
+        # ## Fill the new netCDF file with the GEV parameters 
 
-        gev_shape.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_shape'}
-        gev_loc.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_loc'}
-        gev_scale.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_scale'}
+        # for lat_index, lat_value in enumerate(latitude):
+        #     for lon_index, lon_value in enumerate(longitude):
+        #         pixel_data = SPEI_yearly_max.values[:, lat_index, lon_index]
+        #         array_spei = np.array(pixel_data)
+        #         shape, loc, scale = genextreme.fit(array_spei)
 
-        self.set_grid(gev_shape['shape'], name = f'{folder}/gev_shape')
-        self.set_grid(gev_loc['loc'], name = f'{folder}/gev_loc')
-        self.set_grid(gev_scale['scale'], name = f'{folder}/gev_scale')
+        #         gev_shape['shape'][lat_index, lon_index] = np.array(shape)
+        #         gev_loc['loc'][lat_index, lon_index] = np.array(loc)
+        #         gev_scale['scale'][lat_index, lon_index] = np.array(scale)
+
+        # gev_shape.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_shape'}
+        # gev_loc.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_loc'}
+        # gev_scale.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_scale'}
+
+        # self.set_grid(gev_shape['shape'], name = f'{folder}/gev_shape')
+        # self.set_grid(gev_loc['loc'], name = f'{folder}/gev_loc')
+        # self.set_grid(gev_scale['scale'], name = f'{folder}/gev_scale')
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
