@@ -119,6 +119,8 @@ class GEBModel(GridModel):
         if kind in ["basin", "subbasin"]:
             # retrieve global hydrography data (lazy!)
             ds_org = self.data_catalog.get_rasterdataset(hydrography_fn)
+            ds_org.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
+            ds_org.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
             if "bounds" not in region:
                 region.update(basin_index=self.data_catalog[basin_index_fn])
             # get basin geometry
@@ -297,9 +299,9 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up Manning's coefficient")
         a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
-        a = xr.where(a > 1, 1, a)
+        a = xr.where(a < 1, a, 1, keep_attrs=True)
         b = self.grid['landsurface/topo/elevation'] / 2000
-        b = xr.where(b > 1, 1, b)
+        b = xr.where(b < 1, b, 1, keep_attrs=True)
         
         mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings', lazy=True)
         mannings.data = 0.025 + 0.015 * a + 0.030 * b
@@ -330,7 +332,7 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up channel width")
         channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
-        channel_width_data = xr.where(channel_width_data < minimum_width, minimum_width, channel_width_data)
+        channel_width_data = xr.where(channel_width_data > minimum_width, channel_width_data, minimum_width, keep_attrs=True)
         
         channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width', lazy=True)
         channel_width.data = channel_width_data
@@ -398,7 +400,7 @@ class GEBModel(GridModel):
         assert ((self.grid['routing/kinematic/channel_length'] > 0) | ~self.grid.mask).all()
         channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
         channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
-        channel_ratio_data = xr.where(channel_ratio_data > 1, 1, channel_ratio_data)
+        channel_ratio_data = xr.where(channel_ratio_data < 1, channel_ratio_data, 1, keep_attrs=True)
         assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
         channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
         channel_ratio.data = channel_ratio_data
@@ -852,8 +854,8 @@ class GEBModel(GridModel):
         assert np.isclose(ds.coords['y'].values, reference['y'].values, atol=abs(ds.rio.resolution()[1] * relative_tollerance), rtol=0).all()
         assert np.isclose(ds.coords['x'].values, reference['x'].values, atol=abs(ds.rio.resolution()[0] * relative_tollerance), rtol=0).all()
         return ds.assign_coords(
-            x=reference['x'].values,
-            y=reference['y'].values,
+            x=reference.x,
+            y=reference.y,
         )
 
     def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date, ssp: str, folder: str):
@@ -1085,11 +1087,13 @@ class GEBModel(GridModel):
         # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
 
         e_as_coarse = rlds_coarse_regridded / (sbc * tas_coarse_regridded ** 4)  # all-sky emissivity w5e5
-        e_as_coarse = xr.where(e_as_coarse > 1, 1, e_as_coarse)  # constrain all-sky emissivity to max 1
+        e_as_coarse = xr.where(e_as_coarse < 1, e_as_coarse, 1)  # constrain all-sky emissivity to max 1
+        assert (e_as_coarse <= 1).all(), 'all-sky emissivity should be <= 1'
         delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
         
         e_as_fine = e_cl_fine + delta_e
-        e_as_fine = xr.where(e_as_fine > 1, 1, e_as_fine)  # constrain all-sky emissivity to max 1
+        e_as_fine = xr.where(e_as_fine < 1, e_as_fine, 1)  # constrain all-sky emissivity to max 1
+        assert (e_as_fine <= 1).all(), 'all-sky emissivity should be <= 1'
         lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
 
         lw_fine.name = 'rlds'
@@ -1400,7 +1404,6 @@ class GEBModel(GridModel):
         )
         self.region_subgrid.set_grid(region_raster, name='areamaps/region_subgrid')
 
-        self.grid['areamaps/cell_area']
         padded_cell_area = self.grid['areamaps/cell_area'].rio.pad_box(*region_bounds)
 
         # calculate the cell area for the grid for the entire region
@@ -1465,12 +1468,12 @@ class GEBModel(GridModel):
                 }, orient='index', columns=['GEB_land_use_class']
             ),
         )['GEB_land_use_class']
-        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5)  # set rivers to 5 (permanent water bodies)
+        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5, keep_attrs=True)  # set rivers to 5 (permanent water bodies)
         hydro_land_use.raster.set_nodata(-1)
         
         self.region_subgrid.set_grid(hydro_land_use, name='landsurface/full_region_land_use_classes')
 
-        cultivated_land = xr.where((hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0)
+        cultivated_land = xr.where((hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0, keep_attrs=True)
         cultivated_land = cultivated_land.rio.set_nodata(-1)
         cultivated_land.rio.set_crs(reprojected_land_use.rio.crs)
         cultivated_land.rio.set_nodata(-1)
@@ -1713,13 +1716,13 @@ class GEBModel(GridModel):
             region_clip, bounds = clip_with_grid(region, region)
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
-            cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0)
+            cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
             # TODO: Why does nodata value disappear?                  
             farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
 
-            farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds))
+            farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
@@ -1727,13 +1730,13 @@ class GEBModel(GridModel):
 
         # TODO: Again why is dtype changed? And export doesn't work?
 
-        cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1))
+        cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1, keep_attrs=True))
         cut_farms = cut_farms[cut_farms != -1]
 
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
 
-        subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms)
+        subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms, keep_attrs=True)
         farmers = farmers[~farmers.index.isin(cut_farms)]
 
         remap_farmer_ids = np.full(farmers.index.max() + 2, -1, dtype=np.int32) # +1 because 0 is also a farm, +1 because no farm is -1, set to -1 in next step
@@ -2073,8 +2076,8 @@ class GEBModel(GridModel):
         return ds.interp(
             method=interpolation_method,
             **{
-                ydim: self.grid.coords['y'].values,
-                xdim: self.grid.coords['x'].values
+                ydim: self.grid.coords['y'],
+                xdim: self.grid.coords['x']
             }
         )
 
@@ -2293,6 +2296,10 @@ class GEBModel(GridModel):
             assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
 
         ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
+        assert not ds.lat.attrs, "lat already has attributes"
+        assert not ds.lon.attrs, "lon already has attributes"
+        ds.lat.attrs = {'long_name': 'latitude of grid cell center', 'units': 'degrees_north'}
+        ds.lon.attrs = {'long_name': 'longitude of grid cell center', 'units': 'degrees_east'}
         ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
         return ds
 
