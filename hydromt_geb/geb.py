@@ -888,7 +888,7 @@ class GEBModel(GridModel):
             self.logger.info(f'Setting up {variable}...')
             first_year_future_climate = 2015
             var = []
-            if ssp == 'piControl':
+            if ssp == 'picontrol':
                 ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
                 var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
             if endtime.year < first_year_future_climate or starttime.year < first_year_future_climate and ssp != 'piControl':  # isimip cutoff date between historic and future climate
