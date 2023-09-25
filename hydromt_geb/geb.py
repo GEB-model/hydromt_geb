@@ -891,10 +891,10 @@ class GEBModel(GridModel):
             if ssp == 'picontrol':
                 ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
                 var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
-            if endtime.year < first_year_future_climate or starttime.year < first_year_future_climate and ssp != 'piControl':  # isimip cutoff date between historic and future climate
+            if (endtime.year < first_year_future_climate or starttime.year < first_year_future_climate) and ssp != 'picontrol':  # isimip cutoff date between historic and future climate
                 ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario='historical', variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
                 var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
-            if starttime.year >= first_year_future_climate or endtime.year >= first_year_future_climate and ssp != 'piControl':
+            if (starttime.year >= first_year_future_climate or endtime.year >= first_year_future_climate) and ssp != 'picontrol':
                 assert ssp is not None, 'ssp must be specified for future climate'
                 assert ssp != 'historical', 'historical scenarios run until 2014'
                 ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
