@@ -846,8 +846,8 @@ class GEBModel(GridModel):
         else:
             raise ValueError(f'Unknown data source: {data_source}')
 
-        self.setup_SPEI(folder)
-        self.setup_GEV(folder)
+        # self.setup_SPEI(folder)
+        # self.setup_GEV(folder)
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02):
         # make sure all datasets have more or less the same coordinates
@@ -893,10 +893,13 @@ class GEBModel(GridModel):
                 var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
             if starttime.year >= first_year_future_climate or endtime.year >= first_year_future_climate:
                 assert ssp is not None, 'ssp must be specified for future climate'
+                assert ssp != 'historical', 'ssp cannot be historical after 2014'
                 ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
                 var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
             
             var = xr.concat(var, dim='time')
+            # assert that time is monotonically increasing with a constant step size
+            assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all(), 'time is not monotonically increasing with a constant step size'
             var = var.rename({'lon': 'x', 'lat': 'y'})
             self.set_forcing(var, name=f'{folder}/{variable}')
 
@@ -1279,53 +1282,6 @@ class GEBModel(GridModel):
         self.set_grid(GEV.sel(dparams='c'), name = f'{folder}/gev_c')
         self.set_grid(GEV.sel(dparams='loc'), name = f'{folder}/gev_loc')
         self.set_grid(GEV.sel(dparams='scale'), name = f'{folder}/gev_scale')
-
-
-        # ## Prepare the dataset for the new input values 
-        # NCfile_Empty = xr.Dataset(coords=spei_data.coords, attrs=spei_data.attrs)
-        # NCfile_Empty =  NCfile_Empty.drop_vars('time')
-
-        # attributes = ['shape', 'loc', 'scale']
-        # gev_datasets = {attr: NCfile_Empty.copy() for attr in attributes}
-
-        # data_shape = (NCfile_Empty.dims['y'], NCfile_Empty.dims['x'])
-
-        # for attr, dataset in gev_datasets.items():
-        #     data = np.zeros(data_shape, dtype=np.float32)
-        #     dataset[attr] = xr.DataArray(
-        #         data,
-        #         coords={
-        #             'y': NCfile_Empty['y'],
-        #             'x': NCfile_Empty['x'],
-        #         },
-        #         dims=('y', 'x'),
-        #     )
-
-        # gev_shape, gev_loc, gev_scale = [gev_datasets[attr] for attr in attributes]
-
-        # # Get the latitude and longitude values
-        # latitude = SPEI_yearly_max.coords['y'].values
-        # longitude = SPEI_yearly_max.coords['x'].values
-
-        # ## Fill the new netCDF file with the GEV parameters 
-
-        # for lat_index, lat_value in enumerate(latitude):
-        #     for lon_index, lon_value in enumerate(longitude):
-        #         pixel_data = SPEI_yearly_max.values[:, lat_index, lon_index]
-        #         array_spei = np.array(pixel_data)
-        #         shape, loc, scale = genextreme.fit(array_spei)
-
-        #         gev_shape['shape'][lat_index, lon_index] = np.array(shape)
-        #         gev_loc['loc'][lat_index, lon_index] = np.array(loc)
-        #         gev_scale['scale'][lat_index, lon_index] = np.array(scale)
-
-        # gev_shape.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_shape'}
-        # gev_loc.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_loc'}
-        # gev_scale.attrs = {'units': '-', 'long_name': 'Generalized extreme value parameters', 'name' : 'gev_scale'}
-
-        # self.set_grid(gev_shape['shape'], name = f'{folder}/gev_shape')
-        # self.set_grid(gev_loc['loc'], name = f'{folder}/gev_loc')
-        # self.set_grid(gev_scale['scale'], name = f'{folder}/gev_scale')
 
     def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
         """
