@@ -1279,7 +1279,7 @@ class GEBModel(GridModel):
         SPEI_yearly_max = SPEI_changed.groupby('time.year').max(dim='time')
         SPEI_yearly_max = SPEI_yearly_max.rename({'year': 'time'})
 
-        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
+        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme")
         GEV.name = 'gev'
         
         self.set_grid(GEV.sel(dparams='c'), name = f'{folder}/gev_c')
