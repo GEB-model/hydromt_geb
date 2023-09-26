@@ -789,7 +789,9 @@ class GEBModel(GridModel):
             resolution_arcsec: int=30,
             forcing: str='chelsa-w5e5v1.0',
             scenario_name: str=None,
-            ssp=None
+            ssp=None,
+            calculate_SPEI: bool=True,
+            calculate_GEV: bool=True,
         ):
         """
         Sets up the forcing data for GEB.
@@ -818,6 +820,7 @@ class GEBModel(GridModel):
 
         The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
         """
+        assert starttime < endtime, 'Start time must be before end time'
 
         folder = 'climate'
         if scenario_name is not None:
@@ -846,8 +849,10 @@ class GEBModel(GridModel):
         else:
             raise ValueError(f'Unknown data source: {data_source}')
 
-        # self.setup_SPEI(folder)
-        # self.setup_GEV(folder)
+        if calculate_SPEI:
+            self.setup_SPEI(folder)
+        if calculate_GEV:
+            self.setup_GEV(folder)
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02):
         # make sure all datasets have more or less the same coordinates
@@ -2110,11 +2115,6 @@ class GEBModel(GridModel):
         ymin -= buffer
         xmax += buffer
         ymax += buffer
-
-        # xmin = round(xmin)
-        # ymin = round(ymin)
-        # xmax = round(xmax)
-        # ymax = round(ymax)
 
         if variable == 'orog':
             assert len(files) == 1
