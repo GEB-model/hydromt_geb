@@ -870,7 +870,6 @@ class GEBModel(GridModel):
                 self.logger.info('setting up forcing data')
                 high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
                 self.setup_30arcsec_variables_isimip(high_res_variables, starttime, endtime)
-                return
                 self.logger.info('setting up relative humidity...')
                 self.setup_hurs_isimip_30arcsec(starttime, endtime)
                 self.logger.info('setting up longwave radiation...')
@@ -982,7 +981,6 @@ class GEBModel(GridModel):
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             var = self.snap_to_grid(var, self.grid)
             self.set_forcing(var, name=f'climate/{variable}')
-            return
 
     def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
         """
