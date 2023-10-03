@@ -1301,6 +1301,7 @@ class GEBModel(GridModel):
         water_budget_positive.attrs = {'units': 'kg m-2 s-1'}
 
         wb_cal = water_budget_positive.sel(time=slice('1981-01-01', '2010-01-01'))
+        assert wb_cal.time.size > 0
 
         # Compute the SPEI
         spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget_positive, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
@@ -2308,6 +2309,7 @@ class GEBModel(GridModel):
                 self.model_structure['grid'][var] = var + '.tif'
                 self.is_updated['grid'][var]['filename'] = var + '.tif'
                 fp = Path(self.root, var + '.tif')
+                fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
                 self.logger.info(f"Skip {var}")
@@ -2320,6 +2322,7 @@ class GEBModel(GridModel):
                 self.model_structure['subgrid'][var] = var + '.tif'
                 self.is_updated['subgrid'][var]['filename'] = var + '.tif'
                 fp = Path(self.root, var + '.tif')
+                fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
                 self.logger.info(f"Skip {var}")
@@ -2332,6 +2335,7 @@ class GEBModel(GridModel):
                 self.model_structure['region_subgrid'][var] = var + '.tif'
                 self.is_updated['region_subgrid'][var]['filename'] = var + '.tif'
                 fp = Path(self.root, var + '.tif')
+                fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
                 self.logger.info(f"Skip {var}")
@@ -2344,6 +2348,7 @@ class GEBModel(GridModel):
                 self.model_structure['MERIT_grid'][var] = var + '.tif'
                 self.is_updated['MERIT_grid'][var]['filename'] = var + '.tif'
                 fp = Path(self.root, var + '.tif')
+                fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
                 self.logger.info(f"Skip {var}")
@@ -2356,6 +2361,7 @@ class GEBModel(GridModel):
                 self.model_structure['MODFLOW_grid'][var] = var + '.tif'
                 self.is_updated['MODFLOW_grid'][var]['filename'] = var + '.tif'
                 fp = Path(self.root, var + '.tif')
+                fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
                 self.logger.info(f"Skip {var}")
@@ -2390,7 +2396,9 @@ class GEBModel(GridModel):
                     self.model_structure['table'][name] = fn
                     self.is_updated['table'][name]['filename'] = fn
                     self.logger.debug(f"Writing file {fn}")
-                    data.to_csv(os.path.join(self.root, fn))
+                    fp = Path(self.root, fn)
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    data.to_csv(fp)
                 else:
                     self.logger.debug(f"Skip {name}")
 
@@ -2406,7 +2414,9 @@ class GEBModel(GridModel):
                     self.model_structure['binary'][name] = fn
                     self.is_updated['binary'][name]['filename'] = fn
                     self.logger.debug(f"Writing file {fn}")
-                    np.savez_compressed(os.path.join(self.root, fn), data=data)
+                    fp = Path(self.root, fn)
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez_compressed(fp, data=data)
                 else:
                     self.logger.debug(f"Skip {name}")
 
