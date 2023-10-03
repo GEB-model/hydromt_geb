@@ -1274,7 +1274,7 @@ class GEBModel(GridModel):
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
         self.set_forcing(wind_output_clipped, f'climate/wind')
 
-    def setup_SPEI(self, folder):
+    def setup_SPEI(self):
         self.logger.info('setting up SPEI...')
         pr_data = self.forcing[f'climate/pr']
         tasmin_data = self.forcing[f'climate/tasmin']
@@ -1310,7 +1310,7 @@ class GEBModel(GridModel):
 
         self.set_forcing(spei, name = f'climate/spei')
 
-    def setup_GEV(self, folder):
+    def setup_GEV(self):
         self.logger.info('calculating GEV parameters...')
         spei_data = self.forcing[f'climate/spei']
 
