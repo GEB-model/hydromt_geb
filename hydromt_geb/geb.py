@@ -1741,6 +1741,7 @@ class GEBModel(GridModel):
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
 
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
+            assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
