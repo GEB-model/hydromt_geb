@@ -19,6 +19,7 @@ import rioxarray as rxr
 from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
+import concurrent.futures
 
 import xclim.indices as xci
 from scipy.stats import genextreme
@@ -925,8 +926,8 @@ class GEBModel(GridModel):
         then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
 
         The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
-        """ 
-        for variable in variables:
+        """
+        def download_variable(variable, forcing, ssp, starttime, endtime):
             self.logger.info(f'Setting up {variable}...')
             first_year_future_climate = 2015
             var = []
@@ -946,7 +947,15 @@ class GEBModel(GridModel):
             # assert that time is monotonically increasing with a constant step size
             assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all(), 'time is not monotonically increasing with a constant step size'
             var = var.rename({'lon': 'x', 'lat': 'y'})
+            self.logger.info(f'Completed {variable}')
             self.set_forcing(var, name=f'climate/{variable}')
+        
+        # Create a thread pool and map the set_forcing function to the variables
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(download_variable, variable, forcing, ssp, starttime, endtime) for variable in variables]
+
+        # Wait for all threads to complete
+        concurrent.futures.wait(futures)
 
     def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
         """
@@ -974,13 +983,21 @@ class GEBModel(GridModel):
 
         The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
         """ 
-        for variable in variables:
+        def download_variable(variable, starttime, endtime):
             self.logger.info(f'Setting up {variable}...')
             ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
             ds = ds.rename({'lon': 'x', 'lat': 'y'})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             var = self.snap_to_grid(var, self.grid)
+            self.logger.info(f'Completed {variable}')
             self.set_forcing(var, name=f'climate/{variable}')
+
+        # Create a thread pool and map the set_forcing function to the variables
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(download_variable, variable, starttime, endtime) for variable in variables]
+
+        # Wait for all threads to complete
+        concurrent.futures.wait(futures)
 
     def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
         """
@@ -2201,15 +2218,15 @@ class GEBModel(GridModel):
                     if response['status'] == 'finished':
                         break
                     elif response['status'] == 'started':
-                        self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server, waiting 60 seconds before retrying")
+                        self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server for {variable}, waiting 60 seconds before retrying")
                     elif response['status'] == 'queued':
-                        self.logger.debug("Data preparation queued on ISIMIP server, waiting 60 seconds before retrying")
+                        self.logger.debug(f"Data preparation queued for {variable} on ISIMIP server, waiting 60 seconds before retrying")
                     elif response['status'] == 'failed':
                         self.logger.debug("ISIMIP internal server error, waiting 60 seconds before retrying")
                     else:
                         raise ValueError(f"Could not download files: {response['status']}")
                 time.sleep(60)
-            self.logger.info("Starting download of files")
+            self.logger.info(f"Starting download of files for {variable}")
             # download the file when it is ready
             client.download(
                 response['file_url'],
@@ -2217,7 +2234,7 @@ class GEBModel(GridModel):
                 validate=False,
                 extract=False
             )
-            self.logger.info("Download finished")
+            self.logger.info(f"Download finished for {variable}")
             # remove zip file
             zip_file = (download_path / Path(urlparse(response['file_url']).path.split('/')[-1]))
             # make sure the file exists
