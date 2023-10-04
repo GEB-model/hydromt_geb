@@ -1726,7 +1726,8 @@ class GEBModel(GridModel):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
-        farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
+        farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)[:] = -1
+        assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         
         for region_id in regions['region_id']:
             self.logger.info(f"Creating farms for region {region_id}")
@@ -1738,17 +1739,15 @@ class GEBModel(GridModel):
             # TODO: Why does nodata value disappear?                  
             farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
+            self.logger.debug(farms_region.dtype)
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
-
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
-            assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
         region_mask = self.region_subgrid.grid['areamaps/region_mask'].astype(bool)
 
         # TODO: Again why is dtype changed? And export doesn't work?
-
         cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1, keep_attrs=True))
         cut_farms = cut_farms[cut_farms != -1]
 
