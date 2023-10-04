@@ -2552,6 +2552,9 @@ class GEBModel(GridModel):
         with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
             if fn.endswith('.tif') and 'band' in da.dims and da.band.size == 1:
                 da = da.sel(band=1)
+            if fn.endswith('.tif'):
+                da.x.attrs = {'long_name': 'latitude of grid cell center', 'units': 'degrees_north'}
+                da.y.attrs = {'long_name': 'longitude of grid cell center', 'units': 'degrees_east'}
             return da
 
     def read_grid(self) -> None:
@@ -2583,7 +2586,7 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure['forcing'].items():
             with xr.open_dataset(Path(self.root) / fn, chunks={'time': 365})[name.split('/')[-1]] as da:
-                self.set_forcing(da.load(), name=name, update=False)
+                self.set_forcing(da, name=name, update=False)
 
     def read(self):
         self.read_model_structure()
