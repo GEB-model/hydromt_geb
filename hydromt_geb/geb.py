@@ -1740,7 +1740,6 @@ class GEBModel(GridModel):
             # TODO: Why does nodata value disappear?                  
             farmers_region = farmers[farmers['region_id'] == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
-            self.logger.debug(farms_region.dtype)
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
         
