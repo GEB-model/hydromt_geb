@@ -2533,8 +2533,9 @@ class GEBModel(GridModel):
 
     def read_netcdf(self, fn: str, name: str) -> xr.Dataset:
         with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
-            print('check whether load and squeeze are needed')
-            return da.load().squeeze()
+            if fn.endswith('.tif') and 'band' in da.dims and da.band.size == 1:
+                da = da.sel(band=1)
+            return da
 
     def read_grid(self) -> None:
         for name, fn in self.model_structure['grid'].items():
