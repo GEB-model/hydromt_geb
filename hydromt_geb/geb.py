@@ -1726,7 +1726,8 @@ class GEBModel(GridModel):
         regions = self.geoms['areamaps/regions']
         regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
         
-        farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)[:] = -1
+        farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
+        farms[:] = -1
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         
         for region_id in regions['region_id']:
