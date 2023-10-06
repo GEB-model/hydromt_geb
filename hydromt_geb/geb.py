@@ -626,7 +626,7 @@ class GEBModel(GridModel):
                     name=f'landcover/{land_use_type}/{parameter}'
                 )
 
-    def setup_waterbodies(self):
+    def setup_waterbodies(self, command_areas= "reservoir_command_areas", custom_reservoir_capacity="custom_reservoir_capacity"):
         """
         Sets up the waterbodies for GEB.
 
@@ -654,6 +654,7 @@ class GEBModel(GridModel):
             predicate="intersects",
             variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
         ).set_index('waterbody_id')
+        waterbodies['volume_flood'] = waterbodies['volume_total']
 
         self.set_grid(self.grid.raster.rasterize(
             waterbodies,
@@ -670,41 +671,44 @@ class GEBModel(GridModel):
             dtype=np.int32
         ), name='routing/lakesreservoirs/sublakesResID')
 
-        command_areas = self.data_catalog.get_geodataframe("reservoir_command_areas", geom=self.region, predicate="intersects")
-        command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
-        command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
-        command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
-        command_areas['area'] = command_areas.to_crs(3857).area
-        command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
-        areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
-        relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
-        relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
+        if command_areas:
+            command_areas = self.data_catalog.get_geodataframe(command_areas, geom=self.region, predicate="intersects")
+            command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
+            command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
+            command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
+            command_areas['area'] = command_areas.to_crs(3857).area
+            command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
+            areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
+            relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
+            relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
 
-        self.set_grid(self.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/command_areas')
-        self.set_subgrid(self.subgrid.grid.raster.rasterize(
-            command_areas,
-            col_name='waterbody_id',
-            nodata=-1,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/subcommand_areas')
+            self.set_grid(self.grid.raster.rasterize(
+                command_areas,
+                col_name='waterbody_id',
+                nodata=-1,
+                all_touched=True,
+                dtype=np.int32
+            ), name='routing/lakesreservoirs/command_areas')
+            self.set_subgrid(self.subgrid.grid.raster.rasterize(
+                command_areas,
+                col_name='waterbody_id',
+                nodata=-1,
+                all_touched=True,
+                dtype=np.int32
+            ), name='routing/lakesreservoirs/subcommand_areas')
 
-        # set all lakes with command area to reservoir
-        waterbodies['volume_flood'] = waterbodies['volume_total']
-        waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
-        # set relative area in region for command area. If no command area, set this is set to nan.
-        waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
+            # set all lakes with command area to reservoir
+            waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+            # set relative area in region for command area. If no command area, set this is set to nan.
+            waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
 
-        custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
-        custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
+        if custom_reservoir_capacity:
+            custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
+            custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
 
-        waterbodies.update(custom_reservoir_capacity)
+            waterbodies.update(custom_reservoir_capacity)
+        
+        # spatial dimension is not required anymore, so drop it.
         waterbodies = waterbodies.drop('geometry', axis=1)
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
