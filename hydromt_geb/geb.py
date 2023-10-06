@@ -467,11 +467,17 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up elevation standard deviation")
         MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
-        # There is a half degree offset in MERIT data
-        MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
-            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
-        )
+        # In some MERIT datasets, there is a half degree offset in MERIT data. We can detect this by checking the offset relative to the resolution.
+        # This offset should be 0.5. If the offset instead is close to 0 or 1, then we need to correct for this offset.
+        center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
+        # check whether offset is close to 0.5
+        if not np.isclose(center_offset, 0.5, atol=MERIT.rio.resolution()[0] / 100):
+            assert np.isclose(center_offset, 0, atol=MERIT.rio.resolution()[0] / 100) or np.isclose(center_offset, 1, atol=MERIT.rio.resolution()[0] / 100), "Could not detect offset in MERIT data"
+            MERIT = MERIT.assign_coords(
+                x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
+                y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+            )
+            center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
 
         # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
         MERIT_ul = MERIT.assign_coords(
