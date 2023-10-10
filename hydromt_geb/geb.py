@@ -1518,7 +1518,7 @@ class GEBModel(GridModel):
         # Same workaround as above
         self.set_subgrid(cultivated_land_region.values, name='landsurface/cultivated_land')
 
-    def setup_economic_data(self):
+    def setup_economic_data(self, project_future_until_year=False, reference_start_year=2000):
         """
         Sets up the economic data for GEB.
 
@@ -1536,14 +1536,18 @@ class GEBModel(GridModel):
         'economics/lending_rates' and 'economics/inflation_rates', respectively.
         """
         self.logger.info('Setting up economic data')
+        assert not project_future_until_year or project_future_until_year > reference_start_year, f"project_future_until_year ({project_future_until_year}) must be larger than reference_start_year ({reference_start_year})"
+
         lending_rates = self.data_catalog.get_dataframe('wb_lending_rate')
         inflation_rates = self.data_catalog.get_dataframe('wb_inflation_rate')
 
         lending_rates_dict, inflation_rates_dict = {'data': {}}, { 'data': {}}
         years_lending_rates = [c for c in lending_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
         lending_rates_dict['time'] = years_lending_rates
+        
         years_inflation_rates = [c for c in inflation_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
         inflation_rates_dict['time'] = years_inflation_rates
+        
         for _, region in self.geoms['areamaps/regions'].iterrows():
             region_id = region['region_id']
             ISO3 = region['ISO3']
@@ -1555,6 +1559,25 @@ class GEBModel(GridModel):
             inflation_rates_country = (inflation_rates.loc[inflation_rates["Country Code"] == ISO3, years_inflation_rates] / 100 + 1) # percentage to rate
             assert len(inflation_rates_country) == 1, f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
             inflation_rates_dict['data'][region_id] = inflation_rates_country.iloc[0].tolist()
+
+        if project_future_until_year:
+            inflation_rates = pd.DataFrame(inflation_rates_dict['data'], index=inflation_rates_dict['time']).dropna()
+            inflation_rates.index = inflation_rates.index.astype(int)
+            # extend inflation rates to future
+            mean_inflation_rate_since_reference_year = inflation_rates.loc[reference_start_year:].mean(axis=0)
+            inflation_rates = inflation_rates.reindex(range(inflation_rates.index.min(), project_future_until_year + 1)).fillna(mean_inflation_rate_since_reference_year)
+
+            inflation_rates_dict['time'] = inflation_rates.index.astype(str).tolist()
+            inflation_rates_dict['data'] = inflation_rates.to_dict(orient='list')
+
+            lending_rates = pd.DataFrame(lending_rates_dict['data'], index=lending_rates_dict['time']).dropna()
+            lending_rates.index = lending_rates.index.astype(int)
+            # extend lending rates to future
+            mean_lending_rate_since_reference_year = lending_rates.loc[reference_start_year:].mean(axis=0)
+            lending_rates = lending_rates.reindex(range(lending_rates.index.min(), project_future_until_year + 1)).fillna(mean_lending_rate_since_reference_year)
+
+            lending_rates_dict['time'] = lending_rates.index.astype(str).tolist()
+            lending_rates_dict['data'] = lending_rates.to_dict(orient='list')
 
         self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
         self.set_dict(lending_rates_dict, name='economics/lending_rates')
