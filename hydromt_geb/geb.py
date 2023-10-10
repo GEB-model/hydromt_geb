@@ -2069,6 +2069,11 @@ class GEBModel(GridModel):
                 
                 offset = whole_cells_per_size_class[size_class] - number_of_agents_size_class * mean_cells_per_agent
 
+                if number_of_agents_size_class * mean_cells_per_agent + offset < min_size_cells * number_of_agents_size_class:
+                    min_size_cells = (number_of_agents_size_class * mean_cells_per_agent + offset) // number_of_agents_size_class
+                if number_of_agents_size_class * mean_cells_per_agent + offset > max_size_cells * number_of_agents_size_class:
+                    max_size_cells = (number_of_agents_size_class * mean_cells_per_agent + offset) // number_of_agents_size_class + 1
+
                 n_farms_size_class, farm_sizes_size_class = get_farm_distribution(number_of_agents_size_class, min_size_cells, max_size_cells, mean_cells_per_agent, offset)
                 assert n_farms_size_class.sum() == number_of_agents_size_class
                 assert (farm_sizes_size_class > 0).all()

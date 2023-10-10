@@ -188,11 +188,7 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
 def get_farm_distribution(n, x0, x1, mean, offset):
     assert mean >= x0
     assert mean <= x1
-    if n == 0 or n == 1:
-        if not (x0 * n <= n * mean + offset <= x1 * n):
-            warnings.warn("n = 1, but offset too large. Farm will be either too small or too large. However, only 1 farm so no other option and minor issue")
-    else:
-        assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
+    assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
 
     target_area = n * mean + offset
     farm_sizes = np.arange(x0, x1+1)
