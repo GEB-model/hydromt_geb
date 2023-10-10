@@ -1356,7 +1356,7 @@ class GEBModel(GridModel):
         self.set_grid(GEV.sel(dparams='loc'), name = f'climate/gev_loc')
         self.set_grid(GEV.sel(dparams='scale'), name = f'climate/gev_scale')
 
-    def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', river_threshold=100):
+    def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', ISO3_column='ISO3', river_threshold=100):
         """
         Sets up the (administrative) regions and land use data for GEB. The regions can be used for multiple purposes,
         for example for creating the agents in the model, assigning unique crop prices and other economic variables
@@ -1390,9 +1390,9 @@ class GEBModel(GridModel):
             region_database,
             geom=self.geoms['areamaps/region'],
             predicate="intersects",
-        ).rename(columns={unique_region_id: 'region_id'})
+        ).rename(columns={unique_region_id: 'region_id', ISO3_column: 'ISO3'})
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
-        assert 'ISO3' in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
+        assert ISO3_column in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
         self.set_geoms(regions, name='areamaps/regions')
 
         region_bounds = self.geoms['areamaps/regions'].total_bounds
