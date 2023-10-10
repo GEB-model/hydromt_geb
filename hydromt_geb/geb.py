@@ -1392,7 +1392,7 @@ class GEBModel(GridModel):
             predicate="intersects",
         ).rename(columns={unique_region_id: 'region_id', ISO3_column: 'ISO3'})
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
-        assert ISO3_column in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
+        assert 'ISO3' in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
         self.set_geoms(regions, name='areamaps/regions')
 
         region_bounds = self.geoms['areamaps/regions'].total_bounds
