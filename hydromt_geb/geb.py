@@ -2331,6 +2331,10 @@ class GEBModel(GridModel):
         ds.lat.attrs = {'long_name': 'latitude of grid cell center', 'units': 'degrees_north'}
         ds.lon.attrs = {'long_name': 'longitude of grid cell center', 'units': 'degrees_east'}
         ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
+        if pd.to_datetime(ds.time[0].values).hour == 12:
+            # subtract 12 hours from time coordinate
+            self.logger.warning("Subtracting 12 hours from time coordinate to align climate datasets")
+            ds = ds.assign_coords(time=ds.time - np.timedelta64(12, 'h'))
         return ds
 
     def write_grid(self):
