@@ -1296,10 +1296,10 @@ class GEBModel(GridModel):
 
         wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(self.grid.raster.bounds)
         wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
-        wind_output_clipped.name = 'wind'
+        wind_output_clipped.name = 'sfcwind'
 
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
-        self.set_forcing(wind_output_clipped, f'climate/wind')
+        self.set_forcing(wind_output_clipped, f'climate/sfcwind')
 
     def setup_SPEI(self):
         self.logger.info('setting up SPEI...')
