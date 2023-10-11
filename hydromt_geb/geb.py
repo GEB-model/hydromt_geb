@@ -155,7 +155,6 @@ class GEBModel(GridModel):
 
         assert sub_grid_factor > 10, "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
         assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
-        self.subgrid_factor = sub_grid_factor
 
         self.logger.info(f"Preparing 2D grid.")
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
@@ -220,7 +219,6 @@ class GEBModel(GridModel):
         submask.data = repeat_grid(mask.data, sub_grid_factor)
 
         self.set_subgrid(submask, name=submask.name)
-        self.subgrid.factor = sub_grid_factor
 
     def setup_cell_area_map(self) -> None:
         """
@@ -259,7 +257,7 @@ class GEBModel(GridModel):
             lazy=True
         )
 
-        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid.factor) / self.subgrid.factor ** 2
+        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid_factor) / self.subgrid_factor ** 2
         self.set_subgrid(sub_cell_area, sub_cell_area.name)
 
     def setup_crops(
@@ -268,6 +266,7 @@ class GEBModel(GridModel):
             crop_variables: dict,
             crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
             cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
+            project_future_until_year: Optional[int] = False
         ):
         """
         Sets up the crops data for the model.
@@ -290,6 +289,25 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing crops data")
         self.set_dict(crop_ids, name='crops/crop_ids')
         self.set_dict(crop_variables, name='crops/crop_variables')
+
+        def project_to_future(df, project_future_until_year, inflation_rates):
+            # expand table until year
+            assert isinstance(df.index, pd.core.indexes.datetimes.DatetimeIndex)
+            future_index = pd.date_range(
+                df.index[-1],
+                date(project_future_until_year, 12, 31),
+                freq=pd.infer_freq(df.index),
+                inclusive='right'
+            )
+            df = df.reindex(df.index.union(future_index))
+            for future_date in future_index:
+                source_date = future_date - pd.DateOffset(years=1)  # source is year ago
+                inflation_index = inflation_rates['time'].index(str(future_date.year))
+                for region_id, _ in df.columns:
+                    region_inflation_rate = inflation_rates['data'][region_id][inflation_index]
+                    df.loc[future_date, region_id] = (df.loc[source_date, region_id] * region_inflation_rate).values
+            return df
+        
         if crop_prices is not None:
             self.logger.info(f"Preparing crop prices")
             if isinstance(crop_prices, str):
@@ -298,14 +316,31 @@ class GEBModel(GridModel):
                     raise ValueError(f"crop_prices file {fp.resolve()} does not exist")
                 with open(fp, 'r') as f:
                     crop_prices_data = json.load(f)
-                crop_prices = {
-                    'time': crop_prices_data['time'],
-                    'crops': {
+                crop_prices = pd.DataFrame(
+                    {
                         crop_id: crop_prices_data['crops'][crop_name]
                         for crop_id, crop_name in crop_ids.items()
-                    }
-                }
+                    },
+                    index=pd.to_datetime(crop_prices_data['time'])
+                )
+                crop_prices = crop_prices.reindex(
+                    columns=pd.MultiIndex.from_product([self.geoms['areamaps/regions']['region_id'], crop_prices.columns]
+                ), level=1)
+                if project_future_until_year:
+                    crop_prices = project_to_future(
+                        crop_prices,
+                        project_future_until_year,
+                        self.dict['economics/inflation_rates']
+                    )
+
+            crop_prices = {
+                'time': crop_prices.index.tolist(),
+                'data': {str(region_id): crop_prices[region_id].to_dict(orient='list') for region_id in self.geoms['areamaps/regions']['region_id']}
+            }
+
             self.set_dict(crop_prices, name='crops/crop_prices')
+        
+        
         if cultivation_costs is not None:
             self.logger.info(f"Preparing cultivation costs")
             if isinstance(cultivation_costs, str):
@@ -314,13 +349,25 @@ class GEBModel(GridModel):
                     raise ValueError(f"cultivation_costs file {fp.resolve()} does not exist")
                 with open(fp) as f:
                     cultivation_costs = json.load(f)
-                cultivation_costs = {
-                    'time': cultivation_costs['time'],
-                    'crops': {
+                cultivation_costs = pd.DataFrame({
                         crop_id: cultivation_costs['crops'][crop_name]
                         for crop_id, crop_name in crop_ids.items()
-                    }
-                }
+                    },
+                    index=pd.to_datetime(cultivation_costs['time'])
+                )
+                cultivation_costs = cultivation_costs.reindex(
+                    columns=pd.MultiIndex.from_product([self.geoms['areamaps/regions']['region_id'], cultivation_costs.columns]
+                ), level=1)
+                if project_future_until_year:
+                    cultivation_costs = project_to_future(
+                        cultivation_costs,
+                        project_future_until_year,
+                        self.dict['economics/inflation_rates']
+                    )
+            cultivation_costs = {
+                'time': cultivation_costs.index.tolist(),
+                'data': {str(region_id): cultivation_costs[region_id].to_dict(orient='list') for region_id in self.geoms['areamaps/regions']['region_id']}
+            }
             self.set_dict(cultivation_costs, name='crops/cultivation_costs')
 
     def setup_mannings(self) -> None:
@@ -1392,6 +1439,9 @@ class GEBModel(GridModel):
             predicate="intersects",
         ).rename(columns={unique_region_id: 'region_id', ISO3_column: 'ISO3'})
         assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
+        region_id_mapping = {i: region_id for region_id, i in enumerate(regions['region_id'])}
+        regions['region_id'] = regions['region_id'].map(region_id_mapping)
+        self.set_dict(region_id_mapping, name='areamaps/region_id_mapping')
         assert 'ISO3' in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
         self.set_geoms(regions, name='areamaps/regions')
 
@@ -1439,8 +1489,8 @@ class GEBModel(GridModel):
 
         # create subgrid for entire region
         region_cell_area_subgrid = hydromt.raster.full_from_transform(
-            padded_cell_area.raster.transform * Affine.scale(1 / self.subgrid.factor),
-            (padded_cell_area.raster.shape[0] * self.subgrid.factor, padded_cell_area.raster.shape[1] * self.subgrid.factor), 
+            padded_cell_area.raster.transform * Affine.scale(1 / self.subgrid_factor),
+            (padded_cell_area.raster.shape[0] * self.subgrid_factor, padded_cell_area.raster.shape[1] * self.subgrid_factor), 
             nodata=np.nan,
             dtype=padded_cell_area.dtype,
             crs=padded_cell_area.raster.crs,
@@ -1449,7 +1499,7 @@ class GEBModel(GridModel):
         )
 
         # calculate the cell area for the subgrid for the entire region
-        region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid.factor) / self.subgrid.factor ** 2
+        region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid_factor) / self.subgrid_factor ** 2
 
         # create new subgrid for the region without padding
         region_cell_area_subgrid_clipped_to_region = hydromt.raster.full(region_raster.raster.coords, nodata=np.nan, dtype=padded_cell_area.dtype, name='areamaps/sub_grid_mask', crs=region_raster.raster.crs, lazy=True)
@@ -1561,7 +1611,10 @@ class GEBModel(GridModel):
             inflation_rates_dict['data'][region_id] = inflation_rates_country.iloc[0].tolist()
 
         if project_future_until_year:
+            # convert to pandas dataframe
             inflation_rates = pd.DataFrame(inflation_rates_dict['data'], index=inflation_rates_dict['time']).dropna()
+            lending_rates = pd.DataFrame(lending_rates_dict['data'], index=lending_rates_dict['time']).dropna()
+            
             inflation_rates.index = inflation_rates.index.astype(int)
             # extend inflation rates to future
             mean_inflation_rate_since_reference_year = inflation_rates.loc[reference_start_year:].mean(axis=0)
@@ -1570,12 +1623,12 @@ class GEBModel(GridModel):
             inflation_rates_dict['time'] = inflation_rates.index.astype(str).tolist()
             inflation_rates_dict['data'] = inflation_rates.to_dict(orient='list')
 
-            lending_rates = pd.DataFrame(lending_rates_dict['data'], index=lending_rates_dict['time']).dropna()
             lending_rates.index = lending_rates.index.astype(int)
             # extend lending rates to future
             mean_lending_rate_since_reference_year = lending_rates.loc[reference_start_year:].mean(axis=0)
             lending_rates = lending_rates.reindex(range(lending_rates.index.min(), project_future_until_year + 1)).fillna(mean_lending_rate_since_reference_year)
 
+            # convert back to dictionary
             lending_rates_dict['time'] = lending_rates.index.astype(str).tolist()
             lending_rates_dict['data'] = lending_rates.to_dict(orient='list')
 
@@ -1720,7 +1773,7 @@ class GEBModel(GridModel):
 
         self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_drip_irrigation_per_m2')
 
-    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
+    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1, map_region_ids=True):
         """
         Sets up the farmers data for GEB.
 
@@ -1770,8 +1823,13 @@ class GEBModel(GridModel):
 
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
-            # TODO: Why does nodata value disappear?                  
-            farmers_region = farmers[farmers['region_id'] == region_id]
+            # TODO: Why does nodata value disappear?     
+            # self.dict['areamaps/region_id_mapping'][farmers['region_id']]       
+            if map_region_ids:
+                farmer_region_ids = farmers['region_id'].map(self.dict['areamaps/region_id_mapping']) 
+            else:
+                farmer_region_ids = farmers['region_id']
+            farmers_region = farmers[farmer_region_ids == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
@@ -2126,7 +2184,7 @@ class GEBModel(GridModel):
         farmers['daily_consumption_per_capita'] = random.choices([50, 100, 200, 500], k=len(farmers))
         farmers['risk_aversion'] = np.random.normal(loc=risk_aversion_mean, scale=risk_aversion_standard_deviation, size=len(farmers))
 
-        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
+        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3, map_region_ids=False)
 
     def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
         out_ds = ds.interp(
@@ -2480,6 +2538,10 @@ class GEBModel(GridModel):
                     self.logger.debug(f"Skip {name}")
 
     def write_dict(self):
+
+        def convert_timestamp_to_string(timestamp):
+            return timestamp.isoformat()
+
         if len(self.dict) == 0:
             self.logger.debug("No table data found, skip writing.")
         else:
@@ -2493,7 +2555,7 @@ class GEBModel(GridModel):
                     output_path = Path(self.root) / fn
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(output_path, 'w') as f:
-                        json.dump(data, f)
+                        json.dump(data, f, default=convert_timestamp_to_string)
                 else:
                     self.logger.debug(f"Skip {name}")
 
@@ -2680,3 +2742,9 @@ class GEBModel(GridModel):
             for name, fn in data.items():
                 data[name] = relative_path / fn
         GridModel.set_root(self, root, mode)
+
+    @property
+    def subgrid_factor(self):
+        subgrid_factor = self.subgrid.grid.dims['x'] // self.grid.dims['x']
+        assert subgrid_factor == self.subgrid.grid.dims['y'] // self.grid.dims['y']
+        return subgrid_factor

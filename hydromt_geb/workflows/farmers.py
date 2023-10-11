@@ -244,7 +244,7 @@ def get_farm_distribution(n, x0, x1, mean, offset):
             for i in range(1, estimate.size):
                 estimate[i] = estimate[i-1] * growth_factor
             estimate /= (estimate.sum() / n)
-            assert (estimate >= 0).all()
+            assert (estimate >= 0).all(), f"Some numbers are negative; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}"
 
             estimated_area = (estimate * farm_sizes).sum()
             
