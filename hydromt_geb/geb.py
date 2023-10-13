@@ -39,19 +39,6 @@ from .workflows import repeat_grid, clip_with_grid, get_modflow_transform_and_sh
 
 logger = logging.getLogger(__name__)
 
-# class ModelStructure(dict):
-#     def __init__(self):
-#         self.is_updated = {}
-#         super().__init__()
-
-#     def load(self, fp):
-#         with open(fp) as f:
-#             self.update(json.load(f))
-
-#     def __setitem__(self, key, value):
-#         self.is_updated[key] = value
-#         super().__setitem__(key, value)
-
 class PathEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Path):
@@ -1773,7 +1760,7 @@ class GEBModel(GridModel):
 
         self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_drip_irrigation_per_m2')
 
-    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1, map_region_ids=True):
+    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
         """
         Sets up the farmers data for GEB.
 
@@ -1824,11 +1811,8 @@ class GEBModel(GridModel):
             cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
             # TODO: Why does nodata value disappear?     
-            # self.dict['areamaps/region_id_mapping'][farmers['region_id']]       
-            if map_region_ids:
-                farmer_region_ids = farmers['region_id'].map(self.dict['areamaps/region_id_mapping']) 
-            else:
-                farmer_region_ids = farmers['region_id']
+            # self.dict['areamaps/region_id_mapping'][farmers['region_id']]  
+            farmer_region_ids = farmers['region_id']
             farmers_region = farmers[farmer_region_ids == region_id]
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
@@ -2155,7 +2139,7 @@ class GEBModel(GridModel):
                 if number_of_agents_size_class * mean_cells_per_agent + offset > max_size_cells * number_of_agents_size_class:
                     max_size_cells = (number_of_agents_size_class * mean_cells_per_agent + offset) // number_of_agents_size_class + 1
 
-                n_farms_size_class, farm_sizes_size_class = get_farm_distribution(number_of_agents_size_class, min_size_cells, max_size_cells, mean_cells_per_agent, offset)
+                n_farms_size_class, farm_sizes_size_class = get_farm_distribution(number_of_agents_size_class, min_size_cells, max_size_cells, mean_cells_per_agent, offset, self.logger)
                 assert n_farms_size_class.sum() == number_of_agents_size_class
                 assert (farm_sizes_size_class > 0).all()
                 assert (n_farms_size_class * farm_sizes_size_class).sum() == whole_cells_per_size_class[size_class]
@@ -2184,7 +2168,7 @@ class GEBModel(GridModel):
         farmers['daily_consumption_per_capita'] = random.choices([50, 100, 200, 500], k=len(farmers))
         farmers['risk_aversion'] = np.random.normal(loc=risk_aversion_mean, scale=risk_aversion_standard_deviation, size=len(farmers))
 
-        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3, map_region_ids=False)
+        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
         out_ds = ds.interp(
