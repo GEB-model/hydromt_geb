@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
 import concurrent.futures
+from datetime import date, datetime
 
 import xclim.indices as xci
 from scipy.stats import genextreme
@@ -31,7 +32,9 @@ if os.name == 'nt':
 import xesmf as xe
 from affine import Affine
 import geopandas as gpd
-from datetime import date, datetime
+# use pyogrio for substantial speedup reading and writing vector data
+gpd.options.io_engine = "pyogrio"
+
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
@@ -151,7 +154,7 @@ class GEBModel(GridModel):
             ds_org.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
             ds_org.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
             if "bounds" not in region:
-                region.update(basin_index=self.data_catalog[basin_index_fn])
+                region.update(basin_index=self.data_catalog.get_geodataframe(basin_index_fn))
             # get basin geometry
             geom, xy = hydromt.workflows.get_basin_geometry(
                 ds=ds_org,
