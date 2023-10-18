@@ -33,7 +33,7 @@ import xesmf as xe
 from affine import Affine
 import geopandas as gpd
 # use pyogrio for substantial speedup reading and writing vector data
-gpd.options.io_engine = "pyogrio"
+# gpd.options.io_engine = "pyogrio"
 
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
