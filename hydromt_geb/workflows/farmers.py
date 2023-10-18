@@ -185,7 +185,7 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
     else:
         raise Exception(f"Could not fit {n} farmers with mean {mean} and offset {offset}.")
 
-def get_farm_distribution(n, x0, x1, mean, offset):
+def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
     assert mean >= x0
     assert mean <= x1
     assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
@@ -238,12 +238,28 @@ def get_farm_distribution(n, x0, x1, mean, offset):
     else:
         growth_factor = 1
 
+        start_from_bottom = True
         while True:
-            estimate = np.zeros(n_farm_sizes, dtype=np.float64)
-            estimate[0] = 1
-            for i in range(1, estimate.size):
-                estimate[i] = estimate[i-1] * growth_factor
-            estimate /= (estimate.sum() / n)
+            if start_from_bottom:
+                estimate = np.zeros(n_farm_sizes, dtype=np.float64)
+                estimate[0] = 1
+                for i in range(1, estimate.size):
+                    estimate[i] = estimate[i-1] * growth_factor
+                estimate /= (estimate.sum() / n)
+            
+            # when there are only some farms at the top of the farm size distribution, the growth factor can become very large and the estimate can become very small.
+            # is can lead to NaNs in the estimate. In this case we can start from the top of the farm size distribution.
+            if np.isnan(estimate).any() or not start_from_bottom:
+                start_from_bottom = False
+                growth_factor = 1  # reset growth factor
+                if logger is not None:
+                    logger.warning(f"estimate contains NaNs; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}, start from the top")
+                estimate = np.zeros(n_farm_sizes, dtype=np.float64)
+                estimate[-1] = 1
+                for i in range(estimate.size-2, -1, -1):
+                    estimate[i] = estimate[i+1] * growth_factor
+                estimate /= (estimate.sum() / n)
+            
             assert (estimate >= 0).all(), f"Some numbers are negative; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}"
 
             estimated_area = (estimate * farm_sizes).sum()
