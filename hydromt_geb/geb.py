@@ -939,14 +939,14 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
-    def snap_to_grid(self, ds, reference, relative_tollerance=0.02):
+    def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim='y', xdim='x'):
         # make sure all datasets have more or less the same coordinates
-        assert np.isclose(ds.coords['y'].values, reference['y'].values, atol=abs(ds.rio.resolution()[1] * relative_tollerance), rtol=0).all()
-        assert np.isclose(ds.coords['x'].values, reference['x'].values, atol=abs(ds.rio.resolution()[0] * relative_tollerance), rtol=0).all()
-        return ds.assign_coords(
-            x=reference.x,
-            y=reference.y,
-        )
+        assert np.isclose(ds.coords[ydim].values, reference[ydim].values, atol=abs(ds.rio.resolution()[1] * relative_tollerance), rtol=0).all()
+        assert np.isclose(ds.coords[xdim].values, reference[xdim].values, atol=abs(ds.rio.resolution()[0] * relative_tollerance), rtol=0).all()
+        return ds.assign_coords({
+            ydim: reference[ydim],
+            xdim: reference[xdim]
+        })
 
     def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date, ssp: str):
         """
@@ -1102,9 +1102,12 @@ class GEBModel(GridModel):
         hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
         hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
 
+
         hurs_output = xr.full_like(self.forcing['climate/tas'], np.nan)
         hurs_output.name = 'hurs'
         hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
+        
+        hurs_output = hurs_output.rename({'x': 'lon', 'y': 'lat'}).rio.set_spatial_dims('lon', 'lat')
 
         regridder = xe.Regridder(hurs_30_min.isel(time=0).drop_vars('time'), hurs_ds_30sec.isel(time=0).drop_vars('time'), "bilinear")
         for year in tqdm(range(start_year, end_year+1)):
@@ -1127,12 +1130,14 @@ class GEBModel(GridModel):
                 w5e5_regridded_tr_corr = w5e5_regridded_tr + difference
                 w5e5_regridded_corr = (1 / (1 + np.exp(-w5e5_regridded_tr_corr))) * 100  # back transform
                 w5e5_regridded_corr.raster.set_crs(4326)
+                w5e5_regridded_corr_clipped = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
+                w5e5_regridded_corr_clipped = w5e5_regridded_corr_clipped.rio.set_spatial_dims('lon', 'lat')
 
                 hurs_output.loc[
                     dict(time=slice(start_month, end_month))
-                ] = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
+                ] = self.snap_to_grid(w5e5_regridded_corr_clipped, hurs_output, xdim='lon', ydim='lat')
 
-        hurs_output = self.snap_to_grid(hurs_output, self.grid)
+        hurs_output = hurs_output.rename({'lon': 'x', 'lat': 'y'})
         self.set_forcing(hurs_output, f'climate/hurs')
 
     def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date):
