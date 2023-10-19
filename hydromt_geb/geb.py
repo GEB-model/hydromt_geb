@@ -28,6 +28,8 @@ from scipy.stats import genextreme
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
     os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
+else:
+    os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'esmf.mk')
 
 import xesmf as xe
 from affine import Affine
