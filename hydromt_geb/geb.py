@@ -21,9 +21,7 @@ from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
 import concurrent.futures
 from datetime import date, datetime
-
 import xclim.indices as xci
-from scipy.stats import genextreme
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -72,20 +70,12 @@ class GEBModel(GridModel):
         )
 
         self.epsg = epsg
+
+        self._subgrid = None
+        self._region_subgrid = None
+        self._MERIT_grid = None
+        self._MODFLOW_grid = None
         
-        self.subgrid = GridMixin()
-        # TODO: How to do this properly?
-        self.subgrid._read = True
-        self.subgrid.logger = self.logger
-        self.region_subgrid = GridMixin()
-        self.region_subgrid._read = True
-        self.region_subgrid.logger = self.logger
-        self.MERIT_grid = GridMixin()
-        self.MERIT_grid._read = True
-        self.MERIT_grid.logger = self.logger
-        self.MODFLOW_grid = GridMixin()
-        self.MODFLOW_grid._read = True
-        self.MODFLOW_grid.logger = self.logger
         self.table = {}
         self.binary = {}
         self.dict = {}
@@ -115,6 +105,42 @@ class GEBModel(GridModel):
             'MODFLOW_grid': {},
         }
 
+    @property
+    def subgrid(self):
+        """Model static gridded data as xarray.Dataset."""
+        if self._subgrid is None:
+            self._subgrid = xr.Dataset()
+            if self._read:
+                self.read_subgrid()
+        return self._subgrid
+    
+    @property
+    def region_subgrid(self):
+        """Model static gridded data as xarray.Dataset."""
+        if self._region_subgrid is None:
+            self._region_subgrid = xr.Dataset()
+            if self._read:
+                self.read_region_subgrid()
+        return self._region_subgrid
+    
+    @property
+    def MERIT_grid(self):
+        """Model static gridded data as xarray.Dataset."""
+        if self._MERIT_grid is None:
+            self._MERIT_grid = xr.Dataset()
+            if self._read:
+                self.read_MERIT_grid()
+        return self._MERIT_grid
+    
+    @property
+    def MODFLOW_grid(self):
+        """Model static gridded data as xarray.Dataset."""
+        if self._MODFLOW_grid is None:
+            self._MODFLOW_grid = xr.Dataset()
+            if self._read:
+                self.read_MODFLOW_grid()
+        return self._MODFLOW_grid
+    
     def setup_grid(
         self,
         region: dict,
@@ -242,7 +268,7 @@ class GEBModel(GridModel):
         self.set_grid(cell_area, name=cell_area.name)
 
         sub_cell_area = hydromt.raster.full(
-            self.subgrid.grid.raster.coords,
+            self.subgrid.raster.coords,
             nodata=cell_area.raster.nodata,
             dtype=cell_area.dtype,
             name='areamaps/sub_cell_area',
@@ -702,7 +728,7 @@ class GEBModel(GridModel):
             all_touched=True,
             dtype=np.int32
         ), name='routing/lakesreservoirs/lakesResID')
-        self.set_subgrid(self.subgrid.grid.raster.rasterize(
+        self.set_subgrid(self.subgrid.raster.rasterize(
             waterbodies,
             col_name='waterbody_id',
             nodata=0,
@@ -728,7 +754,7 @@ class GEBModel(GridModel):
                 all_touched=True,
                 dtype=np.int32
             ), name='routing/lakesreservoirs/command_areas')
-            self.set_subgrid(self.subgrid.grid.raster.rasterize(
+            self.set_subgrid(self.subgrid.raster.rasterize(
                 command_areas,
                 col_name='waterbody_id',
                 nodata=-1,
@@ -1444,15 +1470,15 @@ class GEBModel(GridModel):
 
         region_bounds = self.geoms['areamaps/regions'].total_bounds
         
-        resolution_x, resolution_y = self.subgrid.grid['areamaps/sub_grid_mask'].rio.resolution()
+        resolution_x, resolution_y = self.subgrid['areamaps/sub_grid_mask'].rio.resolution()
         pad_minx = region_bounds[0] - abs(resolution_x) / 2.0
         pad_miny = region_bounds[1] - abs(resolution_y) / 2.0
         pad_maxx = region_bounds[2] + abs(resolution_x) / 2.0
         pad_maxy = region_bounds[3] + abs(resolution_y) / 2.0
 
         # TODO: Is there a better way to do this?
-        padded_subgrid, self.region_subgrid.slice = pad_xy(
-            self.subgrid.grid['areamaps/sub_grid_mask'].rio,
+        padded_subgrid, region_subgrid_slice = pad_xy(
+            self.subgrid['areamaps/sub_grid_mask'].rio,
             pad_minx,
             pad_miny,
             pad_maxx,
@@ -1555,12 +1581,12 @@ class GEBModel(GridModel):
 
         self.set_region_subgrid(cultivated_land, name='landsurface/full_region_cultivated_land')
 
-        hydro_land_use_region = hydro_land_use.isel(self.region_subgrid.slice)
+        hydro_land_use_region = hydro_land_use.isel(region_subgrid_slice)
 
         # TODO: Doesn't work when using the original array. Somehow the dtype is changed on adding it to the subgrid. This is a workaround.
         self.set_subgrid(hydro_land_use_region.values, name='landsurface/land_use_classes')
 
-        cultivated_land_region = cultivated_land.isel(self.region_subgrid.slice)
+        cultivated_land_region = cultivated_land.isel(region_subgrid_slice)
 
         # Same workaround as above
         self.set_subgrid(cultivated_land_region.values, name='landsurface/cultivated_land')
@@ -1807,7 +1833,7 @@ class GEBModel(GridModel):
         with names of the form 'agents/farmers/{column}'.
         """
         regions = self.geoms['areamaps/regions']
-        regions_raster = self.region_subgrid.grid['areamaps/region_subgrid']
+        regions_raster = self.region_subgrid['areamaps/region_subgrid']
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
         farms[:] = -1
@@ -1818,7 +1844,7 @@ class GEBModel(GridModel):
             region = regions_raster == region_id
             region_clip, bounds = clip_with_grid(region, region)
 
-            cultivated_land_region = self.region_subgrid.grid['landsurface/full_region_cultivated_land'].isel(bounds)
+            cultivated_land_region = self.region_subgrid['landsurface/full_region_cultivated_land'].isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
             # TODO: Why does nodata value disappear?     
             # self.dict['areamaps/region_id_mapping'][farmers['region_id']]  
@@ -1830,7 +1856,7 @@ class GEBModel(GridModel):
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
-        region_mask = self.region_subgrid.grid['areamaps/region_mask'].astype(bool)
+        region_mask = self.region_subgrid['areamaps/region_mask'].astype(bool)
 
         # TODO: Again why is dtype changed? And export doesn't work?
         cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1, keep_attrs=True))
@@ -1852,7 +1878,7 @@ class GEBModel(GridModel):
         assert farmers.iloc[-1].name == subgrid_farms_in_study_area.max()
 
         self.set_subgrid(subgrid_farms_in_study_area, name='agents/farmers/farms')
-        self.subgrid.grid['agents/farmers/farms'].rio.set_nodata(-1)
+        self.subgrid['agents/farmers/farms'].rio.set_nodata(-1)
 
         crop_name_to_id = {
             crop_name: int(ID)
@@ -1942,11 +1968,11 @@ class GEBModel(GridModel):
             '> 1000 Ha': (10000000, np.inf)
         }
 
-        cultivated_land = self.region_subgrid.grid['landsurface/full_region_cultivated_land']
+        cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land']
 
-        regions_grid = self.region_subgrid.grid['areamaps/region_subgrid']
+        regions_grid = self.region_subgrid['areamaps/region_subgrid']
 
-        cell_area = self.region_subgrid.grid['areamaps/region_cell_area_subgrid']
+        cell_area = self.region_subgrid['areamaps/region_cell_area_subgrid']
 
         regions_shapes = self.geoms['areamaps/regions']
         assert country_iso3_column in regions_shapes.columns, f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
@@ -2429,7 +2455,7 @@ class GEBModel(GridModel):
 
     def write_subgrid(self):
         self._assert_write_mode
-        for var, grid in self.subgrid.grid.items():
+        for var, grid in self.subgrid.items():
             if self.is_updated['subgrid'][var]['updated']:
                 self.logger.info(f"Writing {var}")
                 self.model_structure['subgrid'][var] = var + '.tif'
@@ -2442,7 +2468,7 @@ class GEBModel(GridModel):
 
     def write_region_subgrid(self):
         self._assert_write_mode
-        for var, grid in self.region_subgrid.grid.items():
+        for var, grid in self.region_subgrid.items():
             if self.is_updated['region_subgrid'][var]['updated']:
                 self.logger.info(f"Writing {var}")
                 self.model_structure['region_subgrid'][var] = var + '.tif'
@@ -2455,7 +2481,7 @@ class GEBModel(GridModel):
 
     def write_MERIT_grid(self):
         self._assert_write_mode
-        for var, grid in self.MERIT_grid.grid.items():
+        for var, grid in self.MERIT_grid.items():
             if self.is_updated['MERIT_grid'][var]['updated']:
                 self.logger.info(f"Writing {var}")
                 self.model_structure['MERIT_grid'][var] = var + '.tif'
@@ -2468,7 +2494,7 @@ class GEBModel(GridModel):
 
     def write_MODFLOW_grid(self):
         self._assert_write_mode
-        for var, grid in self.MODFLOW_grid.grid.items():
+        for var, grid in self.MODFLOW_grid.items():
             if self.is_updated['MODFLOW_grid'][var]['updated']:
                 self.logger.info(f"Writing {var}")
                 self.model_structure['MODFLOW_grid'][var] = var + '.tif'
@@ -2706,41 +2732,88 @@ class GEBModel(GridModel):
 
     def set_geoms(self, geoms, name, update=True):
         self.is_updated['geoms'][name] = {'updated': update}
-        GridModel.set_geoms(self, geoms, name=name)
+        super().set_geoms(geoms, name=name)
 
     def set_forcing(self, data, name: str, update=True, *args, **kwargs):
         self.is_updated['forcing'][name] = {'updated': update}
-        GridModel.set_forcing(self, data, name=name, *args, **kwargs)
+        super().set_forcing(data, name=name, *args, **kwargs)
+
+    def _set_grid(
+        self,
+        grid,
+        data: Union[xr.DataArray, xr.Dataset, np.ndarray],
+        name: Optional[str] = None,
+    ):
+        """Add data to grid.
+
+        All layers of grid must have identical spatial coordinates.
+
+        Parameters
+        ----------
+        data: xarray.DataArray or xarray.Dataset
+            new map layer to add to grid
+        name: str, optional
+            Name of new map layer, this is used to overwrite the name of a DataArray
+            and ignored if data is a Dataset
+        """
+        assert grid is not None
+        # NOTE: variables in a dataset are not longer renamed as used to be the case in
+        # set_staticmaps
+        name_required = isinstance(data, np.ndarray) or (
+            isinstance(data, xr.DataArray) and data.name is None
+        )
+        if name is None and name_required:
+            raise ValueError(f"Unable to set {type(data).__name__} data without a name")
+        if isinstance(data, np.ndarray):
+            if data.shape != grid.raster.shape:
+                raise ValueError("Shape of data and grid maps do not match")
+            data = xr.DataArray(dims=grid.raster.dims, data=data, name=name)
+        if isinstance(data, xr.DataArray):
+            if name is not None:  # rename
+                data.name = name
+            data = data.to_dataset()
+        elif not isinstance(data, xr.Dataset):
+            raise ValueError(f"cannot set data of type {type(data).__name__}")
+        # force read in r+ mode
+        if len(grid) == 0:  # trigger init / read
+            grid[name] = data[name]
+        else:
+            for dvar in data.data_vars:
+                if dvar in grid:
+                    if self._read:
+                        self.logger.warning(f"Replacing grid map: {dvar}")
+                grid[dvar] = data[dvar]
+        return grid
 
     def set_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
         self.is_updated['grid'][name] = {'updated': update}
-        GridModel.set_grid(self, data, name=name)
+        super().set_grid(data, name=name)
 
     def set_subgrid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
         self.is_updated['subgrid'][name] = {'updated': update}
-        self.subgrid.set_grid(data, name=name)
+        self._set_grid(self.subgrid, data, name=name)
 
     def set_region_subgrid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
         self.is_updated['region_subgrid'][name] = {'updated': update}
-        self.region_subgrid.set_grid(data, name=name)
+        self._set_grid(self.region_subgrid, data, name=name)
 
     def set_MERIT_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
         self.is_updated['MERIT_grid'][name] = {'updated': update}
-        self.MERIT_grid.set_grid(data, name=name)
+        self._set_grid(self.MERIT_grid, data, name=name)
 
     def set_MODFLOW_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
         self.is_updated['MODFLOW_grid'][name] = {'updated': update}
-        self.MODFLOW_grid.set_grid(data, name=name)
+        self._set_grid(self.MODFLOW_grid, data, name=name)
 
     def set_alternate_root(self, root, mode):
         relative_path = Path(os.path.relpath(Path(self.root), root.resolve()))
         for data in self.model_structure.values():
             for name, fn in data.items():
                 data[name] = relative_path / fn
-        GridModel.set_root(self, root, mode)
+        super().set_root(root, mode)
 
     @property
     def subgrid_factor(self):
-        subgrid_factor = self.subgrid.grid.dims['x'] // self.grid.dims['x']
-        assert subgrid_factor == self.subgrid.grid.dims['y'] // self.grid.dims['y']
+        subgrid_factor = self.subgrid.dims['x'] // self.grid.dims['x']
+        assert subgrid_factor == self.subgrid.dims['y'] // self.grid.dims['y']
         return subgrid_factor
