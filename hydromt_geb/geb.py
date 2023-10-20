@@ -1210,7 +1210,7 @@ class GEBModel(GridModel):
         tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
         rlds_coarse = self.download_isimip(product='SecondaryInputData', variable='rlds', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
         
-        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop('time'), target, 'bilinear')
+        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop_vars('time'), target, 'bilinear')
 
         hurs_coarse_regridded = regridder(hurs_coarse).rename({'lon': 'x', 'lat': 'y'})
         tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
@@ -1283,7 +1283,7 @@ class GEBModel(GridModel):
         regridder = xe.Regridder(orography, target, 'bilinear')
         orography = regridder(orography).rename({'lon': 'x', 'lat': 'y'})
 
-        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop('time'), target, 'bilinear')
+        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop_vars('time'), target, 'bilinear')
         pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
         pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
 
