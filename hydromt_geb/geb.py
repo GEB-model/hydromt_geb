@@ -58,7 +58,8 @@ class GEBModel(GridModel):
         config_fn: str = None,
         data_libs: List[str] = None,
         logger=logger,
-        epsg=4326
+        epsg=4326,
+        data_variant: str = None,
     ):
         """Initialize a GridModel for distributed models with a regular grid."""
         super().__init__(
@@ -70,6 +71,7 @@ class GEBModel(GridModel):
         )
 
         self.epsg = epsg
+        self.data_variant = data_variant
 
         self._subgrid = None
         self._region_subgrid = None
