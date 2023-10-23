@@ -59,7 +59,7 @@ class GEBModel(GridModel):
         data_libs: List[str] = None,
         logger=logger,
         epsg=4326,
-        data_variant: str = None,
+        data_provider: str = None,
     ):
         """Initialize a GridModel for distributed models with a regular grid."""
         super().__init__(
@@ -71,7 +71,7 @@ class GEBModel(GridModel):
         )
 
         self.epsg = epsg
-        self.data_variant = data_variant
+        self.data_provider = data_provider
 
         self._subgrid = None
         self._region_subgrid = None
@@ -533,7 +533,7 @@ class GEBModel(GridModel):
         the grid using the `set_grid()` method.
         """
         self.logger.info("Setting up elevation standard deviation")
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], provider=self.data_provider)
         # In some MERIT datasets, there is a half degree offset in MERIT data. We can detect this by checking the offset relative to the resolution.
         # This offset should be 0.5. If the offset instead is close to 0 or 1, then we need to correct for this offset.
         center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
