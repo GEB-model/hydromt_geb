@@ -250,8 +250,9 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
             # when there are only some farms at the top of the farm size distribution, the growth factor can become very large and the estimate can become very small.
             # is can lead to NaNs in the estimate. In this case we can start from the top of the farm size distribution.
             if np.isnan(estimate).any() or not start_from_bottom:
-                start_from_bottom = False
-                growth_factor = 1  # reset growth factor
+                if start_from_bottom: # reset growth factor, but only first time this code is run
+                    start_from_bottom = False
+                    growth_factor = 1
                 if logger is not None:
                     logger.warning(f"estimate contains NaNs; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}, start from the top")
                 estimate = np.zeros(n_farm_sizes, dtype=np.float64)
