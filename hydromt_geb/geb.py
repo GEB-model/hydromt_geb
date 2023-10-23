@@ -2385,7 +2385,7 @@ class GEBModel(GridModel):
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
         datasets = [
-            xr.open_dataset(download_path / file, chunks={'time': 365})#.rename({'lat': 'y', 'lon': 'x'})
+            xr.open_dataset(download_path / file, chunks={'time': 365})
             for file in parse_files
         ]
 
