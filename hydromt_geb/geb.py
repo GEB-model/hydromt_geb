@@ -533,7 +533,7 @@ class GEBModel(GridModel):
         the grid using the `set_grid()` method.
         """
         self.logger.info("Setting up elevation standard deviation")
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], provider=self.data_provider)
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], provider=self.data_provider, bbox=self.grid.raster.bounds, buffer=50).compute()  # Why is compute needed here?
         # In some MERIT datasets, there is a half degree offset in MERIT data. We can detect this by checking the offset relative to the resolution.
         # This offset should be 0.5. If the offset instead is close to 0 or 1, then we need to correct for this offset.
         center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
@@ -563,18 +563,17 @@ class GEBModel(GridModel):
         ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT.rio.resolution()[1] / 100)
         assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
         ymin = ymin.argmax()
-        ymax = ymin + self.grid.mask.shape[0] * scaling
+        ymax = ymin + self.grid.y.size * scaling
         xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT.rio.resolution()[0] / 100)
         assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
         xmin = xmin.argmax()
-        xmax = xmin + self.grid.mask.shape[1] * scaling
+        xmax = xmin + self.grid.x.size * scaling
 
         # select data from MERIT using the grid coordinates
         high_res_elevation_data = MERIT.isel(
             y=slice(ymin, ymax),
             x=slice(xmin, xmax)
         )
-
         self.set_MERIT_grid(MERIT.isel(
             y=slice(ymin-1, ymax+1),
             x=slice(xmin-1, xmax+1)
@@ -616,7 +615,7 @@ class GEBModel(GridModel):
         with names 'soil/percolation_impeded' and 'soil/cropgrp', respectively.
         """
         self.logger.info('Setting up soil parameters')
-        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min")
+        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min", bbox=self.bounds, buffer=10)
         for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
             for soil_layer in range(1, 4):
                 ds = soil_ds[f'{parameter}{soil_layer}_5min']
@@ -673,7 +672,7 @@ class GEBModel(GridModel):
             ('irrNonPaddy', 'irrNonPaddy'),
         ):
             self.logger.info(f'Setting up land use parameters for {land_use_type}')
-            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min")
+            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min", bbox=self.bounds, buffer=10)
             
             for parameter in ('maxRootDepth', 'rootFraction1'):
                 self.set_grid(
@@ -886,7 +885,7 @@ class GEBModel(GridModel):
         modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
         self.set_MODFLOW_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
 
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'])
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], bbox=self.bounds, buffer=50)
         MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
         MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
         MERIT = MERIT.assign_coords(
@@ -1396,7 +1395,6 @@ class GEBModel(GridModel):
 
         # Compute the SPEI
         spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget_positive, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
-        # spei = spei.compute()
         spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
         spei.name = 'spei'
 
