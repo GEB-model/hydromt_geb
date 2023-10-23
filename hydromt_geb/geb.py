@@ -778,7 +778,7 @@ class GEBModel(GridModel):
 
         self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
 
-    def setup_water_demand(self):
+    def setup_water_demand(self, starttime, endtime, ssp):
         """
         Sets up the water demand data for GEB.
 
@@ -797,30 +797,26 @@ class GEBModel(GridModel):
         The resulting water demand data is set as forcing data in the model with names of the form 'water_demand/{demand_type}'.
         """
         self.logger.info('Setting up water demand')
-        domestic_water_demand = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domWW
-        domestic_water_demand['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_demand.time[0].data.item())), periods=len(domestic_water_demand.time), freq='MS')
-        domestic_water_demand.name = 'domestic_water_demand'
-        self.set_forcing(domestic_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_demand')
 
-        domestic_water_consumption = self.data_catalog.get_rasterdataset('cwatm_domestic_water_demand', bbox=self.bounds, buffer=2).domCon
-        domestic_water_consumption.name = 'domestic_water_consumption'
-        domestic_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(domestic_water_consumption.time[0].data.item())), periods=len(domestic_water_consumption.time), freq='MS')
-        self.set_forcing(domestic_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/domestic_water_consumption')
+        def set(file, accessor, name, ssp, starttime, endtime):
+            ds_historic = self.data_catalog.get_rasterdataset(f'cwatm_{file}_historical', bbox=self.bounds, buffer=2)
+            if accessor:
+                ds_historic = getattr(ds_historic, accessor)
+            ds_future = self.data_catalog.get_rasterdataset(f'cwatm_{file}_{ssp}', bbox=self.bounds, buffer=2)
+            if accessor:
+                ds_future = getattr(ds_future, accessor)
+            ds = xr.concat([ds_historic, ds_future], dim='time')
+            ds['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(ds.time[0].data.item())), periods=len(ds.time), freq='AS')
+            assert (ds.time.dt.year.diff('time') == 1).all(), 'not all years are there'
+            ds = ds.sel(time=slice(starttime, endtime))
+            ds.name = name
+            self.set_forcing(ds.rename({'lat': 'y', 'lon': 'x'}), name=f'water_demand/{name}')
 
-        industry_water_demand = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indWW
-        industry_water_demand['time'] = pd.date_range(start=datetime(1901 + int(industry_water_demand.time[0].data.item()), 1, 1), periods=len(industry_water_demand.time), freq='AS')
-        industry_water_demand.name = 'industry_water_demand'
-        self.set_forcing(industry_water_demand.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_demand')
-
-        industry_water_consumption = self.data_catalog.get_rasterdataset('cwatm_industry_water_demand', bbox=self.bounds, buffer=2).indCon
-        industry_water_consumption.name = 'industry_water_consumption'
-        industry_water_consumption['time'] = pd.date_range(start=datetime(1901 + int(industry_water_consumption.time[0].data.item()), 1, 1), periods=len(industry_water_consumption.time), freq='AS')
-        self.set_forcing(industry_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/industry_water_consumption')
-
-        livestock_water_consumption = self.data_catalog.get_rasterdataset('cwatm_livestock_water_demand', bbox=self.bounds, buffer=2)
-        livestock_water_consumption['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(livestock_water_consumption.time[0].data.item())), periods=len(livestock_water_consumption.time), freq='MS')
-        livestock_water_consumption.name = 'livestock_water_consumption'
-        self.set_forcing(livestock_water_consumption.rename({'lat': 'y', 'lon': 'x'}), name='water_demand/livestock_water_consumption')
+        set('domestic_water_demand', 'domWW', 'domestic_water_demand', ssp, starttime, endtime)
+        set('domestic_water_demand', 'domCon', 'domestic_water_consumption', ssp, starttime, endtime)
+        set('industry_water_demand', 'indWW', 'industry_water_demand', ssp, starttime, endtime)
+        set('industry_water_demand', 'indCon', 'industry_water_consumption', ssp, starttime, endtime)
+        set('livestock_water_demand', None, 'livestock_water_consumption', ssp, starttime, endtime)
 
     def setup_modflow(self, epsg: int, resolution: float):
         """
