@@ -1322,13 +1322,9 @@ class GEBModel(GridModel):
 
         The resulting wind data is set as forcing data in the model with names of the form 'climate/wind'.
         """
-        # Can this be done with hydromt?
-        global_wind_atlas = rxr.open_rasterio(self.data_catalog['global_wind_atlas'].path).rio.clip_box(*self.grid.raster.bounds)
-        # TODO: Load from https in hydromt once supported: https://github.com/Deltares/hydromt/issues/499
-        # global_wind_atlas = self.data_catalog.get_rasterdataset(
-        #     'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
-        # ).rename({'x': 'lon', 'y': 'lat'})
-        global_wind_atlas = global_wind_atlas.rename({'x': 'lon', 'y': 'lat'}).squeeze()
+        global_wind_atlas = self.data_catalog.get_rasterdataset(
+            'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
+        ).rename({'x': 'lon', 'y': 'lat'})
         target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
