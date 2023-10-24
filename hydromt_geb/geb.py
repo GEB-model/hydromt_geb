@@ -1021,13 +1021,16 @@ class GEBModel(GridModel):
             var = var.rename({'lon': 'x', 'lat': 'y'})
             self.logger.info(f'Completed {variable}')
             self.set_forcing(var, name=f'climate/{variable}')
-        
-        # Create a thread pool and map the set_forcing function to the variables
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(download_variable, variable, forcing, ssp, starttime, endtime) for variable in variables]
 
-        # Wait for all threads to complete
-        concurrent.futures.wait(futures)
+        for variable in variables:
+            download_variable(variable, starttime, endtime)
+        
+        # # Create a thread pool and map the set_forcing function to the variables
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #     futures = [executor.submit(download_variable, variable, forcing, ssp, starttime, endtime) for variable in variables]
+
+        # # Wait for all threads to complete
+        # concurrent.futures.wait(futures)
 
     def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
         """
@@ -1064,12 +1067,15 @@ class GEBModel(GridModel):
             self.logger.info(f'Completed {variable}')
             self.set_forcing(var, name=f'climate/{variable}')
 
-        # Create a thread pool and map the set_forcing function to the variables
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(download_variable, variable, starttime, endtime) for variable in variables]
+        for variable in variables:
+            download_variable(variable, starttime, endtime)
 
-        # Wait for all threads to complete
-        concurrent.futures.wait(futures)
+        # # Create a thread pool and map the set_forcing function to the variables
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #     futures = [executor.submit(download_variable, variable, starttime, endtime) for variable in variables]
+
+        # # Wait for all threads to complete
+        # concurrent.futures.wait(futures)
 
     def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
         """
@@ -1529,7 +1535,8 @@ class GEBModel(GridModel):
             "merit_hydro",
             variables=['upg'],
             bbox=padded_subgrid.rio.bounds(),
-            buffer=300 # 3 km buffer
+            buffer=300, # 3 km buffer
+            provider=self.data_provider
         )
         # There is a half degree offset in MERIT data
         MERIT = MERIT.assign_coords(
