@@ -885,7 +885,7 @@ class GEBModel(GridModel):
         modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
         self.set_MODFLOW_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
 
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], bbox=self.bounds, buffer=50)
+        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], bbox=self.bounds, buffer=50, provider=self.data_provider)
         MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
         MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
         MERIT = MERIT.assign_coords(
