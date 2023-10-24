@@ -1023,7 +1023,7 @@ class GEBModel(GridModel):
             self.set_forcing(var, name=f'climate/{variable}')
 
         for variable in variables:
-            download_variable(variable, starttime, endtime)
+            download_variable(variable, forcing, ssp, starttime, endtime)
         
         # # Create a thread pool and map the set_forcing function to the variables
         # with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -1967,11 +1967,9 @@ class GEBModel(GridModel):
             '> 1000 Ha': (10000000, np.inf)
         }
 
-        cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land']
-
-        regions_grid = self.region_subgrid['areamaps/region_subgrid']
-
-        cell_area = self.region_subgrid['areamaps/region_cell_area_subgrid']
+        cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land'].compute()
+        regions_grid = self.region_subgrid['areamaps/region_subgrid'].compute()
+        cell_area = self.region_subgrid['areamaps/region_cell_area_subgrid'].compute()
 
         regions_shapes = self.geoms['areamaps/regions']
         assert country_iso3_column in regions_shapes.columns, f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
@@ -2105,9 +2103,9 @@ class GEBModel(GridModel):
             country_ISO3 = region[country_iso3_column]
             self.logger.debug(f'Processing region {UID} in {country_ISO3}')
 
-            cultivated_land_region = ((regions_grid == UID) & (cultivated_land == True))
-            total_cultivated_land_area_lu = (((regions_grid == UID) & (cultivated_land == True)) * cell_area).sum()
-            average_cell_area_region = cell_area.where(((regions_grid == UID) & (cultivated_land == True))).mean()
+            cultivated_land_region_total_cells = ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
+            total_cultivated_land_area_lu = (((regions_grid == UID) & (cultivated_land == True)) * cell_area).sum().compute()
+            average_cell_area_region = cell_area.where(((regions_grid == UID) & (cultivated_land == True))).mean().compute()
 
             country_farm_sizes = farm_sizes_per_country.loc[(farm_sizes_per_country['ISO3'] == country_ISO3)].drop(['Country', "Census Year", "Total"], axis=1)
             assert len(country_farm_sizes) == 2, f'Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}'
@@ -2131,12 +2129,12 @@ class GEBModel(GridModel):
                     n_cells_per_size_class.loc[size_class] = n_holdings[size_class] * avg_size_class[size_class] / average_cell_area_region
                     assert not np.isnan(n_cells_per_size_class.loc[size_class])
 
-            assert math.isclose(cultivated_land_region.sum(), n_cells_per_size_class.sum())
+            assert math.isclose(cultivated_land_region_total_cells, n_cells_per_size_class.sum())
             
             whole_cells_per_size_class = (n_cells_per_size_class // 1).astype(int)
             leftover_cells_per_size_class = n_cells_per_size_class % 1
             whole_cells = whole_cells_per_size_class.sum()
-            n_missing_cells = cultivated_land_region.sum() - whole_cells
+            n_missing_cells = cultivated_land_region_total_cells - whole_cells
             assert n_missing_cells <= len(agricultural_area_db)
 
             index = list(zip(leftover_cells_per_size_class.index, leftover_cells_per_size_class % 1))
