@@ -186,11 +186,18 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
         raise Exception(f"Could not fit {n} farmers with mean {mean} and offset {offset}.")
 
 def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
-    assert mean >= x0
-    assert mean <= x1
     assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
 
     target_area = n * mean + offset
+    
+    # when the number of farms is very small, it is sometimes difficult to find a solution. This becomes easier when the number of possible farm sizes is reduced.
+    smallest_possible_farm = x1 - (n * x1 - target_area)
+    x0 = max(x0, smallest_possible_farm)
+
+    largest_possible_farm = x0 + (target_area - n * x0)
+    x1 = min(x1, largest_possible_farm)
+    assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
+
     farm_sizes = np.arange(x0, x1+1)
     n_farm_sizes = farm_sizes.size
 
@@ -203,37 +210,37 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
         n_farms = np.array([1])
         assert target_area == (n_farms * farm_sizes).sum()
     
-    elif mean == x0:
-        n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
-        n_farms[0] = n
-        if offset > 0:
-            if offset < n_farms[0]:
-                n_farms[0] -= offset
-                n_farms[1] += offset
-            else:
-                raise NotImplementedError
-        elif offset < 0:
-            n_farms[0] -= 1
-            n_farms = np.insert(n_farms, 0, 1)
-            farm_sizes = np.insert(farm_sizes, 0, farm_sizes[0] + offset)
-            assert (farm_sizes > 0).all()
-        assert target_area == (n_farms * farm_sizes).sum()
+    # elif mean == x0:
+    #     n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
+    #     n_farms[0] = n
+    #     if offset > 0:
+    #         if offset < n_farms[0]:
+    #             n_farms[0] -= offset
+    #             n_farms[1] += offset
+    #         else:
+    #             raise NotImplementedError
+    #     elif offset < 0:
+    #         n_farms[0] -= 1
+    #         n_farms = np.insert(n_farms, 0, 1)
+    #         farm_sizes = np.insert(farm_sizes, 0, farm_sizes[0] + offset)
+    #         assert (farm_sizes > 0).all()
+    #     assert target_area == (n_farms * farm_sizes).sum()
 
-    elif mean == x1:
-        n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
-        n_farms[-1] = n
-        if offset < 0:
-            if n_farms[-1] > -offset:
-                n_farms[-1] += offset
-                n_farms[-2] -= offset
-            else:
-                raise NotImplementedError
-        elif offset > 0:
-            n_farms[-1] -= 1
-            n_farms = np.insert(n_farms, 0, 1)
-            farm_sizes = np.insert(farm_sizes, 0, farm_sizes[-1] + offset)
-            assert (farm_sizes > 0).all()
-        assert target_area == (n_farms * farm_sizes).sum()
+    # elif mean == x1:
+    #     n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
+    #     n_farms[-1] = n
+    #     if offset < 0:
+    #         if n_farms[-1] > -offset:
+    #             n_farms[-1] += offset
+    #             n_farms[-2] -= offset
+    #         else:
+    #             raise NotImplementedError
+    #     elif offset > 0:
+    #         n_farms[-1] -= 1
+    #         n_farms = np.insert(n_farms, 0, 1)
+    #         farm_sizes = np.insert(farm_sizes, 0, farm_sizes[-1] + offset)
+    #         assert (farm_sizes > 0).all()
+    #     assert target_area == (n_farms * farm_sizes).sum()
     
     else:
         growth_factor = 1
@@ -265,6 +272,10 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
 
             estimated_area = (estimate * farm_sizes).sum()
             
+            absolute_difference = target_area - estimated_area
+            if absolute_difference == 0:
+                break
+
             difference = (target_area / estimated_area) ** (1 / (n_farm_sizes - 1))
             if difference == 1:
                 break
