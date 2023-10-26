@@ -16,7 +16,7 @@ dependencies = [
     "openpyxl>=3.1.2",
     "isimip-client>=1.0.1",
     "xclim>=0.44.0",
-    "pyogrio>=0.6"
+    "pyogrio>=0.7"
 ]
 requires-python = ">=3.8"
 readme = "README.md"

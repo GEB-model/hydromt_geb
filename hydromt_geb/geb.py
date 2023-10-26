@@ -1,7 +1,7 @@
 from tqdm import tqdm
 from pathlib import Path
 from typing import List, Optional
-from hydromt.models.model_grid import GridMixin, GridModel
+from hydromt.models.model_grid import GridModel
 import hydromt.workflows
 from dateutil.relativedelta import relativedelta
 import logging
@@ -15,7 +15,6 @@ import json
 import numpy as np
 import pandas as pd
 import xarray as xr
-import rioxarray as rxr
 from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
 from typing import Union, Any, Dict
@@ -32,8 +31,47 @@ else:
 import xesmf as xe
 from affine import Affine
 import geopandas as gpd
+
 # use pyogrio for substantial speedup reading and writing vector data
-# gpd.options.io_engine = "pyogrio"
+gpd.options.io_engine = "pyogrio"
+
+def _read_file_pyogrio(path_or_bytes, bbox=None, mask=None, rows=None, **kwargs):
+    print('remove this hack when geopandas is updated')
+    import pyogrio
+    from geopandas import GeoDataFrame, GeoSeries
+    from shapely.geometry.base import BaseGeometry
+
+    if rows is not None:
+        if isinstance(rows, int):
+            kwargs["max_features"] = rows
+        elif isinstance(rows, slice):
+            if rows.start is not None:
+                kwargs["skip_features"] = rows.start
+            if rows.stop is not None:
+                kwargs["max_features"] = rows.stop - (rows.start or 0)
+            if rows.step is not None:
+                raise ValueError("slice with step is not supported")
+        else:
+            raise TypeError("'rows' must be an integer or a slice.")
+    if bbox is not None:
+        if isinstance(bbox, (GeoDataFrame, GeoSeries)):
+            bbox = tuple(bbox.total_bounds)
+        elif isinstance(bbox, BaseGeometry):
+            bbox = bbox.bounds
+        if len(bbox) != 4:
+            raise ValueError("'bbox' should be a length-4 tuple.")
+    if mask is not None:
+        mask = mask.iloc[0, 0]
+        # raise ValueError(
+        #     "The 'mask' keyword is not supported with the 'pyogrio' engine. "
+        #     "You can use 'bbox' instead."
+        # )
+    if kwargs.pop("ignore_geometry", False):
+        kwargs["read_geometry"] = False
+
+    # TODO: if bbox is not None, check its CRS vs the CRS of the file
+    return pyogrio.read_dataframe(path_or_bytes, bbox=bbox, mask=mask, **kwargs)
+gpd.io.file._read_file_pyogrio = _read_file_pyogrio
 
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
@@ -2098,6 +2136,7 @@ class GEBModel(GridModel):
         assert not farm_sizes_per_country['ISO3'].isna().any(), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
 
         all_agents = []
+        self.logger.debug(f'Starting processing of {len(regions_shapes)} regions')
         for _, region in regions_shapes.iterrows():
             UID = region[region_id_column]
             country_ISO3 = region[country_iso3_column]
@@ -2105,6 +2144,9 @@ class GEBModel(GridModel):
 
             cultivated_land_region_total_cells = ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
             total_cultivated_land_area_lu = (((regions_grid == UID) & (cultivated_land == True)) * cell_area).sum().compute()
+            if total_cultivated_land_area_lu == 0:  # when no agricultural area, just continue as there will be no farmers. Also avoiding some division by 0 errors.
+                continue
+            
             average_cell_area_region = cell_area.where(((regions_grid == UID) & (cultivated_land == True))).mean().compute()
 
             country_farm_sizes = farm_sizes_per_country.loc[(farm_sizes_per_country['ISO3'] == country_ISO3)].drop(['Country', "Census Year", "Total"], axis=1)
@@ -2147,8 +2189,15 @@ class GEBModel(GridModel):
                 # if no cells for this size class, just continue
                 if whole_cells_per_size_class.loc[size_class] == 0:
                     continue
+
+                number_of_agents_size_class = round(n_holdings[size_class].compute().item())
+                # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
+                if number_of_agents_size_class == 0 and whole_cells_per_size_class[size_class] > 0:
+                    number_of_agents_size_class = 1
                 
                 min_size_m2, max_size_m2 = SIZE_CLASSES_BOUNDARIES[size_class]
+                if max_size_m2 == np.inf:
+                    max_size_m2 = avg_size_class[size_class] * 2
 
                 min_size_cells = int(min_size_m2 / average_cell_area_region)
                 min_size_cells = max(min_size_cells, 1)  # farm can never be smaller than one cell
@@ -2157,11 +2206,6 @@ class GEBModel(GridModel):
 
                 if mean_cells_per_agent < min_size_cells or mean_cells_per_agent > max_size_cells:  # there must be an error in the data, thus assume centred
                     mean_cells_per_agent = (min_size_cells + max_size_cells) // 2
-
-                number_of_agents_size_class = round(n_holdings[size_class].compute().item())
-                # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
-                if number_of_agents_size_class == 0 and whole_cells_per_size_class[size_class] > 0:
-                    number_of_agents_size_class = 1
 
                 population = pd.DataFrame(index=range(number_of_agents_size_class))
                 
