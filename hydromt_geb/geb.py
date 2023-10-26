@@ -1,9 +1,9 @@
 from tqdm import tqdm
 from pathlib import Path
 from typing import List, Optional
-from hydromt.models.model_grid import GridModel
 import hydromt.workflows
-from dateutil.relativedelta import relativedelta
+from datetime import date, datetime
+from typing import Union, Any, Dict
 import logging
 import os
 import math
@@ -12,15 +12,20 @@ import time
 import random
 import zipfile
 import json
+from urllib.parse import urlparse
+import concurrent.futures
+
 import numpy as np
 import pandas as pd
+import geopandas as gpd
+import pyproj
+from affine import Affine
 import xarray as xr
-from urllib.parse import urlparse
 from dask.diagnostics import ProgressBar
-from typing import Union, Any, Dict
-import concurrent.futures
-from datetime import date, datetime
 import xclim.indices as xci
+from dateutil.relativedelta import relativedelta
+
+from hydromt.models.model_grid import GridModel
 
 # temporary fix for ESMF on Windows
 if os.name == 'nt':
@@ -29,8 +34,6 @@ else:
     os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'esmf.mk')
 
 import xesmf as xe
-from affine import Affine
-import geopandas as gpd
 
 # use pyogrio for substantial speedup reading and writing vector data
 gpd.options.io_engine = "pyogrio"
@@ -77,6 +80,7 @@ from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
 from .workflows import repeat_grid, clip_with_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, get_farm_distribution, calculate_cell_area
+from .workflows.population import generate_locations
 
 logger = logging.getLogger(__name__)
 
@@ -2246,6 +2250,34 @@ class GEBModel(GridModel):
         farmers['risk_aversion'] = np.random.normal(loc=risk_aversion_mean, scale=risk_aversion_standard_deviation, size=len(farmers))
 
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
+
+    def setup_population(self):
+        populaton_map = self.data_catalog.get_rasterdataset('ghs_pop_2020_54009_v2023a', bbox=self.bounds)
+        populaton_map_values = np.round(populaton_map.values).astype(np.int32)
+        populaton_map_values[populaton_map_values < 0] = 0  # -200 is nodata value
+
+        locations, sizes = generate_locations(
+            population=populaton_map_values,
+            geotransform=populaton_map.raster.transform.to_gdal(),
+            mean_household_size=5
+        )
+
+        transformer = pyproj.Transformer.from_crs(populaton_map.raster.crs, self.epsg, always_xy=True)
+        locations[:, 0], locations[:, 1] = transformer.transform(locations[:, 0], locations[:, 1])
+
+        # sample_locatons = locations[::10]
+        # import matplotlib.pyplot as plt
+        # from scipy.stats import gaussian_kde
+
+        # xy = np.vstack([sample_locatons[:, 0], sample_locatons[:, 1]])
+        # z = gaussian_kde(xy)(xy)
+        # plt.scatter(sample_locatons[:, 0], sample_locatons[:, 1], c=z, s=100)
+        # plt.savefig('population.png')
+
+        self.set_binary(sizes, name='agents/households/sizes')
+        self.set_binary(locations, name='agents/households/locations')
+
+        return None
 
     def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
         out_ds = ds.interp(
