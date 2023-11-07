@@ -34,48 +34,6 @@ else:
     os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'esmf.mk')
 
 import xesmf as xe
-
-# use pyogrio for substantial speedup reading and writing vector data
-gpd.options.io_engine = "pyogrio"
-
-def _read_file_pyogrio(path_or_bytes, bbox=None, mask=None, rows=None, **kwargs):
-    print('remove this hack when geopandas is updated')
-    import pyogrio
-    from geopandas import GeoDataFrame, GeoSeries
-    from shapely.geometry.base import BaseGeometry
-
-    if rows is not None:
-        if isinstance(rows, int):
-            kwargs["max_features"] = rows
-        elif isinstance(rows, slice):
-            if rows.start is not None:
-                kwargs["skip_features"] = rows.start
-            if rows.stop is not None:
-                kwargs["max_features"] = rows.stop - (rows.start or 0)
-            if rows.step is not None:
-                raise ValueError("slice with step is not supported")
-        else:
-            raise TypeError("'rows' must be an integer or a slice.")
-    if bbox is not None:
-        if isinstance(bbox, (GeoDataFrame, GeoSeries)):
-            bbox = tuple(bbox.total_bounds)
-        elif isinstance(bbox, BaseGeometry):
-            bbox = bbox.bounds
-        if len(bbox) != 4:
-            raise ValueError("'bbox' should be a length-4 tuple.")
-    if mask is not None:
-        mask = mask.iloc[0, 0]
-        # raise ValueError(
-        #     "The 'mask' keyword is not supported with the 'pyogrio' engine. "
-        #     "You can use 'bbox' instead."
-        # )
-    if kwargs.pop("ignore_geometry", False):
-        kwargs["read_geometry"] = False
-
-    # TODO: if bbox is not None, check its CRS vs the CRS of the file
-    return pyogrio.read_dataframe(path_or_bytes, bbox=bbox, mask=mask, **kwargs)
-gpd.io.file._read_file_pyogrio = _read_file_pyogrio
-
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
@@ -809,6 +767,10 @@ class GEBModel(GridModel):
             waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
             # set relative area in region for command area. If no command area, set this is set to nan.
             waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
+        else:
+            command_areas = hydromt.raster.full(self.grid.raster.coords, nodata=-1, dtype=np.int32, name='areamaps/sub_grid_mask', crs=self.grid.raster.crs, lazy=True)
+            self.set_grid(command_areas, name='routing/lakesreservoirs/command_areas')
+            waterbodies['relative_area_in_region'] = 1
 
         if custom_reservoir_capacity:
             custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
@@ -1874,7 +1836,8 @@ class GEBModel(GridModel):
         with names of the form 'agents/farmers/{column}'.
         """
         regions = self.geoms['areamaps/regions']
-        regions_raster = self.region_subgrid['areamaps/region_subgrid']
+        regions_raster = self.region_subgrid['areamaps/region_subgrid'].compute()
+        full_region_cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land'].compute()
         
         farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
         farms[:] = -1
@@ -1885,7 +1848,7 @@ class GEBModel(GridModel):
             region = regions_raster == region_id
             region_clip, bounds = clip_with_grid(region, region)
 
-            cultivated_land_region = self.region_subgrid['landsurface/full_region_cultivated_land'].isel(bounds)
+            cultivated_land_region = full_region_cultivated_land.isel(bounds)
             cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
             # TODO: Why does nodata value disappear?     
             # self.dict['areamaps/region_id_mapping'][farmers['region_id']]  
@@ -1894,6 +1857,7 @@ class GEBModel(GridModel):
             farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
             assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
             farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
+            farms = farms.compute()  # perhaps this helps with memory issues?
         
         farmers = farmers.drop('area_n_cells', axis=1)
 
@@ -2466,7 +2430,7 @@ class GEBModel(GridModel):
             (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
             
         datasets = [
-            xr.open_dataset(download_path / file, chunks={'time': 365})
+            xr.open_dataset(download_path / file, chunks={'time': 365}, lock=False)
             for file in parse_files
         ]
 
@@ -2784,7 +2748,7 @@ class GEBModel(GridModel):
     def read_forcing(self) -> None:
         self.read_model_structure()
         for name, fn in self.model_structure['forcing'].items():
-            with xr.open_dataset(Path(self.root) / fn, chunks={'time': 365})[name.split('/')[-1]] as da:
+            with xr.open_dataset(Path(self.root) / fn, chunks={'time': 365}, lock=False)[name.split('/')[-1]] as da:
                 self.set_forcing(da, name=name, update=False)
 
     def read(self):
