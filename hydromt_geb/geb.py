@@ -714,28 +714,42 @@ class GEBModel(GridModel):
         The resulting waterbody data is set as a table in the model with the name 'routing/lakesreservoirs/basin_lakes_data'.
         """
         self.logger.info('Setting up waterbodies')
-        waterbodies = self.data_catalog.get_geodataframe(
-            "hydro_lakes",
-            geom=self.geoms['areamaps/region'],
-            predicate="intersects",
-            variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
-        ).set_index('waterbody_id')
+        try:
+            waterbodies = self.data_catalog.get_geodataframe(
+                "hydro_lakes",
+                geom=self.geoms['areamaps/region'],
+                predicate="intersects",
+                variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
+            )
+        except IndexError:
+            self.logger.info('No water bodies found in domain, skipping water bodies setup')
+            waterbodies = gpd.GeoDataFrame(columns=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area', 'geometry'], crs=self.crs)
+            lakesResID = xr.zeros_like(self.grid['areamaps/grid_mask'])
+            sublakesResID = xr.zeros_like(self.subgrid['areamaps/sub_grid_mask'])
+        
+        else:
+            lakesResID = self.grid.raster.rasterize(
+                waterbodies,
+                col_name='waterbody_id',
+                nodata=0,
+                all_touched=True,
+                dtype=np.int32
+            )
+            sublakesResID = self.subgrid.raster.rasterize(
+                waterbodies,
+                col_name='waterbody_id',
+                nodata=0,
+                all_touched=True,
+                dtype=np.int32
+            )
+
+        self.set_grid(lakesResID, name='routing/lakesreservoirs/lakesResID')
+        self.set_subgrid(sublakesResID, name='routing/lakesreservoirs/sublakesResID')
+        
+        
+        waterbodies = waterbodies.set_index('waterbody_id')
         waterbodies['volume_flood'] = waterbodies['volume_total']
 
-        self.set_grid(self.grid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/lakesResID')
-        self.set_subgrid(self.subgrid.raster.rasterize(
-            waterbodies,
-            col_name='waterbody_id',
-            nodata=0,
-            all_touched=True,
-            dtype=np.int32
-        ), name='routing/lakesreservoirs/sublakesResID')
 
         if command_areas:
             command_areas = self.data_catalog.get_geodataframe(command_areas, geom=self.region, predicate="intersects")
