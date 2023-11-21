@@ -34,6 +34,11 @@ else:
     os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'esmf.mk')
 
 import xesmf as xe
+from affine import Affine
+import geopandas as gpd
+# use pyogrio for substantial speedup reading and writing vector data
+# gpd.options.io_engine = "pyogrio"
+
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
@@ -1675,7 +1680,10 @@ class GEBModel(GridModel):
         self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
         self.set_dict(lending_rates_dict, name='economics/lending_rates')
 
-    def setup_well_prices_by_reference_year(self, well_price: float, upkeep_price_per_m2: float, reference_year: int, start_year: int, end_year: int):
+    def setup_well_prices_by_reference_year(self, irrigation_maintenance: float,
+        pump_cost: float, borewell_cost_1: float, borewell_cost_2: float, electricity_cost: float, 
+        reference_year: int, start_year: int, end_year: int):
+
         """
         Sets up the well prices and upkeep prices for the hydrological model based on a reference year.
 
@@ -1706,43 +1714,42 @@ class GEBModel(GridModel):
         'economics/well_prices' and 'economics/upkeep_prices_well_per_m2', respectively.
         """
         self.logger.info('Setting up well prices by reference year')
-        # create dictory with prices for well_prices per year by applying inflation rates
+    
+        # Retrieve the inflation rates data
         inflation_rates = self.dict['economics/inflation_rates']
         regions = list(inflation_rates['data'].keys())
 
-        well_prices_dict = {
-            'time': list(range(start_year, end_year + 1)),
-            'data': {}
+        # Create a dictionary to store the various types of prices with their initial reference year values
+        price_types = {
+            'irrigation_maintenance': irrigation_maintenance,
+            'pump_cost': pump_cost,
+            'borewell_cost_1': borewell_cost_1,
+            'borewell_cost_2': borewell_cost_2,
+            'electricity_cost': electricity_cost,    
         }
-        for region in regions:
-            well_prices = pd.Series(index=range(start_year, end_year + 1))
-            well_prices.loc[reference_year] = well_price
-            
-            for year in range(reference_year + 1, end_year + 1):
-                well_prices.loc[year] = well_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
-            for year in range(reference_year -1, start_year -1, -1):
-                well_prices.loc[year] = well_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
 
-            well_prices_dict['data'][region] = well_prices.tolist()
+        # Iterate over each price type and calculate the prices across years for each region
+        for price_type, initial_price in price_types.items():
+            prices_dict = {
+                'time': list(range(start_year, end_year + 1)),
+                'data': {}
+            }
 
-        self.set_dict(well_prices_dict, name='economics/well_prices')
-            
-        upkeep_prices_dict = {
-            'time': list(range(start_year, end_year + 1)),
-            'data': {}
-        }
-        for region in regions:
-            upkeep_prices = pd.Series(index=range(start_year, end_year + 1))
-            upkeep_prices.loc[reference_year] = upkeep_price_per_m2
-            
-            for year in range(reference_year + 1, end_year + 1):
-                upkeep_prices.loc[year] = upkeep_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
-            for year in range(reference_year -1, start_year -1, -1):
-                upkeep_prices.loc[year] = upkeep_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+            for region in regions:
+                prices = pd.Series(index=range(start_year, end_year + 1))
+                prices.loc[reference_year] = initial_price
 
-            upkeep_prices_dict['data'][region] = upkeep_prices.tolist()
+                # Forward calculation from the reference year
+                for year in range(reference_year + 1, end_year + 1):
+                    prices.loc[year] = prices[year - 1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+                # Backward calculation from the reference year
+                for year in range(reference_year - 1, start_year - 1, -1):
+                    prices.loc[year] = prices[year + 1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year + 1))]
 
-        self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_well_per_m2')
+                prices_dict['data'][region] = prices.tolist()
+
+            # Set the calculated prices in the appropriate dictionary
+            self.set_dict(prices_dict, name=f'economics/{price_type}')
 
     def setup_drip_irrigation_prices_by_reference_year(self, drip_irrigation_price: float, upkeep_price_per_m2: float, reference_year: int, start_year: int, end_year: int):
         """
