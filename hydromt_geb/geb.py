@@ -1943,10 +1943,13 @@ class GEBModel(GridModel):
     def setup_farmers_simple(
         self,
         irrigation_sources,
+        irrigation_choice,
+        crop_choices,
         region_id_column='UID',
         country_iso3_column='ISO3',
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
+        farm_size_donor_countries=None,
     ):
         """
         Sets up the farmers for GEB.
@@ -2122,6 +2125,9 @@ class GEBModel(GridModel):
         for _, region in regions_shapes.iterrows():
             UID = region[region_id_column]
             country_ISO3 = region[country_iso3_column]
+            if farm_size_donor_countries:
+                country_ISO3 = farm_size_donor_countries.get(country_ISO3, country_ISO3)
+            
             self.logger.debug(f'Processing region {UID} in {country_ISO3}')
 
             cultivated_land_region_total_cells = ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
@@ -2214,12 +2220,18 @@ class GEBModel(GridModel):
             all_agents.append(region_agents)
 
         farmers = pd.concat(all_agents, ignore_index=True)
-        # randomly sample from crops        
-        farmers['season_#1_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
-        farmers['season_#2_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
-        farmers['season_#3_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
-        # randomly sample from irrigation sources
-        farmers['irrigation_source']= random.choices(list(irrigation_sources.keys()), k=len(farmers))
+        # randomly sample from crops
+        for season in (1, 2, 3):
+            if crop_choices[f'season_#{season}'] == 'random':        
+                farmers[f'season_#{season}_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
+            else:
+                farmers[f'season_#{season}_crop'] = np.full(len(farmers), crop_choices[f'season_#{season}'], dtype=np.int32)
+
+        if irrigation_choice == 'random':
+            # randomly sample from irrigation sources
+            farmers['irrigation_source'] = random.choices(list(irrigation_sources.keys()), k=len(farmers))
+        else:
+            farmers['irrigation_source'] = irrigation_choice
 
         farmers['household_size'] = random.choices([1, 2, 3, 4, 5, 6, 7], k=len(farmers))
 
