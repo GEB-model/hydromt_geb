@@ -3,8 +3,10 @@ import xarray
 import numpy as np
 from collections.abc import Mapping
 
+
 def repeat_grid(data, factor):
     return data.repeat(factor, axis=-2).repeat(factor, axis=-1)
+
 
 def calculate_cell_area(affine_transform, shape):
     RADIUS_EARTH_EQUATOR = 40075017  # m
@@ -14,23 +16,27 @@ def calculate_cell_area(affine_transform, shape):
 
     lat_idx = np.arange(0, height).repeat(width).reshape((height, width))
     lat = (lat_idx + 0.5) * affine_transform.e + affine_transform.f
-    width_m = distance_1_degree_latitude * np.cos(np.radians(lat)) * abs(affine_transform.a)
+    width_m = (
+        distance_1_degree_latitude * np.cos(np.radians(lat)) * abs(affine_transform.a)
+    )
     height_m = distance_1_degree_latitude * abs(affine_transform.e)
-    return (width_m * height_m)
+    return width_m * height_m
+
 
 def clip_with_grid(ds, mask):
     assert ds.shape == mask.shape
-    cells_along_y = mask.sum(dim='x').values.ravel()
+    cells_along_y = mask.sum(dim="x").values.ravel()
     miny = (cells_along_y > 0).argmax().item()
     maxy = cells_along_y.size - (cells_along_y[::-1] > 0).argmax().item()
-    
-    cells_along_x = mask.sum(dim='y').values.ravel()
+
+    cells_along_x = mask.sum(dim="y").values.ravel()
     minx = (cells_along_x > 0).argmax().item()
     maxx = cells_along_x.size - (cells_along_x[::-1] > 0).argmax().item()
 
-    bounds = {'y': slice(miny, maxy), 'x': slice(minx, maxx)}
+    bounds = {"y": slice(miny, maxy), "x": slice(minx, maxx)}
 
     return ds.isel(bounds), bounds
+
 
 def pad_xy(
     self,
@@ -109,14 +115,8 @@ def pad_xy(
     superset.rio.write_transform(inplace=True)
     if return_slice:
         return superset, {
-            'x': slice(
-                x_before,
-                superset['x'].size - x_after
-            ),
-            'y': slice(
-                y_before,
-                superset['y'].size - y_after
-            )
+            "x": slice(x_before, superset["x"].size - x_after),
+            "y": slice(y_before, superset["y"].size - y_after),
         }
     else:
         return superset

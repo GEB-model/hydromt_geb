@@ -28,24 +28,38 @@ from dateutil.relativedelta import relativedelta
 from hydromt.models.model_grid import GridModel
 
 # temporary fix for ESMF on Windows
-if os.name == 'nt':
-    os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'Library' / 'lib' / 'esmf.mk')
+if os.name == "nt":
+    os.environ["ESMFMKFILE"] = str(
+        Path(os.__file__).parent.parent / "Library" / "lib" / "esmf.mk"
+    )
 else:
-    os.environ['ESMFMKFILE'] = str(Path(os.__file__).parent.parent / 'esmf.mk')
+    os.environ["ESMFMKFILE"] = str(Path(os.__file__).parent.parent / "esmf.mk")
 
 import xesmf as xe
 from affine import Affine
 import geopandas as gpd
+
 # use pyogrio for substantial speedup reading and writing vector data
 # gpd.options.io_engine = "pyogrio"
 
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
-from .workflows import repeat_grid, clip_with_grid, get_modflow_transform_and_shape, create_indices, create_modflow_basin, pad_xy, create_farms, get_farm_distribution, calculate_cell_area
+from .workflows import (
+    repeat_grid,
+    clip_with_grid,
+    get_modflow_transform_and_shape,
+    create_indices,
+    create_modflow_basin,
+    pad_xy,
+    create_farms,
+    get_farm_distribution,
+    calculate_cell_area,
+)
 from .workflows.population import generate_locations
 
 logger = logging.getLogger(__name__)
+
 
 class PathEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -53,9 +67,10 @@ class PathEncoder(json.JSONEncoder):
             return str(obj)
         return super().default(obj)
 
+
 class GEBModel(GridModel):
     _CLI_ARGS = {"region": "setup_grid"}
-    
+
     def __init__(
         self,
         root: str = None,
@@ -82,34 +97,34 @@ class GEBModel(GridModel):
         self._region_subgrid = None
         self._MERIT_grid = None
         self._MODFLOW_grid = None
-        
+
         self.table = {}
         self.binary = {}
         self.dict = {}
 
         self.model_structure = {
-            'forcing': {},
-            'geoms': {},
-            'grid': {},
-            'dict': {},
-            'table': {},
-            'binary': {},
-            'subgrid': {},
-            'region_subgrid': {},
-            'MERIT_grid': {},
-            'MODFLOW_grid': {},
+            "forcing": {},
+            "geoms": {},
+            "grid": {},
+            "dict": {},
+            "table": {},
+            "binary": {},
+            "subgrid": {},
+            "region_subgrid": {},
+            "MERIT_grid": {},
+            "MODFLOW_grid": {},
         }
         self.is_updated = {
-            'forcing': {},
-            'geoms': {},
-            'grid': {},
-            'dict': {},
-            'table': {},
-            'binary': {},
-            'subgrid': {},
-            'region_subgrid': {},
-            'MERIT_grid': {},
-            'MODFLOW_grid': {},
+            "forcing": {},
+            "geoms": {},
+            "grid": {},
+            "dict": {},
+            "table": {},
+            "binary": {},
+            "subgrid": {},
+            "region_subgrid": {},
+            "MERIT_grid": {},
+            "MODFLOW_grid": {},
         }
 
     @property
@@ -120,7 +135,7 @@ class GEBModel(GridModel):
             if self._read:
                 self.read_subgrid()
         return self._subgrid
-    
+
     @property
     def region_subgrid(self):
         """Model static gridded data as xarray.Dataset."""
@@ -129,7 +144,7 @@ class GEBModel(GridModel):
             if self._read:
                 self.read_region_subgrid()
         return self._region_subgrid
-    
+
     @property
     def MERIT_grid(self):
         """Model static gridded data as xarray.Dataset."""
@@ -138,7 +153,7 @@ class GEBModel(GridModel):
             if self._read:
                 self.read_MERIT_grid()
         return self._MERIT_grid
-    
+
     @property
     def MODFLOW_grid(self):
         """Model static gridded data as xarray.Dataset."""
@@ -147,7 +162,7 @@ class GEBModel(GridModel):
             if self._read:
                 self.read_MODFLOW_grid()
         return self._MODFLOW_grid
-    
+
     def setup_grid(
         self,
         region: dict,
@@ -178,7 +193,9 @@ class GEBModel(GridModel):
             the 'basins' layer of `hydrography_fn`.
         """
 
-        assert sub_grid_factor > 10, "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
+        assert (
+            sub_grid_factor > 10
+        ), "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
         assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
 
         self.logger.info(f"Preparing 2D grid.")
@@ -189,13 +206,12 @@ class GEBModel(GridModel):
             ds_org.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
             ds_org.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
             if "bounds" not in region:
-                region.update(basin_index=self.data_catalog.get_geodataframe(basin_index_fn))
+                region.update(
+                    basin_index=self.data_catalog.get_geodataframe(basin_index_fn)
+                )
             # get basin geometry
             geom, xy = hydromt.workflows.get_basin_geometry(
-                ds=ds_org,
-                kind=kind,
-                logger=self.logger,
-                **region
+                ds=ds_org, kind=kind, logger=self.logger, **region
             )
             region.update(xy=xy)
             ds_hydro = ds_org.raster.clip_geom(geom, mask=True)
@@ -206,39 +222,58 @@ class GEBModel(GridModel):
 
         # Add region and grid to model
         self.set_geoms(geom, name="areamaps/region")
-        
-        ldd = ds_hydro['flwdir'].raster.reclassify(
-            reclass_table=pd.DataFrame(
-                index=[0, 1, 2, 4, 8, 16, 32, 64, 128, ds_hydro['flwdir'].raster.nodata],
-                data={"ldd": [5, 6, 3, 2, 1, 4, 7, 8, 9, 0]}
-            ),
-            method="exact"
-        )['ldd']
-        
-        self.set_grid(ldd, name='routing/kinematic/ldd')
-        self.set_grid(ds_hydro['uparea'], name='routing/kinematic/upstream_area')
-        self.set_grid(ds_hydro['elevtn'], name='landsurface/topo/elevation')
-        self.set_grid(
-            xr.where(ds_hydro['rivlen_ds'] != -9999, ds_hydro['rivlen_ds'], np.nan, keep_attrs=True),
-            name='routing/kinematic/channel_length'
-        )
-        self.set_grid(ds_hydro['rivslp'], name='routing/kinematic/channel_slope')
-        
-        # ds_hydro['mask'].raster.set_nodata(-1)
-        self.set_grid((~ds_hydro['mask']).astype(np.int8), name='areamaps/grid_mask')
 
-        mask = self.grid['areamaps/grid_mask']
+        ldd = ds_hydro["flwdir"].raster.reclassify(
+            reclass_table=pd.DataFrame(
+                index=[
+                    0,
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    64,
+                    128,
+                    ds_hydro["flwdir"].raster.nodata,
+                ],
+                data={"ldd": [5, 6, 3, 2, 1, 4, 7, 8, 9, 0]},
+            ),
+            method="exact",
+        )["ldd"]
+
+        self.set_grid(ldd, name="routing/kinematic/ldd")
+        self.set_grid(ds_hydro["uparea"], name="routing/kinematic/upstream_area")
+        self.set_grid(ds_hydro["elevtn"], name="landsurface/topo/elevation")
+        self.set_grid(
+            xr.where(
+                ds_hydro["rivlen_ds"] != -9999,
+                ds_hydro["rivlen_ds"],
+                np.nan,
+                keep_attrs=True,
+            ),
+            name="routing/kinematic/channel_length",
+        )
+        self.set_grid(ds_hydro["rivslp"], name="routing/kinematic/channel_slope")
+
+        # ds_hydro['mask'].raster.set_nodata(-1)
+        self.set_grid((~ds_hydro["mask"]).astype(np.int8), name="areamaps/grid_mask")
+
+        mask = self.grid["areamaps/grid_mask"]
 
         dst_transform = mask.raster.transform * Affine.scale(1 / sub_grid_factor)
 
         submask = hydromt.raster.full_from_transform(
             dst_transform,
-            (mask.raster.shape[0] * sub_grid_factor, mask.raster.shape[1] * sub_grid_factor), 
+            (
+                mask.raster.shape[0] * sub_grid_factor,
+                mask.raster.shape[1] * sub_grid_factor,
+            ),
             nodata=0,
             dtype=mask.dtype,
             crs=mask.raster.crs,
-            name='areamaps/sub_grid_mask',
-            lazy=True
+            name="areamaps/sub_grid_mask",
+            lazy=True,
         )
         submask.raster.set_nodata(None)
         submask.data = repeat_grid(mask.data, sub_grid_factor)
@@ -267,10 +302,16 @@ class GEBModel(GridModel):
         The resulting subgrid cell area map is then set as the `areamaps/sub_cell_area` attribute of the subgrid.
         """
         self.logger.info(f"Preparing cell area map.")
-        mask = self.grid['areamaps/grid_mask'].raster
+        mask = self.grid["areamaps/grid_mask"].raster
         affine = mask.transform
 
-        cell_area = hydromt.raster.full(mask.coords, nodata=np.nan, dtype=np.float32, name='areamaps/cell_area', lazy=True)
+        cell_area = hydromt.raster.full(
+            mask.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="areamaps/cell_area",
+            lazy=True,
+        )
         cell_area.data = calculate_cell_area(affine, mask.shape)
         self.set_grid(cell_area, name=cell_area.name)
 
@@ -278,21 +319,23 @@ class GEBModel(GridModel):
             self.subgrid.raster.coords,
             nodata=cell_area.raster.nodata,
             dtype=cell_area.dtype,
-            name='areamaps/sub_cell_area',
-            lazy=True
+            name="areamaps/sub_cell_area",
+            lazy=True,
         )
 
-        sub_cell_area.data = repeat_grid(cell_area.data, self.subgrid_factor) / self.subgrid_factor ** 2
+        sub_cell_area.data = (
+            repeat_grid(cell_area.data, self.subgrid_factor) / self.subgrid_factor**2
+        )
         self.set_subgrid(sub_cell_area, sub_cell_area.name)
 
     def setup_crops(
-            self,
-            crop_ids: dict,
-            crop_variables: dict,
-            crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
-            cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
-            project_future_until_year: Optional[int] = False
-        ):
+        self,
+        crop_ids: dict,
+        crop_variables: dict,
+        crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
+        cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
+        project_future_until_year: Optional[int] = False,
+    ):
         """
         Sets up the crops data for the model.
 
@@ -312,8 +355,8 @@ class GEBModel(GridModel):
             crop IDs and their cultivation costs.
         """
         self.logger.info(f"Preparing crops data")
-        self.set_dict(crop_ids, name='crops/crop_ids')
-        self.set_dict(crop_variables, name='crops/crop_variables')
+        self.set_dict(crop_ids, name="crops/crop_ids")
+        self.set_dict(crop_variables, name="crops/crop_variables")
 
         def project_to_future(df, project_future_until_year, inflation_rates):
             # expand table until year
@@ -322,78 +365,102 @@ class GEBModel(GridModel):
                 df.index[-1],
                 date(project_future_until_year, 12, 31),
                 freq=pd.infer_freq(df.index),
-                inclusive='right'
+                inclusive="right",
             )
             df = df.reindex(df.index.union(future_index))
             for future_date in future_index:
                 source_date = future_date - pd.DateOffset(years=1)  # source is year ago
-                inflation_index = inflation_rates['time'].index(str(future_date.year))
+                inflation_index = inflation_rates["time"].index(str(future_date.year))
                 for region_id, _ in df.columns:
-                    region_inflation_rate = inflation_rates['data'][region_id][inflation_index]
-                    df.loc[future_date, region_id] = (df.loc[source_date, region_id] * region_inflation_rate).values
+                    region_inflation_rate = inflation_rates["data"][region_id][
+                        inflation_index
+                    ]
+                    df.loc[future_date, region_id] = (
+                        df.loc[source_date, region_id] * region_inflation_rate
+                    ).values
             return df
-        
+
         if crop_prices is not None:
             self.logger.info(f"Preparing crop prices")
             if isinstance(crop_prices, str):
                 fp = Path(self.root, crop_prices)
                 if not fp.exists():
                     raise ValueError(f"crop_prices file {fp.resolve()} does not exist")
-                with open(fp, 'r') as f:
+                with open(fp, "r") as f:
                     crop_prices_data = json.load(f)
                 crop_prices = pd.DataFrame(
                     {
-                        crop_id: crop_prices_data['crops'][crop_name]
+                        crop_id: crop_prices_data["crops"][crop_name]
                         for crop_id, crop_name in crop_ids.items()
                     },
-                    index=pd.to_datetime(crop_prices_data['time'])
+                    index=pd.to_datetime(crop_prices_data["time"]),
                 )
                 crop_prices = crop_prices.reindex(
-                    columns=pd.MultiIndex.from_product([self.geoms['areamaps/regions']['region_id'], crop_prices.columns]
-                ), level=1)
+                    columns=pd.MultiIndex.from_product(
+                        [
+                            self.geoms["areamaps/regions"]["region_id"],
+                            crop_prices.columns,
+                        ]
+                    ),
+                    level=1,
+                )
                 if project_future_until_year:
                     crop_prices = project_to_future(
                         crop_prices,
                         project_future_until_year,
-                        self.dict['economics/inflation_rates']
+                        self.dict["economics/inflation_rates"],
                     )
 
             crop_prices = {
-                'time': crop_prices.index.tolist(),
-                'data': {str(region_id): crop_prices[region_id].to_dict(orient='list') for region_id in self.geoms['areamaps/regions']['region_id']}
+                "time": crop_prices.index.tolist(),
+                "data": {
+                    str(region_id): crop_prices[region_id].to_dict(orient="list")
+                    for region_id in self.geoms["areamaps/regions"]["region_id"]
+                },
             }
 
-            self.set_dict(crop_prices, name='crops/crop_prices')
-        
-        
+            self.set_dict(crop_prices, name="crops/crop_prices")
+
         if cultivation_costs is not None:
             self.logger.info(f"Preparing cultivation costs")
             if isinstance(cultivation_costs, str):
                 fp = Path(self.root, cultivation_costs)
                 if not fp.exists():
-                    raise ValueError(f"cultivation_costs file {fp.resolve()} does not exist")
+                    raise ValueError(
+                        f"cultivation_costs file {fp.resolve()} does not exist"
+                    )
                 with open(fp) as f:
                     cultivation_costs = json.load(f)
-                cultivation_costs = pd.DataFrame({
-                        crop_id: cultivation_costs['crops'][crop_name]
+                cultivation_costs = pd.DataFrame(
+                    {
+                        crop_id: cultivation_costs["crops"][crop_name]
                         for crop_id, crop_name in crop_ids.items()
                     },
-                    index=pd.to_datetime(cultivation_costs['time'])
+                    index=pd.to_datetime(cultivation_costs["time"]),
                 )
                 cultivation_costs = cultivation_costs.reindex(
-                    columns=pd.MultiIndex.from_product([self.geoms['areamaps/regions']['region_id'], cultivation_costs.columns]
-                ), level=1)
+                    columns=pd.MultiIndex.from_product(
+                        [
+                            self.geoms["areamaps/regions"]["region_id"],
+                            cultivation_costs.columns,
+                        ]
+                    ),
+                    level=1,
+                )
                 if project_future_until_year:
                     cultivation_costs = project_to_future(
                         cultivation_costs,
                         project_future_until_year,
-                        self.dict['economics/inflation_rates']
+                        self.dict["economics/inflation_rates"],
                     )
             cultivation_costs = {
-                'time': cultivation_costs.index.tolist(),
-                'data': {str(region_id): cultivation_costs[region_id].to_dict(orient='list') for region_id in self.geoms['areamaps/regions']['region_id']}
+                "time": cultivation_costs.index.tolist(),
+                "data": {
+                    str(region_id): cultivation_costs[region_id].to_dict(orient="list")
+                    for region_id in self.geoms["areamaps/regions"]["region_id"]
+                },
             }
-            self.set_dict(cultivation_costs, name='crops/cultivation_costs')
+            self.set_dict(cultivation_costs, name="crops/cultivation_costs")
 
     def setup_mannings(self) -> None:
         """
@@ -413,12 +480,20 @@ class GEBModel(GridModel):
         `set_grid()` method.
         """
         self.logger.info("Setting up Manning's coefficient")
-        a = (2 * self.grid['areamaps/cell_area']) / self.grid['routing/kinematic/upstream_area']
+        a = (2 * self.grid["areamaps/cell_area"]) / self.grid[
+            "routing/kinematic/upstream_area"
+        ]
         a = xr.where(a < 1, a, 1, keep_attrs=True)
-        b = self.grid['landsurface/topo/elevation'] / 2000
+        b = self.grid["landsurface/topo/elevation"] / 2000
         b = xr.where(b < 1, b, 1, keep_attrs=True)
-        
-        mannings = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/mannings', lazy=True)
+
+        mannings = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="routing/kinematic/mannings",
+            lazy=True,
+        )
         mannings.data = 0.025 + 0.015 * a + 0.030 * b
         self.set_grid(mannings, mannings.name)
 
@@ -446,12 +521,23 @@ class GEBModel(GridModel):
         minimum width with the minimum width.
         """
         self.logger.info("Setting up channel width")
-        channel_width_data = self.grid['routing/kinematic/upstream_area'] / 500
-        channel_width_data = xr.where(channel_width_data > minimum_width, channel_width_data, minimum_width, keep_attrs=True)
-        
-        channel_width = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_width', lazy=True)
+        channel_width_data = self.grid["routing/kinematic/upstream_area"] / 500
+        channel_width_data = xr.where(
+            channel_width_data > minimum_width,
+            channel_width_data,
+            minimum_width,
+            keep_attrs=True,
+        )
+
+        channel_width = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="routing/kinematic/channel_width",
+            lazy=True,
+        )
         channel_width.data = channel_width_data
-        
+
         self.set_grid(channel_width, channel_width.name)
 
     def setup_channel_depth(self) -> None:
@@ -479,9 +565,17 @@ class GEBModel(GridModel):
         depth calculation to be valid.
         """
         self.logger.info("Setting up channel depth")
-        assert ((self.grid['routing/kinematic/upstream_area'] > 0) | ~self.grid.mask).all()
-        channel_depth_data = 0.27 * self.grid['routing/kinematic/upstream_area'] ** 0.26
-        channel_depth = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_depth', lazy=True)
+        assert (
+            (self.grid["routing/kinematic/upstream_area"] > 0) | ~self.grid.mask
+        ).all()
+        channel_depth_data = 0.27 * self.grid["routing/kinematic/upstream_area"] ** 0.26
+        channel_depth = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="routing/kinematic/channel_depth",
+            lazy=True,
+        )
         channel_depth.data = channel_depth_data
         self.set_grid(channel_depth, channel_depth.name)
 
@@ -512,24 +606,37 @@ class GEBModel(GridModel):
         valid.
         """
         self.logger.info("Setting up channel ratio")
-        assert ((self.grid['routing/kinematic/channel_length'] > 0) | ~self.grid.mask).all()
-        channel_area = self.grid['routing/kinematic/channel_width'] * self.grid['routing/kinematic/channel_length']
-        channel_ratio_data = channel_area / self.grid['areamaps/cell_area']
-        channel_ratio_data = xr.where(channel_ratio_data < 1, channel_ratio_data, 1, keep_attrs=True)
+        assert (
+            (self.grid["routing/kinematic/channel_length"] > 0) | ~self.grid.mask
+        ).all()
+        channel_area = (
+            self.grid["routing/kinematic/channel_width"]
+            * self.grid["routing/kinematic/channel_length"]
+        )
+        channel_ratio_data = channel_area / self.grid["areamaps/cell_area"]
+        channel_ratio_data = xr.where(
+            channel_ratio_data < 1, channel_ratio_data, 1, keep_attrs=True
+        )
         assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
-        channel_ratio = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='routing/kinematic/channel_ratio', lazy=True)
+        channel_ratio = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="routing/kinematic/channel_ratio",
+            lazy=True,
+        )
         channel_ratio.data = channel_ratio_data
         self.set_grid(channel_ratio, channel_ratio.name)
 
     def setup_elevation_STD(self) -> None:
         """
         Sets up the standard deviation of elevation for the model.
-        
+
         Notes
         -----
         This method sets up the standard deviation of elevation for the model by retrieving high-resolution elevation data
-        from the MERIT dataset and calculating the standard deviation of elevation for each cell in the grid. 
-        
+        from the MERIT dataset and calculating the standard deviation of elevation for each cell in the grid.
+
         MERIT data has a half cell offset. Therefore, this function first corrects for this offset.  It then selects the
         high-resolution elevation data from the MERIT dataset using the grid coordinates of the model, and calculates the
         standard deviation of elevation for each cell in the grid using the `np.std()` function.
@@ -538,63 +645,94 @@ class GEBModel(GridModel):
         the grid using the `set_grid()` method.
         """
         self.logger.info("Setting up elevation standard deviation")
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], provider=self.data_provider, bbox=self.grid.raster.bounds, buffer=50).compute()  # Why is compute needed here?
+        MERIT = self.data_catalog.get_rasterdataset(
+            "merit_hydro",
+            variables=["elv"],
+            provider=self.data_provider,
+            bbox=self.grid.raster.bounds,
+            buffer=50,
+        ).compute()  # Why is compute needed here?
         # In some MERIT datasets, there is a half degree offset in MERIT data. We can detect this by checking the offset relative to the resolution.
         # This offset should be 0.5. If the offset instead is close to 0 or 1, then we need to correct for this offset.
-        center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
+        center_offset = (
+            MERIT.coords["x"][0] % MERIT.rio.resolution()[0]
+        ) / MERIT.rio.resolution()[0]
         # check whether offset is close to 0.5
         if not np.isclose(center_offset, 0.5, atol=MERIT.rio.resolution()[0] / 100):
-            assert np.isclose(center_offset, 0, atol=MERIT.rio.resolution()[0] / 100) or np.isclose(center_offset, 1, atol=MERIT.rio.resolution()[0] / 100), "Could not detect offset in MERIT data"
+            assert np.isclose(
+                center_offset, 0, atol=MERIT.rio.resolution()[0] / 100
+            ) or np.isclose(
+                center_offset, 1, atol=MERIT.rio.resolution()[0] / 100
+            ), "Could not detect offset in MERIT data"
             MERIT = MERIT.assign_coords(
-                x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
-                y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+                x=MERIT.coords["x"] + MERIT.rio.resolution()[0] / 2,
+                y=MERIT.coords["y"] - MERIT.rio.resolution()[1] / 2,
             )
-            center_offset = (MERIT.coords['x'][0] % MERIT.rio.resolution()[0]) / MERIT.rio.resolution()[0]
+            center_offset = (
+                MERIT.coords["x"][0] % MERIT.rio.resolution()[0]
+            ) / MERIT.rio.resolution()[0]
 
         # we are going to match the upper left corners. So create a MERIT grid with the upper left corners as coordinates
         MERIT_ul = MERIT.assign_coords(
-            x=MERIT.coords['x'] - MERIT.rio.resolution()[0] / 2,
-            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+            x=MERIT.coords["x"] - MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords["y"] - MERIT.rio.resolution()[1] / 2,
         )
 
         scaling = 10
 
         # find the upper left corner of the grid cells in self.grid
-        y_step = self.grid.get_index('y')[1] - self.grid.get_index('y')[0]
-        x_step = self.grid.get_index('x')[1] - self.grid.get_index('x')[0]
-        upper_left_y = self.grid.get_index('y')[0] - y_step / 2
-        upper_left_x = self.grid.get_index('x')[0] - x_step / 2
-        
-        ymin = np.isclose(MERIT_ul.get_index('y'), upper_left_y, atol=MERIT.rio.resolution()[1] / 100)
-        assert ymin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        y_step = self.grid.get_index("y")[1] - self.grid.get_index("y")[0]
+        x_step = self.grid.get_index("x")[1] - self.grid.get_index("x")[0]
+        upper_left_y = self.grid.get_index("y")[0] - y_step / 2
+        upper_left_x = self.grid.get_index("x")[0] - x_step / 2
+
+        ymin = np.isclose(
+            MERIT_ul.get_index("y"), upper_left_y, atol=MERIT.rio.resolution()[1] / 100
+        )
+        assert (
+            ymin.sum() == 1
+        ), "Could not find the upper left corner of the grid cell in MERIT data"
         ymin = ymin.argmax()
         ymax = ymin + self.grid.y.size * scaling
-        xmin = np.isclose(MERIT_ul.get_index('x'), upper_left_x, atol=MERIT.rio.resolution()[0] / 100)
-        assert xmin.sum() == 1, "Could not find the upper left corner of the grid cell in MERIT data"
+        xmin = np.isclose(
+            MERIT_ul.get_index("x"), upper_left_x, atol=MERIT.rio.resolution()[0] / 100
+        )
+        assert (
+            xmin.sum() == 1
+        ), "Could not find the upper left corner of the grid cell in MERIT data"
         xmin = xmin.argmax()
         xmax = xmin + self.grid.x.size * scaling
 
         # select data from MERIT using the grid coordinates
-        high_res_elevation_data = MERIT.isel(
-            y=slice(ymin, ymax),
-            x=slice(xmin, xmax)
+        high_res_elevation_data = MERIT.isel(y=slice(ymin, ymax), x=slice(xmin, xmax))
+        self.set_MERIT_grid(
+            MERIT.isel(y=slice(ymin - 1, ymax + 1), x=slice(xmin - 1, xmax + 1)),
+            name="landsurface/topo/subgrid_elevation",
         )
-        self.set_MERIT_grid(MERIT.isel(
-            y=slice(ymin-1, ymax+1),
-            x=slice(xmin-1, xmax+1)
-        ), name='landsurface/topo/subgrid_elevation')
 
         elevation_per_cell = (
-            high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
-        ).swapaxes(1, 2).reshape(-1, scaling, scaling))
+            high_res_elevation_data.values.reshape(
+                high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
+            )
+            .swapaxes(1, 2)
+            .reshape(-1, scaling, scaling)
+        )
 
-        elevation_per_cell = high_res_elevation_data.values.reshape(high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling).swapaxes(1, 2)
+        elevation_per_cell = high_res_elevation_data.values.reshape(
+            high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
+        ).swapaxes(1, 2)
 
-        standard_deviation = hydromt.raster.full(self.grid.raster.coords, nodata=np.nan, dtype=np.float32, name='landsurface/topo/elevation_STD', lazy=True)
-        standard_deviation.data = np.std(elevation_per_cell, axis=(2,3))
+        standard_deviation = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="landsurface/topo/elevation_STD",
+            lazy=True,
+        )
+        standard_deviation.data = np.std(elevation_per_cell, axis=(2, 3))
         self.set_grid(standard_deviation, standard_deviation.name)
 
-    def setup_soil_parameters(self, interpolation_method='nearest') -> None:
+    def setup_soil_parameters(self, interpolation_method="nearest") -> None:
         """
         Sets up the soil parameters for the model.
 
@@ -619,23 +757,33 @@ class GEBModel(GridModel):
         form 'soil/storage_depth{soil_layer}'. The percolation impeded and crop group data are set as attributes of the model
         with names 'soil/percolation_impeded' and 'soil/cropgrp', respectively.
         """
-        self.logger.info('Setting up soil parameters')
-        soil_ds = self.data_catalog.get_rasterdataset("cwatm_soil_5min", bbox=self.bounds, buffer=10)
-        for parameter in ('alpha', 'ksat', 'lambda', 'thetar', 'thetas'):
+        self.logger.info("Setting up soil parameters")
+        soil_ds = self.data_catalog.get_rasterdataset(
+            "cwatm_soil_5min", bbox=self.bounds, buffer=10
+        )
+        for parameter in ("alpha", "ksat", "lambda", "thetar", "thetas"):
             for soil_layer in range(1, 4):
-                ds = soil_ds[f'{parameter}{soil_layer}_5min']
-                self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/{parameter}{soil_layer}')
+                ds = soil_ds[f"{parameter}{soil_layer}_5min"]
+                self.set_grid(
+                    self.interpolate(ds, interpolation_method),
+                    name=f"soil/{parameter}{soil_layer}",
+                )
 
         for soil_layer in range(1, 3):
-            ds = soil_ds[f'storageDepth{soil_layer}']
-            self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/storage_depth{soil_layer}')
+            ds = soil_ds[f"storageDepth{soil_layer}"]
+            self.set_grid(
+                self.interpolate(ds, interpolation_method),
+                name=f"soil/storage_depth{soil_layer}",
+            )
 
-        ds = soil_ds['percolationImp']
-        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/percolation_impeded')
-        ds = soil_ds['cropgrp']
-        self.set_grid(self.interpolate(ds, interpolation_method), name=f'soil/cropgrp')
+        ds = soil_ds["percolationImp"]
+        self.set_grid(
+            self.interpolate(ds, interpolation_method), name=f"soil/percolation_impeded"
+        )
+        ds = soil_ds["cropgrp"]
+        self.set_grid(self.interpolate(ds, interpolation_method), name=f"soil/cropgrp")
 
-    def setup_land_use_parameters(self, interpolation_method='nearest') -> None:
+    def setup_land_use_parameters(self, interpolation_method="nearest") -> None:
         """
         Sets up the land use parameters for the model.
 
@@ -647,7 +795,7 @@ class GEBModel(GridModel):
         Notes
         -----
         This method sets up the land use parameters for the model by retrieving land use data from the CWATM dataset and
-        interpolating the data to the model grid. It first retrieves the land use dataset from the `data_catalog`, and 
+        interpolating the data to the model grid. It first retrieves the land use dataset from the `data_catalog`, and
         then retrieves the maximum root depth and root fraction data for each land use type. It then
         interpolates the data to the model grid using the specified interpolation method and sets the resulting grids as
         attributes of the model with names of the form 'landcover/{land_use_type}/{parameter}_{land_use_type}', where
@@ -669,35 +817,41 @@ class GEBModel(GridModel):
         data is set as attributes of the model with names of the form 'landcover/{land_use_type}/interceptCap{land_use_type_netcdf_name}_10days',
         where {land_use_type_netcdf_name} is the name of the land use type in the CWATM dataset.
         """
-        self.logger.info('Setting up land use parameters')
+        self.logger.info("Setting up land use parameters")
         for land_use_type, land_use_type_netcdf_name in (
-            ('forest', 'Forest'),
-            ('grassland', 'Grassland'),
-            ('irrPaddy', 'irrPaddy'),
-            ('irrNonPaddy', 'irrNonPaddy'),
+            ("forest", "Forest"),
+            ("grassland", "Grassland"),
+            ("irrPaddy", "irrPaddy"),
+            ("irrNonPaddy", "irrNonPaddy"),
         ):
-            self.logger.info(f'Setting up land use parameters for {land_use_type}')
-            land_use_ds = self.data_catalog.get_rasterdataset(f"cwatm_{land_use_type}_5min", bbox=self.bounds, buffer=10)
-            
-            for parameter in ('maxRootDepth', 'rootFraction1'):
+            self.logger.info(f"Setting up land use parameters for {land_use_type}")
+            land_use_ds = self.data_catalog.get_rasterdataset(
+                f"cwatm_{land_use_type}_5min", bbox=self.bounds, buffer=10
+            )
+
+            for parameter in ("maxRootDepth", "rootFraction1"):
                 self.set_grid(
                     self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f'landcover/{land_use_type}/{parameter}_{land_use_type}'
-                )
-            
-            parameter = f'cropCoefficient{land_use_type_netcdf_name}_10days'               
-            self.set_forcing(
-                self.interpolate(land_use_ds[parameter], interpolation_method),
-                name=f'landcover/{land_use_type}/{parameter}'
-            )
-            if land_use_type in ('forest', 'grassland'):
-                parameter = f'interceptCap{land_use_type_netcdf_name}_10days'               
-                self.set_forcing(
-                    self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f'landcover/{land_use_type}/{parameter}'
+                    name=f"landcover/{land_use_type}/{parameter}_{land_use_type}",
                 )
 
-    def setup_waterbodies(self, command_areas= "reservoir_command_areas", custom_reservoir_capacity="custom_reservoir_capacity"):
+            parameter = f"cropCoefficient{land_use_type_netcdf_name}_10days"
+            self.set_forcing(
+                self.interpolate(land_use_ds[parameter], interpolation_method),
+                name=f"landcover/{land_use_type}/{parameter}",
+            )
+            if land_use_type in ("forest", "grassland"):
+                parameter = f"interceptCap{land_use_type_netcdf_name}_10days"
+                self.set_forcing(
+                    self.interpolate(land_use_ds[parameter], interpolation_method),
+                    name=f"landcover/{land_use_type}/{parameter}",
+                )
+
+    def setup_waterbodies(
+        self,
+        command_areas="reservoir_command_areas",
+        custom_reservoir_capacity="custom_reservoir_capacity",
+    ):
         """
         Sets up the waterbodies for GEB.
 
@@ -718,89 +872,143 @@ class GEBModel(GridModel):
 
         The resulting waterbody data is set as a table in the model with the name 'routing/lakesreservoirs/basin_lakes_data'.
         """
-        self.logger.info('Setting up waterbodies')
+        self.logger.info("Setting up waterbodies")
         try:
             waterbodies = self.data_catalog.get_geodataframe(
                 "hydro_lakes",
-                geom=self.geoms['areamaps/region'],
+                geom=self.geoms["areamaps/region"],
                 predicate="intersects",
-                variables=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area']
+                variables=[
+                    "waterbody_id",
+                    "waterbody_type",
+                    "volume_total",
+                    "average_discharge",
+                    "average_area",
+                ],
             )
         except IndexError:
-            self.logger.info('No water bodies found in domain, skipping water bodies setup')
-            waterbodies = gpd.GeoDataFrame(columns=['waterbody_id', 'waterbody_type', 'volume_total', 'average_discharge', 'average_area', 'geometry'], crs=self.crs)
-            lakesResID = xr.zeros_like(self.grid['areamaps/grid_mask'])
-            sublakesResID = xr.zeros_like(self.subgrid['areamaps/sub_grid_mask'])
-        
+            self.logger.info(
+                "No water bodies found in domain, skipping water bodies setup"
+            )
+            waterbodies = gpd.GeoDataFrame(
+                columns=[
+                    "waterbody_id",
+                    "waterbody_type",
+                    "volume_total",
+                    "average_discharge",
+                    "average_area",
+                    "geometry",
+                ],
+                crs=self.crs,
+            )
+            lakesResID = xr.zeros_like(self.grid["areamaps/grid_mask"])
+            sublakesResID = xr.zeros_like(self.subgrid["areamaps/sub_grid_mask"])
+
         else:
             lakesResID = self.grid.raster.rasterize(
                 waterbodies,
-                col_name='waterbody_id',
+                col_name="waterbody_id",
                 nodata=0,
                 all_touched=True,
-                dtype=np.int32
+                dtype=np.int32,
             )
             sublakesResID = self.subgrid.raster.rasterize(
                 waterbodies,
-                col_name='waterbody_id',
+                col_name="waterbody_id",
                 nodata=0,
                 all_touched=True,
-                dtype=np.int32
+                dtype=np.int32,
             )
 
-        self.set_grid(lakesResID, name='routing/lakesreservoirs/lakesResID')
-        self.set_subgrid(sublakesResID, name='routing/lakesreservoirs/sublakesResID')
-        
-        
-        waterbodies = waterbodies.set_index('waterbody_id')
-        waterbodies['volume_flood'] = waterbodies['volume_total']
+        self.set_grid(lakesResID, name="routing/lakesreservoirs/lakesResID")
+        self.set_subgrid(sublakesResID, name="routing/lakesreservoirs/sublakesResID")
 
+        waterbodies = waterbodies.set_index("waterbody_id")
+        waterbodies["volume_flood"] = waterbodies["volume_total"]
 
         if command_areas:
-            command_areas = self.data_catalog.get_geodataframe(command_areas, geom=self.region, predicate="intersects")
-            command_areas = command_areas[~command_areas['waterbody_id'].isnull()].reset_index(drop=True)
-            command_areas['waterbody_id'] = command_areas['waterbody_id'].astype(np.int32)
-            command_areas['geometry_in_region_bounds'] = gpd.overlay(command_areas, self.region, how='intersection', keep_geom_type=False)['geometry']
-            command_areas['area'] = command_areas.to_crs(3857).area
-            command_areas['area_in_region_bounds'] = command_areas['geometry_in_region_bounds'].to_crs(3857).area
-            areas_per_waterbody = command_areas.groupby('waterbody_id').agg({'area': 'sum', 'area_in_region_bounds': 'sum'})
-            relative_area_in_region = areas_per_waterbody['area_in_region_bounds'] / areas_per_waterbody['area']
-            relative_area_in_region.name = 'relative_area_in_region'  # set name for merge
+            command_areas = self.data_catalog.get_geodataframe(
+                command_areas, geom=self.region, predicate="intersects"
+            )
+            command_areas = command_areas[
+                ~command_areas["waterbody_id"].isnull()
+            ].reset_index(drop=True)
+            command_areas["waterbody_id"] = command_areas["waterbody_id"].astype(
+                np.int32
+            )
+            command_areas["geometry_in_region_bounds"] = gpd.overlay(
+                command_areas, self.region, how="intersection", keep_geom_type=False
+            )["geometry"]
+            command_areas["area"] = command_areas.to_crs(3857).area
+            command_areas["area_in_region_bounds"] = (
+                command_areas["geometry_in_region_bounds"].to_crs(3857).area
+            )
+            areas_per_waterbody = command_areas.groupby("waterbody_id").agg(
+                {"area": "sum", "area_in_region_bounds": "sum"}
+            )
+            relative_area_in_region = (
+                areas_per_waterbody["area_in_region_bounds"]
+                / areas_per_waterbody["area"]
+            )
+            relative_area_in_region.name = (
+                "relative_area_in_region"  # set name for merge
+            )
 
-            self.set_grid(self.grid.raster.rasterize(
-                command_areas,
-                col_name='waterbody_id',
-                nodata=-1,
-                all_touched=True,
-                dtype=np.int32
-            ), name='routing/lakesreservoirs/command_areas')
-            self.set_subgrid(self.subgrid.raster.rasterize(
-                command_areas,
-                col_name='waterbody_id',
-                nodata=-1,
-                all_touched=True,
-                dtype=np.int32
-            ), name='routing/lakesreservoirs/subcommand_areas')
+            self.set_grid(
+                self.grid.raster.rasterize(
+                    command_areas,
+                    col_name="waterbody_id",
+                    nodata=-1,
+                    all_touched=True,
+                    dtype=np.int32,
+                ),
+                name="routing/lakesreservoirs/command_areas",
+            )
+            self.set_subgrid(
+                self.subgrid.raster.rasterize(
+                    command_areas,
+                    col_name="waterbody_id",
+                    nodata=-1,
+                    all_touched=True,
+                    dtype=np.int32,
+                ),
+                name="routing/lakesreservoirs/subcommand_areas",
+            )
 
             # set all lakes with command area to reservoir
-            waterbodies.loc[waterbodies.index.isin(command_areas['waterbody_id']), 'waterbody_type'] = 2
+            waterbodies.loc[
+                waterbodies.index.isin(command_areas["waterbody_id"]), "waterbody_type"
+            ] = 2
             # set relative area in region for command area. If no command area, set this is set to nan.
-            waterbodies = waterbodies.merge(relative_area_in_region, how='left', left_index=True, right_index=True)
+            waterbodies = waterbodies.merge(
+                relative_area_in_region, how="left", left_index=True, right_index=True
+            )
         else:
-            command_areas = hydromt.raster.full(self.grid.raster.coords, nodata=-1, dtype=np.int32, name='areamaps/sub_grid_mask', crs=self.grid.raster.crs, lazy=True)
-            self.set_grid(command_areas, name='routing/lakesreservoirs/command_areas')
-            waterbodies['relative_area_in_region'] = 1
+            command_areas = hydromt.raster.full(
+                self.grid.raster.coords,
+                nodata=-1,
+                dtype=np.int32,
+                name="areamaps/sub_grid_mask",
+                crs=self.grid.raster.crs,
+                lazy=True,
+            )
+            self.set_grid(command_areas, name="routing/lakesreservoirs/command_areas")
+            waterbodies["relative_area_in_region"] = 1
 
         if custom_reservoir_capacity:
-            custom_reservoir_capacity = self.data_catalog.get_dataframe("custom_reservoir_capacity").set_index('waterbody_id')
-            custom_reservoir_capacity = custom_reservoir_capacity[custom_reservoir_capacity.index != -1]
+            custom_reservoir_capacity = self.data_catalog.get_dataframe(
+                "custom_reservoir_capacity"
+            ).set_index("waterbody_id")
+            custom_reservoir_capacity = custom_reservoir_capacity[
+                custom_reservoir_capacity.index != -1
+            ]
 
             waterbodies.update(custom_reservoir_capacity)
-        
-        # spatial dimension is not required anymore, so drop it.
-        waterbodies = waterbodies.drop('geometry', axis=1)
 
-        self.set_table(waterbodies, name='routing/lakesreservoirs/basin_lakes_data')
+        # spatial dimension is not required anymore, so drop it.
+        waterbodies = waterbodies.drop("geometry", axis=1)
+
+        self.set_table(waterbodies, name="routing/lakesreservoirs/basin_lakes_data")
 
     def setup_water_demand(self, starttime, endtime, ssp):
         """
@@ -820,27 +1028,73 @@ class GEBModel(GridModel):
 
         The resulting water demand data is set as forcing data in the model with names of the form 'water_demand/{demand_type}'.
         """
-        self.logger.info('Setting up water demand')
+        self.logger.info("Setting up water demand")
 
         def set(file, accessor, name, ssp, starttime, endtime):
-            ds_historic = self.data_catalog.get_rasterdataset(f'cwatm_{file}_historical', bbox=self.bounds, buffer=2)
+            ds_historic = self.data_catalog.get_rasterdataset(
+                f"cwatm_{file}_historical", bbox=self.bounds, buffer=2
+            )
             if accessor:
                 ds_historic = getattr(ds_historic, accessor)
-            ds_future = self.data_catalog.get_rasterdataset(f'cwatm_{file}_{ssp}', bbox=self.bounds, buffer=2)
+            ds_future = self.data_catalog.get_rasterdataset(
+                f"cwatm_{file}_{ssp}", bbox=self.bounds, buffer=2
+            )
             if accessor:
                 ds_future = getattr(ds_future, accessor)
-            ds = xr.concat([ds_historic, ds_future], dim='time')
-            ds['time'] = pd.date_range(start=datetime(1901, 1, 1) + relativedelta(months=int(ds.time[0].data.item())), periods=len(ds.time), freq='AS')
-            assert (ds.time.dt.year.diff('time') == 1).all(), 'not all years are there'
+            ds = xr.concat([ds_historic, ds_future], dim="time")
+            ds["time"] = pd.date_range(
+                start=datetime(1901, 1, 1)
+                + relativedelta(months=int(ds.time[0].data.item())),
+                periods=len(ds.time),
+                freq="AS",
+            )
+            assert (ds.time.dt.year.diff("time") == 1).all(), "not all years are there"
             ds = ds.sel(time=slice(starttime, endtime))
             ds.name = name
-            self.set_forcing(ds.rename({'lat': 'y', 'lon': 'x'}), name=f'water_demand/{name}')
+            self.set_forcing(
+                ds.rename({"lat": "y", "lon": "x"}), name=f"water_demand/{name}"
+            )
 
-        set('domestic_water_demand', 'domWW', 'domestic_water_demand', ssp, starttime, endtime)
-        set('domestic_water_demand', 'domCon', 'domestic_water_consumption', ssp, starttime, endtime)
-        set('industry_water_demand', 'indWW', 'industry_water_demand', ssp, starttime, endtime)
-        set('industry_water_demand', 'indCon', 'industry_water_consumption', ssp, starttime, endtime)
-        set('livestock_water_demand', None, 'livestock_water_consumption', ssp, starttime, endtime)
+        set(
+            "domestic_water_demand",
+            "domWW",
+            "domestic_water_demand",
+            ssp,
+            starttime,
+            endtime,
+        )
+        set(
+            "domestic_water_demand",
+            "domCon",
+            "domestic_water_consumption",
+            ssp,
+            starttime,
+            endtime,
+        )
+        set(
+            "industry_water_demand",
+            "indWW",
+            "industry_water_demand",
+            ssp,
+            starttime,
+            endtime,
+        )
+        set(
+            "industry_water_demand",
+            "indCon",
+            "industry_water_consumption",
+            ssp,
+            starttime,
+            endtime,
+        )
+        set(
+            "livestock_water_demand",
+            None,
+            "livestock_water_consumption",
+            ssp,
+            starttime,
+            endtime,
+        )
 
     def setup_modflow(self, epsg: int, resolution: float):
         """
@@ -875,19 +1129,16 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up MODFLOW")
         modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid.mask,
-            4326,
-            epsg,
-            resolution
+            self.grid.mask, 4326, epsg, resolution
         )
         modflow_mask = hydromt.raster.full_from_transform(
             modflow_affine,
             MODFLOW_shape,
             nodata=0,
             dtype=np.int8,
-            name=f'groundwater/modflow/modflow_mask',
+            name=f"groundwater/modflow/modflow_mask",
             crs=epsg,
-            lazy=True
+            lazy=True,
         )
 
         intersection = create_indices(
@@ -896,40 +1147,54 @@ class GEBModel(GridModel):
             4326,
             modflow_affine,
             MODFLOW_shape,
-            epsg
+            epsg,
         )
 
-        self.set_binary(intersection['y_modflow'], name=f'groundwater/modflow/y_modflow')
-        self.set_binary(intersection['x_modflow'], name=f'groundwater/modflow/x_modflow')
-        self.set_binary(intersection['y_hydro'], name=f'groundwater/modflow/y_hydro')
-        self.set_binary(intersection['x_hydro'], name=f'groundwater/modflow/x_hydro')
-        self.set_binary(intersection['area'], name=f'groundwater/modflow/area')
+        self.set_binary(
+            intersection["y_modflow"], name=f"groundwater/modflow/y_modflow"
+        )
+        self.set_binary(
+            intersection["x_modflow"], name=f"groundwater/modflow/x_modflow"
+        )
+        self.set_binary(intersection["y_hydro"], name=f"groundwater/modflow/y_hydro")
+        self.set_binary(intersection["x_hydro"], name=f"groundwater/modflow/x_hydro")
+        self.set_binary(intersection["area"], name=f"groundwater/modflow/area")
 
-        modflow_mask.data = create_modflow_basin(self.grid.mask, intersection, MODFLOW_shape)
-        self.set_MODFLOW_grid(modflow_mask, name=f'groundwater/modflow/modflow_mask')
+        modflow_mask.data = create_modflow_basin(
+            self.grid.mask, intersection, MODFLOW_shape
+        )
+        self.set_MODFLOW_grid(modflow_mask, name=f"groundwater/modflow/modflow_mask")
 
-        MERIT = self.data_catalog.get_rasterdataset("merit_hydro", variables=['elv'], bbox=self.bounds, buffer=50, provider=self.data_provider)
-        MERIT_x_step = MERIT.coords['x'][1] - MERIT.coords['x'][0]
-        MERIT_y_step = MERIT.coords['y'][0] - MERIT.coords['y'][1]
+        MERIT = self.data_catalog.get_rasterdataset(
+            "merit_hydro",
+            variables=["elv"],
+            bbox=self.bounds,
+            buffer=50,
+            provider=self.data_provider,
+        )
+        MERIT_x_step = MERIT.coords["x"][1] - MERIT.coords["x"][0]
+        MERIT_y_step = MERIT.coords["y"][0] - MERIT.coords["y"][1]
         MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT_x_step / 2,
-            y=MERIT.coords['y'] + MERIT_y_step / 2
+            x=MERIT.coords["x"] + MERIT_x_step / 2,
+            y=MERIT.coords["y"] + MERIT_y_step / 2,
         )
-        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method='average')
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method="average")
 
-        self.set_MODFLOW_grid(elevation_modflow, name=f'groundwater/modflow/modflow_elevation')
+        self.set_MODFLOW_grid(
+            elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
+        )
 
     def setup_forcing(
-            self,
-            starttime: date,
-            endtime: date,
-            data_source: str='isimip',
-            resolution_arcsec: int=30,
-            forcing: str='chelsa-w5e5v1.0',
-            ssp=None,
-            calculate_SPEI: bool=True,
-            calculate_GEV: bool=True,
-        ):
+        self,
+        starttime: date,
+        endtime: date,
+        data_source: str = "isimip",
+        resolution_arcsec: int = 30,
+        forcing: str = "chelsa-w5e5v1.0",
+        ssp=None,
+        calculate_SPEI: bool = True,
+        calculate_GEV: bool = True,
+    ):
         """
         Sets up the forcing data for GEB.
 
@@ -957,46 +1222,78 @@ class GEBModel(GridModel):
 
         The resulting forcing data is set as forcing data in the model with names of the form 'forcing/{variable_name}'.
         """
-        assert starttime < endtime, 'Start time must be before end time'
+        assert starttime < endtime, "Start time must be before end time"
 
-        if data_source == 'isimip':
+        if data_source == "isimip":
             if resolution_arcsec == 30:
-                assert forcing == 'chelsa-w5e5v1.0', 'Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution'
+                assert (
+                    forcing == "chelsa-w5e5v1.0"
+                ), "Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution"
                 # download source data from ISIMIP
-                self.logger.info('setting up forcing data')
-                high_res_variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin']
-                self.setup_30arcsec_variables_isimip(high_res_variables, starttime, endtime)
-                self.logger.info('setting up relative humidity...')
+                self.logger.info("setting up forcing data")
+                high_res_variables = ["pr", "rsds", "tas", "tasmax", "tasmin"]
+                self.setup_30arcsec_variables_isimip(
+                    high_res_variables, starttime, endtime
+                )
+                self.logger.info("setting up relative humidity...")
                 self.setup_hurs_isimip_30arcsec(starttime, endtime)
-                self.logger.info('setting up longwave radiation...')
-                self.setup_longwave_isimip_30arcsec(starttime=starttime, endtime=endtime)
-                self.logger.info('setting up pressure...')
+                self.logger.info("setting up longwave radiation...")
+                self.setup_longwave_isimip_30arcsec(
+                    starttime=starttime, endtime=endtime
+                )
+                self.logger.info("setting up pressure...")
                 self.setup_pressure_isimip_30arcsec(starttime, endtime)
-                self.logger.info('setting up wind...')
+                self.logger.info("setting up wind...")
                 self.setup_wind_isimip_30arcsec(starttime, endtime)
             elif resolution_arcsec == 1800:
-                variables = ['pr', 'rsds', 'tas', 'tasmax', 'tasmin', 'hurs', 'rlds', 'ps', 'sfcwind']
-                self.setup_1800arcsec_variables_isimip(forcing, variables, starttime, endtime, ssp=ssp)
-        elif data_source == 'cmip':
-            raise NotImplementedError('CMIP forcing data is not yet supported')
+                variables = [
+                    "pr",
+                    "rsds",
+                    "tas",
+                    "tasmax",
+                    "tasmin",
+                    "hurs",
+                    "rlds",
+                    "ps",
+                    "sfcwind",
+                ]
+                self.setup_1800arcsec_variables_isimip(
+                    forcing, variables, starttime, endtime, ssp=ssp
+                )
+        elif data_source == "cmip":
+            raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
-            raise ValueError(f'Unknown data source: {data_source}')
+            raise ValueError(f"Unknown data source: {data_source}")
 
         if calculate_SPEI:
             self.setup_SPEI()
         if calculate_GEV:
             self.setup_GEV()
 
-    def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim='y', xdim='x'):
+    def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
-        assert np.isclose(ds.coords[ydim].values, reference[ydim].values, atol=abs(ds.rio.resolution()[1] * relative_tollerance), rtol=0).all()
-        assert np.isclose(ds.coords[xdim].values, reference[xdim].values, atol=abs(ds.rio.resolution()[0] * relative_tollerance), rtol=0).all()
-        return ds.assign_coords({
-            ydim: reference[ydim],
-            xdim: reference[xdim]
-        })
+        assert np.isclose(
+            ds.coords[ydim].values,
+            reference[ydim].values,
+            atol=abs(ds.rio.resolution()[1] * relative_tollerance),
+            rtol=0,
+        ).all()
+        assert np.isclose(
+            ds.coords[xdim].values,
+            reference[xdim].values,
+            atol=abs(ds.rio.resolution()[0] * relative_tollerance),
+            rtol=0,
+        ).all()
+        return ds.assign_coords({ydim: reference[ydim], xdim: reference[xdim]})
 
-    def setup_1800arcsec_variables_isimip(self, forcing: str, variables: List[str], starttime: date, endtime: date, ssp: str):
+    def setup_1800arcsec_variables_isimip(
+        self,
+        forcing: str,
+        variables: List[str],
+        starttime: date,
+        endtime: date,
+        ssp: str,
+    ):
         """
         Sets up the high-resolution climate variables for GEB.
 
@@ -1022,32 +1319,93 @@ class GEBModel(GridModel):
 
         The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
         """
+
         def download_variable(variable, forcing, ssp, starttime, endtime):
-            self.logger.info(f'Setting up {variable}...')
+            self.logger.info(f"Setting up {variable}...")
             first_year_future_climate = 2015
             var = []
-            if ssp == 'picontrol':
-                ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
-                var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
-            if (endtime.year < first_year_future_climate or starttime.year < first_year_future_climate) and ssp != 'picontrol':  # isimip cutoff date between historic and future climate
-                ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario='historical', variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
-                var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
-            if (starttime.year >= first_year_future_climate or endtime.year >= first_year_future_climate) and ssp != 'picontrol':
-                assert ssp is not None, 'ssp must be specified for future climate'
-                assert ssp != 'historical', 'historical scenarios run until 2014'
-                ds = self.download_isimip(product='InputData', simulation_round='ISIMIP3b', climate_scenario=ssp, variable=variable, starttime=starttime, endtime=endtime, forcing=forcing, resolution=None, buffer=1)
-                var.append(self.interpolate(ds[variable].raster.clip_bbox(ds.raster.bounds), 'linear', xdim='lon', ydim='lat'))
-            
-            var = xr.concat(var, dim='time')
+            if ssp == "picontrol":
+                ds = self.download_isimip(
+                    product="InputData",
+                    simulation_round="ISIMIP3b",
+                    climate_scenario=ssp,
+                    variable=variable,
+                    starttime=starttime,
+                    endtime=endtime,
+                    forcing=forcing,
+                    resolution=None,
+                    buffer=1,
+                )
+                var.append(
+                    self.interpolate(
+                        ds[variable].raster.clip_bbox(ds.raster.bounds),
+                        "linear",
+                        xdim="lon",
+                        ydim="lat",
+                    )
+                )
+            if (
+                endtime.year < first_year_future_climate
+                or starttime.year < first_year_future_climate
+            ) and ssp != "picontrol":  # isimip cutoff date between historic and future climate
+                ds = self.download_isimip(
+                    product="InputData",
+                    simulation_round="ISIMIP3b",
+                    climate_scenario="historical",
+                    variable=variable,
+                    starttime=starttime,
+                    endtime=endtime,
+                    forcing=forcing,
+                    resolution=None,
+                    buffer=1,
+                )
+                var.append(
+                    self.interpolate(
+                        ds[variable].raster.clip_bbox(ds.raster.bounds),
+                        "linear",
+                        xdim="lon",
+                        ydim="lat",
+                    )
+                )
+            if (
+                starttime.year >= first_year_future_climate
+                or endtime.year >= first_year_future_climate
+            ) and ssp != "picontrol":
+                assert ssp is not None, "ssp must be specified for future climate"
+                assert ssp != "historical", "historical scenarios run until 2014"
+                ds = self.download_isimip(
+                    product="InputData",
+                    simulation_round="ISIMIP3b",
+                    climate_scenario=ssp,
+                    variable=variable,
+                    starttime=starttime,
+                    endtime=endtime,
+                    forcing=forcing,
+                    resolution=None,
+                    buffer=1,
+                )
+                var.append(
+                    self.interpolate(
+                        ds[variable].raster.clip_bbox(ds.raster.bounds),
+                        "linear",
+                        xdim="lon",
+                        ydim="lat",
+                    )
+                )
+
+            var = xr.concat(var, dim="time")
             # assert that time is monotonically increasing with a constant step size
-            assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all(), 'time is not monotonically increasing with a constant step size'
-            var = var.rename({'lon': 'x', 'lat': 'y'})
-            self.logger.info(f'Completed {variable}')
-            self.set_forcing(var, name=f'climate/{variable}')
+            assert (
+                ds.time.diff("time").astype(np.int64)
+                == (ds.time[1] - ds.time[0]).astype(np.int64)
+            ).all(), "time is not monotonically increasing with a constant step size"
+            var = var.rename({"lon": "x", "lat": "y"})
+            self.logger.info(f"Completed {variable}")
+            self.set_forcing(var, name=f"climate/{variable}")
 
         for variable in variables:
             download_variable(variable, forcing, ssp, starttime, endtime)
-        
+
         # # Create a thread pool and map the set_forcing function to the variables
         # with concurrent.futures.ThreadPoolExecutor() as executor:
         #     futures = [executor.submit(download_variable, variable, forcing, ssp, starttime, endtime) for variable in variables]
@@ -1055,7 +1413,9 @@ class GEBModel(GridModel):
         # # Wait for all threads to complete
         # concurrent.futures.wait(futures)
 
-    def setup_30arcsec_variables_isimip(self, variables: List[str], starttime: date, endtime: date):
+    def setup_30arcsec_variables_isimip(
+        self, variables: List[str], starttime: date, endtime: date
+    ):
         """
         Sets up the high-resolution climate variables for GEB.
 
@@ -1080,15 +1440,23 @@ class GEBModel(GridModel):
         then clips the data to the bounding box of the model grid using the `clip_bbox` method of the `raster` object.
 
         The resulting climate variables are set as forcing data in the model with names of the form 'climate/{variable_name}'.
-        """ 
+        """
+
         def download_variable(variable, starttime, endtime):
-            self.logger.info(f'Setting up {variable}...')
-            ds = self.download_isimip(product='InputData', variable=variable, starttime=starttime, endtime=endtime, forcing='chelsa-w5e5v1.0', resolution='30arcsec')
-            ds = ds.rename({'lon': 'x', 'lat': 'y'})
+            self.logger.info(f"Setting up {variable}...")
+            ds = self.download_isimip(
+                product="InputData",
+                variable=variable,
+                starttime=starttime,
+                endtime=endtime,
+                forcing="chelsa-w5e5v1.0",
+                resolution="30arcsec",
+            )
+            ds = ds.rename({"lon": "x", "lat": "y"})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             var = self.snap_to_grid(var, self.grid)
-            self.logger.info(f'Completed {variable}')
-            self.set_forcing(var, name=f'climate/{variable}')
+            self.logger.info(f"Completed {variable}")
+            self.set_forcing(var, name=f"climate/{variable}")
 
         for variable in variables:
             download_variable(variable, starttime, endtime)
@@ -1128,71 +1496,115 @@ class GEBModel(GridModel):
 
         The resulting relative humidity data is set as forcing data in the model with names of the form 'climate/hurs'.
         """
-        hurs_30_min = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1)  # some buffer to avoid edge effects / errors in ISIMIP API
+        hurs_30_min = self.download_isimip(
+            product="SecondaryInputData",
+            variable="hurs",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        )  # some buffer to avoid edge effects / errors in ISIMIP API
 
         # just taking the years to simplify things
         start_year = starttime.year
         end_year = endtime.year
 
-        chelsa_folder = Path(self.root).parent / 'preprocessing' / 'climate' / 'chelsa-bioclim+' / 'hurs'
+        chelsa_folder = (
+            Path(self.root).parent
+            / "preprocessing"
+            / "climate"
+            / "chelsa-bioclim+"
+            / "hurs"
+        )
         chelsa_folder.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info("Downloading/reading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution")
+        self.logger.info(
+            "Downloading/reading monthly CHELSA-BIOCLIM+ hurs data at 30 arcsec resolution"
+        )
         hurs_ds_30sec, hurs_time = [], []
-        for year in tqdm(range(start_year, end_year+1)):
+        for year in tqdm(range(start_year, end_year + 1)):
             for month in range(1, 13):
-                fn = chelsa_folder / f'hurs_{year}_{month:02d}.nc'
+                fn = chelsa_folder / f"hurs_{year}_{month:02d}.nc"
                 if not fn.exists():
-                    hurs = self.data_catalog.get_rasterdataset(f'CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}', bbox=hurs_30_min.raster.bounds, buffer=1)
-                    del hurs.attrs['_FillValue']
-                    hurs.name = 'hurs'
+                    hurs = self.data_catalog.get_rasterdataset(
+                        f"CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}",
+                        bbox=hurs_30_min.raster.bounds,
+                        buffer=1,
+                    )
+                    del hurs.attrs["_FillValue"]
+                    hurs.name = "hurs"
                     hurs.to_netcdf(fn)
                 else:
-                    hurs = xr.open_dataset(fn, chunks={'time': 365})['hurs']
+                    hurs = xr.open_dataset(fn, chunks={"time": 365})["hurs"]
                 hurs_ds_30sec.append(hurs)
-                hurs_time.append(f'{year}-{month:02d}')
-        
-        hurs_ds_30sec = xr.concat(hurs_ds_30sec, dim='time').rename({'x': 'lon', 'y': 'lat'})
-        hurs_ds_30sec.rio.set_spatial_dims('lon', 'lat', inplace=True)
-        hurs_ds_30sec['time'] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
+                hurs_time.append(f"{year}-{month:02d}")
 
+        hurs_ds_30sec = xr.concat(hurs_ds_30sec, dim="time").rename(
+            {"x": "lon", "y": "lat"}
+        )
+        hurs_ds_30sec.rio.set_spatial_dims("lon", "lat", inplace=True)
+        hurs_ds_30sec["time"] = pd.date_range(hurs_time[0], hurs_time[-1], freq="MS")
 
-        hurs_output = xr.full_like(self.forcing['climate/tas'], np.nan)
-        hurs_output.name = 'hurs'
-        hurs_output.attrs = {'units': '%', 'long_name': 'Relative humidity'}
-        
-        hurs_output = hurs_output.rename({'x': 'lon', 'y': 'lat'}).rio.set_spatial_dims('lon', 'lat')
+        hurs_output = xr.full_like(self.forcing["climate/tas"], np.nan)
+        hurs_output.name = "hurs"
+        hurs_output.attrs = {"units": "%", "long_name": "Relative humidity"}
 
-        regridder = xe.Regridder(hurs_30_min.isel(time=0).drop_vars('time'), hurs_ds_30sec.isel(time=0).drop_vars('time'), "bilinear")
-        for year in tqdm(range(start_year, end_year+1)):
+        hurs_output = hurs_output.rename({"x": "lon", "y": "lat"}).rio.set_spatial_dims(
+            "lon", "lat"
+        )
+
+        regridder = xe.Regridder(
+            hurs_30_min.isel(time=0).drop_vars("time"),
+            hurs_ds_30sec.isel(time=0).drop_vars("time"),
+            "bilinear",
+        )
+        for year in tqdm(range(start_year, end_year + 1)):
             for month in range(1, 13):
                 start_month = datetime(year, month, 1)
                 end_month = datetime(year, month, monthrange(year, month)[1])
-                
+
                 w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
                 w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
-                w5e5_regridded_mean = w5e5_regridded.mean(dim='time')  # get monthly mean
-                w5e5_regridded_tr = np.log(w5e5_regridded / (1 - w5e5_regridded))  # assume beta distribuation => logit transform
-                w5e5_regridded_mean_tr = np.log(w5e5_regridded_mean / (1 - w5e5_regridded_mean))  # logit transform
+                w5e5_regridded_mean = w5e5_regridded.mean(
+                    dim="time"
+                )  # get monthly mean
+                w5e5_regridded_tr = np.log(
+                    w5e5_regridded / (1 - w5e5_regridded)
+                )  # assume beta distribuation => logit transform
+                w5e5_regridded_mean_tr = np.log(
+                    w5e5_regridded_mean / (1 - w5e5_regridded_mean)
+                )  # logit transform
 
-                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.01  # convert to fraction
-                chelsa_tr = np.log(chelsa / (1 - chelsa))  # assume beta distribuation => logit transform
+                chelsa = (
+                    hurs_ds_30sec.sel(time=start_month) * 0.01
+                )  # convert to fraction
+                chelsa_tr = np.log(
+                    chelsa / (1 - chelsa)
+                )  # assume beta distribuation => logit transform
 
                 difference = chelsa_tr - w5e5_regridded_mean_tr
 
                 # apply difference to w5e5
                 w5e5_regridded_tr_corr = w5e5_regridded_tr + difference
-                w5e5_regridded_corr = (1 / (1 + np.exp(-w5e5_regridded_tr_corr))) * 100  # back transform
+                w5e5_regridded_corr = (
+                    1 / (1 + np.exp(-w5e5_regridded_tr_corr))
+                ) * 100  # back transform
                 w5e5_regridded_corr.raster.set_crs(4326)
-                w5e5_regridded_corr_clipped = w5e5_regridded_corr['hurs'].raster.clip_bbox(hurs_output.raster.bounds)
-                w5e5_regridded_corr_clipped = w5e5_regridded_corr_clipped.rio.set_spatial_dims('lon', 'lat')
+                w5e5_regridded_corr_clipped = w5e5_regridded_corr[
+                    "hurs"
+                ].raster.clip_bbox(hurs_output.raster.bounds)
+                w5e5_regridded_corr_clipped = (
+                    w5e5_regridded_corr_clipped.rio.set_spatial_dims("lon", "lat")
+                )
 
                 hurs_output.loc[
                     dict(time=slice(start_month, end_month))
-                ] = self.snap_to_grid(w5e5_regridded_corr_clipped, hurs_output, xdim='lon', ydim='lat')
+                ] = self.snap_to_grid(
+                    w5e5_regridded_corr_clipped, hurs_output, xdim="lon", ydim="lat"
+                )
 
-        hurs_output = hurs_output.rename({'lon': 'x', 'lat': 'y'})
-        self.set_forcing(hurs_output, f'climate/hurs')
+        hurs_output = hurs_output.rename({"lon": "x", "lat": "y"})
+        self.set_forcing(hurs_output, f"climate/hurs")
 
     def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date):
         """
@@ -1223,31 +1635,58 @@ class GEBModel(GridModel):
         """
         x1 = 0.43
         x2 = 5.7
-        sbc = 5.67E-8   # stefan boltzman constant [Js−1 m−2 K−4]
+        sbc = 5.67e-8  # stefan boltzman constant [Js−1 m−2 K−4]
 
         es0 = 6.11  # reference saturation vapour pressure  [hPa]
         T0 = 273.15
-        lv = 2.5E6  # latent heat of vaporization of water
+        lv = 2.5e6  # latent heat of vaporization of water
         Rv = 461.5  # gas constant for water vapour [J K kg-1]
 
-        target = self.forcing[f'climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
+        target = self.forcing[f"climate/hurs"].rename({"x": "lon", "y": "lat"})
 
-        hurs_coarse = self.download_isimip(product='SecondaryInputData', variable='hurs', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
-        tas_coarse = self.download_isimip(product='SecondaryInputData', variable='tas', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).tas  # some buffer to avoid edge effects / errors in ISIMIP API
-        rlds_coarse = self.download_isimip(product='SecondaryInputData', variable='rlds', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
-        
-        regridder = xe.Regridder(hurs_coarse.isel(time=0).drop_vars('time'), target, 'bilinear')
+        hurs_coarse = self.download_isimip(
+            product="SecondaryInputData",
+            variable="hurs",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).hurs  # some buffer to avoid edge effects / errors in ISIMIP API
+        tas_coarse = self.download_isimip(
+            product="SecondaryInputData",
+            variable="tas",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).tas  # some buffer to avoid edge effects / errors in ISIMIP API
+        rlds_coarse = self.download_isimip(
+            product="SecondaryInputData",
+            variable="rlds",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
 
-        hurs_coarse_regridded = regridder(hurs_coarse).rename({'lon': 'x', 'lat': 'y'})
-        tas_coarse_regridded = regridder(tas_coarse).rename({'lon': 'x', 'lat': 'y'})
-        rlds_coarse_regridded = regridder(rlds_coarse).rename({'lon': 'x', 'lat': 'y'})
+        regridder = xe.Regridder(
+            hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
+        )
 
-        hurs_fine = self.forcing[f'climate/hurs']
-        tas_fine = self.forcing[f'climate/tas']
+        hurs_coarse_regridded = regridder(hurs_coarse).rename({"lon": "x", "lat": "y"})
+        tas_coarse_regridded = regridder(tas_coarse).rename({"lon": "x", "lat": "y"})
+        rlds_coarse_regridded = regridder(rlds_coarse).rename({"lon": "x", "lat": "y"})
+
+        hurs_fine = self.forcing[f"climate/hurs"]
+        tas_fine = self.forcing[f"climate/tas"]
 
         # now ready for calculation:
-        es_coarse = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded))  # saturation vapor pressure
-        pV_coarse = (hurs_coarse_regridded * es_coarse) / 100  # water vapor pressure [hPa]
+        es_coarse = es0 * np.exp(
+            (lv / Rv) * (1 / T0 - 1 / tas_coarse_regridded)
+        )  # saturation vapor pressure
+        pV_coarse = (
+            hurs_coarse_regridded * es_coarse
+        ) / 100  # water vapor pressure [hPa]
 
         es_fine = es0 * np.exp((lv / Rv) * (1 / T0 - 1 / tas_fine))
         pV_fine = (hurs_fine * es_fine) / 100  # water vapour pressure [hPa]
@@ -1257,19 +1696,27 @@ class GEBModel(GridModel):
         e_cl_fine = 0.23 + x1 * ((pV_fine * 100) / tas_fine) ** (1 / x2)
         # e_cl_fine == clear-sky emissivity target grid (pV needs to be in Pa not hPa, hence *100)
 
-        e_as_coarse = rlds_coarse_regridded / (sbc * tas_coarse_regridded ** 4)  # all-sky emissivity w5e5
-        e_as_coarse = xr.where(e_as_coarse < 1, e_as_coarse, 1)  # constrain all-sky emissivity to max 1
-        assert (e_as_coarse <= 1).all(), 'all-sky emissivity should be <= 1'
+        e_as_coarse = rlds_coarse_regridded / (
+            sbc * tas_coarse_regridded**4
+        )  # all-sky emissivity w5e5
+        e_as_coarse = xr.where(
+            e_as_coarse < 1, e_as_coarse, 1
+        )  # constrain all-sky emissivity to max 1
+        assert (e_as_coarse <= 1).all(), "all-sky emissivity should be <= 1"
         delta_e = e_as_coarse - e_cl_coarse  # cloud-based component of emissivity w5e5
-        
-        e_as_fine = e_cl_fine + delta_e
-        e_as_fine = xr.where(e_as_fine < 1, e_as_fine, 1)  # constrain all-sky emissivity to max 1
-        assert (e_as_fine <= 1).all(), 'all-sky emissivity should be <= 1'
-        lw_fine = e_as_fine * sbc * tas_fine ** 4  # downscaled lwr! assume cloud e is the same
 
-        lw_fine.name = 'rlds'
+        e_as_fine = e_cl_fine + delta_e
+        e_as_fine = xr.where(
+            e_as_fine < 1, e_as_fine, 1
+        )  # constrain all-sky emissivity to max 1
+        assert (e_as_fine <= 1).all(), "all-sky emissivity should be <= 1"
+        lw_fine = (
+            e_as_fine * sbc * tas_fine**4
+        )  # downscaled lwr! assume cloud e is the same
+
+        lw_fine.name = "rlds"
         lw_fine = self.snap_to_grid(lw_fine, self.grid)
-        self.set_forcing(lw_fine, name=f'climate/rlds')
+        self.set_forcing(lw_fine, name=f"climate/rlds")
 
     def setup_pressure_isimip_30arcsec(self, starttime: date, endtime: date):
         """
@@ -1302,24 +1749,39 @@ class GEBModel(GridModel):
         r0 = 8.314462618  # universal gas constant [J/(mol·K)]
         T0 = 288.16  # Sea level standard temperature  [K]
 
-        target = self.forcing[f'climate/hurs'].rename({'x': 'lon', 'y': 'lat'})
-        pressure_30_min = self.download_isimip(product='SecondaryInputData', variable='psl', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).psl  # some buffer to avoid edge effects / errors in ISIMIP API
-        
-        orography = self.download_isimip(product='InputData', variable='orog', forcing='chelsa-w5e5v1.0', buffer=1).orog  # some buffer to avoid edge effects / errors in ISIMIP API
-        regridder = xe.Regridder(orography, target, 'bilinear')
-        orography = regridder(orography).rename({'lon': 'x', 'lat': 'y'})
+        target = self.forcing[f"climate/hurs"].rename({"x": "lon", "y": "lat"})
+        pressure_30_min = self.download_isimip(
+            product="SecondaryInputData",
+            variable="psl",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).psl  # some buffer to avoid edge effects / errors in ISIMIP API
 
-        regridder = xe.Regridder(pressure_30_min.isel(time=0).drop_vars('time'), target, 'bilinear')
-        pressure_30_min_regridded = regridder(pressure_30_min).rename({'lon': 'x', 'lat': 'y'})
-        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(-(g * orography * M) / (T0 * r0))
+        orography = self.download_isimip(
+            product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
+        ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        regridder = xe.Regridder(orography, target, "bilinear")
+        orography = regridder(orography).rename({"lon": "x", "lat": "y"})
 
-        pressure = xr.full_like(self.forcing[f'climate/hurs'], fill_value=np.nan)
-        pressure.name = 'ps'
-        pressure.attrs = {'units': 'Pa', 'long_name': 'surface pressure'}
+        regridder = xe.Regridder(
+            pressure_30_min.isel(time=0).drop_vars("time"), target, "bilinear"
+        )
+        pressure_30_min_regridded = regridder(pressure_30_min).rename(
+            {"lon": "x", "lat": "y"}
+        )
+        pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(
+            -(g * orography * M) / (T0 * r0)
+        )
+
+        pressure = xr.full_like(self.forcing[f"climate/hurs"], fill_value=np.nan)
+        pressure.name = "ps"
+        pressure.attrs = {"units": "Pa", "long_name": "surface pressure"}
         pressure.data = pressure_30_min_regridded_corr
-        
+
         pressure = self.snap_to_grid(pressure, self.grid)
-        self.set_forcing(pressure, name=f'climate/ps')
+        self.set_forcing(pressure, name=f"climate/ps")
 
     def setup_wind_isimip_30arcsec(self, starttime: date, endtime: date):
         """
@@ -1353,20 +1815,22 @@ class GEBModel(GridModel):
         The resulting wind data is set as forcing data in the model with names of the form 'climate/wind'.
         """
         global_wind_atlas = self.data_catalog.get_rasterdataset(
-            'global_wind_atlas', bbox=self.grid.raster.bounds, buffer=10
-        ).rename({'x': 'lon', 'y': 'lat'})
-        target = self.grid['areamaps/grid_mask'].rename({'x': 'lon', 'y': 'lat'})
+            "global_wind_atlas", bbox=self.grid.raster.bounds, buffer=10
+        ).rename({"x": "lon", "y": "lat"})
+        target = self.grid["areamaps/grid_mask"].rename({"x": "lon", "y": "lat"})
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
 
         wind_30_min_avg = self.download_isimip(
-            product='SecondaryInputData', 
-            variable='sfcwind',
+            product="SecondaryInputData",
+            variable="sfcwind",
             starttime=date(2008, 1, 1),
             endtime=date(2017, 12, 31),
-            forcing='w5e5v2.0',
-            buffer=1
-        ).sfcWind.mean(dim='time')  # some buffer to avoid edge effects / errors in ISIMIP API
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).sfcWind.mean(
+            dim="time"
+        )  # some buffer to avoid edge effects / errors in ISIMIP API
         regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
         wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
 
@@ -1376,9 +1840,18 @@ class GEBModel(GridModel):
 
         global_wind_atlas_regridded_log = np.log(global_wind_atlas_regridded)
 
-        diff_layer = global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log   # to be added to log-transformed daily
+        diff_layer = (
+            global_wind_atlas_regridded_log - wind_30_min_avg_regridded_log
+        )  # to be added to log-transformed daily
 
-        wind_30_min = self.download_isimip(product='SecondaryInputData', variable='sfcwind', starttime=starttime, endtime=endtime, forcing='w5e5v2.0', buffer=1).sfcWind  # some buffer to avoid edge effects / errors in ISIMIP API
+        wind_30_min = self.download_isimip(
+            product="SecondaryInputData",
+            variable="sfcwind",
+            starttime=starttime,
+            endtime=endtime,
+            forcing="w5e5v2.0",
+            buffer=1,
+        ).sfcWind  # some buffer to avoid edge effects / errors in ISIMIP API
 
         wind_30min_regridded = regridder_30_min(wind_30_min)
         wind_30min_regridded_log = np.log(wind_30min_regridded)
@@ -1386,18 +1859,20 @@ class GEBModel(GridModel):
         wind_30min_regridded_log_corr = wind_30min_regridded_log + diff_layer
         wind_30min_regridded_corr = np.exp(wind_30min_regridded_log_corr)
 
-        wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(self.grid.raster.bounds)
-        wind_output_clipped = wind_output_clipped.rename({'lon': 'x', 'lat': 'y'})
-        wind_output_clipped.name = 'sfcwind'
+        wind_output_clipped = wind_30min_regridded_corr.raster.clip_bbox(
+            self.grid.raster.bounds
+        )
+        wind_output_clipped = wind_output_clipped.rename({"lon": "x", "lat": "y"})
+        wind_output_clipped.name = "sfcwind"
 
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
-        self.set_forcing(wind_output_clipped, f'climate/sfcwind')
+        self.set_forcing(wind_output_clipped, f"climate/sfcwind")
 
     def setup_SPEI(self):
-        self.logger.info('setting up SPEI...')
-        pr_data = self.forcing[f'climate/pr']
-        tasmin_data = self.forcing[f'climate/tasmin']
-        tasmax_data = self.forcing[f'climate/tasmax']
+        self.logger.info("setting up SPEI...")
+        pr_data = self.forcing[f"climate/pr"]
+        tasmin_data = self.forcing[f"climate/tasmin"]
+        tasmax_data = self.forcing[f"climate/tasmax"]
 
         # assert input data have the same coordinates
         assert np.array_equal(pr_data.x, tasmin_data.x)
@@ -1405,49 +1880,68 @@ class GEBModel(GridModel):
         assert np.array_equal(pr_data.y, tasmax_data.y)
         assert np.array_equal(pr_data.y, tasmax_data.y)
 
-        # PET needs latitude, needs to be named latitude 
-        tasmin_data = tasmin_data.rename({'x': 'longitude','y': 'latitude'})
-        tasmax_data = tasmax_data.rename({'x': 'longitude','y': 'latitude'})
+        # PET needs latitude, needs to be named latitude
+        tasmin_data = tasmin_data.rename({"x": "longitude", "y": "latitude"})
+        tasmax_data = tasmax_data.rename({"x": "longitude", "y": "latitude"})
 
-        pet = xci.potential_evapotranspiration(tasmin=tasmin_data, tasmax=tasmax_data, method='BR65')
+        pet = xci.potential_evapotranspiration(
+            tasmin=tasmin_data, tasmax=tasmax_data, method="BR65"
+        )
         # Revert lon/lat to x/y
-        pet = pet.rename({'longitude': 'x','latitude': 'y'})
+        pet = pet.rename({"longitude": "x", "latitude": "y"})
 
         # Compute the potential evapotranspiration
         water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet)
 
-        water_budget_positive = water_budget - 1.01*water_budget.min()
-        water_budget_positive.attrs = {'units': 'kg m-2 s-1'}
+        water_budget_positive = water_budget - 1.01 * water_budget.min()
+        water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
-        wb_cal = water_budget_positive.sel(time=slice('1981-01-01', '2010-01-01'))
+        wb_cal = water_budget_positive.sel(time=slice("1981-01-01", "2010-01-01"))
         assert wb_cal.time.size > 0
 
         # Compute the SPEI
-        spei = xci._agro.standardized_precipitation_evapotranspiration_index(wb = water_budget_positive, wb_cal = wb_cal, freq = "MS", window = 12, dist = 'gamma', method = 'APP')
-        spei.attrs = {'units': '-', 'long_name': 'Standard Precipitation Evapotranspiration Index', 'name' : 'spei'}
-        spei.name = 'spei'
+        spei = xci._agro.standardized_precipitation_evapotranspiration_index(
+            wb=water_budget_positive,
+            wb_cal=wb_cal,
+            freq="MS",
+            window=12,
+            dist="gamma",
+            method="APP",
+        )
+        spei.attrs = {
+            "units": "-",
+            "long_name": "Standard Precipitation Evapotranspiration Index",
+            "name": "spei",
+        }
+        spei.name = "spei"
 
-        self.set_forcing(spei, name = f'climate/spei')
+        self.set_forcing(spei, name=f"climate/spei")
 
     def setup_GEV(self):
-        self.logger.info('calculating GEV parameters...')
-        spei_data = self.forcing[f'climate/spei']
+        self.logger.info("calculating GEV parameters...")
+        spei_data = self.forcing[f"climate/spei"]
 
-        # invert the values and take the max 
+        # invert the values and take the max
         SPEI_changed = spei_data * -1
 
         # Group the data by year and find the maximum monthly sum for each year
-        SPEI_yearly_max = SPEI_changed.groupby('time.year').max(dim='time')
-        SPEI_yearly_max = SPEI_yearly_max.rename({'year': 'time'})
+        SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
+        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
 
         GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme")
-        GEV.name = 'gev'
-        
-        self.set_grid(GEV.sel(dparams='c'), name = f'climate/gev_c')
-        self.set_grid(GEV.sel(dparams='loc'), name = f'climate/gev_loc')
-        self.set_grid(GEV.sel(dparams='scale'), name = f'climate/gev_scale')
+        GEV.name = "gev"
 
-    def setup_regions_and_land_use(self, region_database='gadm_level1', unique_region_id='UID', ISO3_column='ISO3', river_threshold=100):
+        self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")
+        self.set_grid(GEV.sel(dparams="loc"), name=f"climate/gev_loc")
+        self.set_grid(GEV.sel(dparams="scale"), name=f"climate/gev_scale")
+
+    def setup_regions_and_land_use(
+        self,
+        region_database="gadm_level1",
+        unique_region_id="UID",
+        ISO3_column="ISO3",
+        river_threshold=100,
+    ):
         """
         Sets up the (administrative) regions and land use data for GEB. The regions can be used for multiple purposes,
         for example for creating the agents in the model, assigning unique crop prices and other economic variables
@@ -1479,19 +1973,27 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
-            geom=self.geoms['areamaps/region'],
+            geom=self.geoms["areamaps/region"],
             predicate="intersects",
-        ).rename(columns={unique_region_id: 'region_id', ISO3_column: 'ISO3'})
-        assert np.issubdtype(regions['region_id'].dtype, np.integer), "Region ID must be integer"
-        region_id_mapping = {i: region_id for region_id, i in enumerate(regions['region_id'])}
-        regions['region_id'] = regions['region_id'].map(region_id_mapping)
-        self.set_dict(region_id_mapping, name='areamaps/region_id_mapping')
-        assert 'ISO3' in regions.columns, f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
-        self.set_geoms(regions, name='areamaps/regions')
+        ).rename(columns={unique_region_id: "region_id", ISO3_column: "ISO3"})
+        assert np.issubdtype(
+            regions["region_id"].dtype, np.integer
+        ), "Region ID must be integer"
+        region_id_mapping = {
+            i: region_id for region_id, i in enumerate(regions["region_id"])
+        }
+        regions["region_id"] = regions["region_id"].map(region_id_mapping)
+        self.set_dict(region_id_mapping, name="areamaps/region_id_mapping")
+        assert (
+            "ISO3" in regions.columns
+        ), f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
+        self.set_geoms(regions, name="areamaps/regions")
 
-        region_bounds = self.geoms['areamaps/regions'].total_bounds
-        
-        resolution_x, resolution_y = self.subgrid['areamaps/sub_grid_mask'].rio.resolution()
+        region_bounds = self.geoms["areamaps/regions"].total_bounds
+
+        resolution_x, resolution_y = self.subgrid[
+            "areamaps/sub_grid_mask"
+        ].rio.resolution()
         pad_minx = region_bounds[0] - abs(resolution_x) / 2.0
         pad_miny = region_bounds[1] - abs(resolution_y) / 2.0
         pad_maxx = region_bounds[2] + abs(resolution_x) / 2.0
@@ -1499,7 +2001,7 @@ class GEBModel(GridModel):
 
         # TODO: Is there a better way to do this?
         padded_subgrid, region_subgrid_slice = pad_xy(
-            self.subgrid['areamaps/sub_grid_mask'].rio,
+            self.subgrid["areamaps/sub_grid_mask"].rio,
             pad_minx,
             pad_miny,
             pad_maxx,
@@ -1508,112 +2010,150 @@ class GEBModel(GridModel):
             constant_values=1,
         )
         padded_subgrid.raster.set_nodata(-1)
-        self.set_region_subgrid(padded_subgrid, name='areamaps/region_mask')
-        
+        self.set_region_subgrid(padded_subgrid, name="areamaps/region_mask")
+
         land_use = self.data_catalog.get_rasterdataset(
             "esa_worldcover_2020_v100",
-            geom=self.geoms['areamaps/regions'],
-            buffer=200 # 2 km buffer
+            geom=self.geoms["areamaps/regions"],
+            buffer=200,  # 2 km buffer
         )
         reprojected_land_use = land_use.raster.reproject_like(
-            padded_subgrid,
-            method='nearest'
+            padded_subgrid, method="nearest"
         )
 
         region_raster = reprojected_land_use.raster.rasterize(
-            self.geoms['areamaps/regions'],
-            col_name='region_id',
+            self.geoms["areamaps/regions"],
+            col_name="region_id",
             all_touched=True,
         )
-        self.set_region_subgrid(region_raster, name='areamaps/region_subgrid')
+        self.set_region_subgrid(region_raster, name="areamaps/region_subgrid")
 
-        padded_cell_area = self.grid['areamaps/cell_area'].rio.pad_box(*region_bounds)
+        padded_cell_area = self.grid["areamaps/cell_area"].rio.pad_box(*region_bounds)
         # calculate the cell area for the grid for the entire region
-        region_cell_area = calculate_cell_area(padded_cell_area.raster.transform, padded_cell_area.shape)
+        region_cell_area = calculate_cell_area(
+            padded_cell_area.raster.transform, padded_cell_area.shape
+        )
 
         # create subgrid for entire region
         region_cell_area_subgrid = hydromt.raster.full_from_transform(
             padded_cell_area.raster.transform * Affine.scale(1 / self.subgrid_factor),
-            (padded_cell_area.raster.shape[0] * self.subgrid_factor, padded_cell_area.raster.shape[1] * self.subgrid_factor), 
+            (
+                padded_cell_area.raster.shape[0] * self.subgrid_factor,
+                padded_cell_area.raster.shape[1] * self.subgrid_factor,
+            ),
             nodata=np.nan,
             dtype=padded_cell_area.dtype,
             crs=padded_cell_area.raster.crs,
-            name='areamaps/sub_grid_mask',
-            lazy=True
+            name="areamaps/sub_grid_mask",
+            lazy=True,
         )
 
         # calculate the cell area for the subgrid for the entire region
-        region_cell_area_subgrid.data = repeat_grid(region_cell_area, self.subgrid_factor) / self.subgrid_factor ** 2
+        region_cell_area_subgrid.data = (
+            repeat_grid(region_cell_area, self.subgrid_factor)
+            / self.subgrid_factor**2
+        )
 
         # create new subgrid for the region without padding
-        region_cell_area_subgrid_clipped_to_region = hydromt.raster.full(region_raster.raster.coords, nodata=np.nan, dtype=padded_cell_area.dtype, name='areamaps/sub_grid_mask', crs=region_raster.raster.crs, lazy=True)
-        
+        region_cell_area_subgrid_clipped_to_region = hydromt.raster.full(
+            region_raster.raster.coords,
+            nodata=np.nan,
+            dtype=padded_cell_area.dtype,
+            name="areamaps/sub_grid_mask",
+            crs=region_raster.raster.crs,
+            lazy=True,
+        )
+
         # remove padding from region subgrid
-        region_cell_area_subgrid_clipped_to_region.data = region_cell_area_subgrid.raster.clip_bbox((pad_minx, pad_miny, pad_maxx, pad_maxy))
+        region_cell_area_subgrid_clipped_to_region.data = (
+            region_cell_area_subgrid.raster.clip_bbox(
+                (pad_minx, pad_miny, pad_maxx, pad_maxy)
+            )
+        )
 
         # set the cell area for the region subgrid
-        self.set_region_subgrid(region_cell_area_subgrid_clipped_to_region, name='areamaps/region_cell_area_subgrid')
+        self.set_region_subgrid(
+            region_cell_area_subgrid_clipped_to_region,
+            name="areamaps/region_cell_area_subgrid",
+        )
 
         MERIT = self.data_catalog.get_rasterdataset(
             "merit_hydro",
-            variables=['upg'],
+            variables=["upg"],
             bbox=padded_subgrid.rio.bounds(),
-            buffer=300, # 3 km buffer
-            provider=self.data_provider
+            buffer=300,  # 3 km buffer
+            provider=self.data_provider,
         )
         # There is a half degree offset in MERIT data
         MERIT = MERIT.assign_coords(
-            x=MERIT.coords['x'] + MERIT.rio.resolution()[0] / 2,
-            y=MERIT.coords['y'] - MERIT.rio.resolution()[1] / 2
+            x=MERIT.coords["x"] + MERIT.rio.resolution()[0] / 2,
+            y=MERIT.coords["y"] - MERIT.rio.resolution()[1] / 2,
         )
 
         # Assume all cells with at least x upstream cells are rivers.
         rivers = MERIT > river_threshold
         rivers = rivers.astype(np.int32)
         rivers.raster.set_nodata(-1)
-        rivers = rivers.raster.reproject_like(reprojected_land_use, method='nearest')
-        self.set_region_subgrid(rivers, name='landcover/rivers')
+        rivers = rivers.raster.reproject_like(reprojected_land_use, method="nearest")
+        self.set_region_subgrid(rivers, name="landcover/rivers")
 
         hydro_land_use = reprojected_land_use.raster.reclassify(
-            pd.DataFrame.from_dict({
+            pd.DataFrame.from_dict(
+                {
                     reprojected_land_use.raster.nodata: 5,  # no data, set to permanent water bodies because ocean
-                    10: 0, # tree cover
-                    20: 1, # shrubland
-                    30: 1, # grassland
-                    40: 1, # cropland, setting to non-irrigated. Initiated as irrigated based on agents
-                    50: 4, # built-up 
-                    60: 1, # bare / sparse vegetation
-                    70: 1, # snow and ice
-                    80: 5, # permanent water bodies
-                    90: 1, # herbaceous wetland
-                    95: 5, # mangroves
-                    100: 1, # moss and lichen
-                }, orient='index', columns=['GEB_land_use_class']
+                    10: 0,  # tree cover
+                    20: 1,  # shrubland
+                    30: 1,  # grassland
+                    40: 1,  # cropland, setting to non-irrigated. Initiated as irrigated based on agents
+                    50: 4,  # built-up
+                    60: 1,  # bare / sparse vegetation
+                    70: 1,  # snow and ice
+                    80: 5,  # permanent water bodies
+                    90: 1,  # herbaceous wetland
+                    95: 5,  # mangroves
+                    100: 1,  # moss and lichen
+                },
+                orient="index",
+                columns=["GEB_land_use_class"],
             ),
-        )['GEB_land_use_class']
-        hydro_land_use = xr.where(rivers != 1, hydro_land_use, 5, keep_attrs=True)  # set rivers to 5 (permanent water bodies)
+        )["GEB_land_use_class"]
+        hydro_land_use = xr.where(
+            rivers != 1, hydro_land_use, 5, keep_attrs=True
+        )  # set rivers to 5 (permanent water bodies)
         hydro_land_use.raster.set_nodata(-1)
-        
-        self.set_region_subgrid(hydro_land_use, name='landsurface/full_region_land_use_classes')
 
-        cultivated_land = xr.where((hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0, keep_attrs=True)
+        self.set_region_subgrid(
+            hydro_land_use, name="landsurface/full_region_land_use_classes"
+        )
+
+        cultivated_land = xr.where(
+            (hydro_land_use == 1) & (reprojected_land_use == 40), 1, 0, keep_attrs=True
+        )
         cultivated_land = cultivated_land.rio.set_nodata(-1)
         cultivated_land.rio.set_crs(reprojected_land_use.rio.crs)
         cultivated_land.rio.set_nodata(-1)
 
-        self.set_region_subgrid(cultivated_land, name='landsurface/full_region_cultivated_land')
+        self.set_region_subgrid(
+            cultivated_land, name="landsurface/full_region_cultivated_land"
+        )
 
         hydro_land_use_region = hydro_land_use.isel(region_subgrid_slice)
 
         # TODO: Doesn't work when using the original array. Somehow the dtype is changed on adding it to the subgrid. This is a workaround.
-        self.set_subgrid(hydro_land_use_region.values, name='landsurface/land_use_classes')
+        self.set_subgrid(
+            hydro_land_use_region.values, name="landsurface/land_use_classes"
+        )
 
         cultivated_land_region = cultivated_land.isel(region_subgrid_slice)
 
         # Same workaround as above
-        self.set_subgrid(cultivated_land_region.values, name='landsurface/cultivated_land')
+        self.set_subgrid(
+            cultivated_land_region.values, name="landsurface/cultivated_land"
+        )
 
-    def setup_economic_data(self, project_future_until_year=False, reference_start_year=2000):
+    def setup_economic_data(
+        self, project_future_until_year=False, reference_start_year=2000
+    ):
         """
         Sets up the economic data for GEB.
 
@@ -1630,60 +2170,110 @@ class GEBModel(GridModel):
         The resulting lending rates and inflation rates data are set as forcing data in the model with names of the form
         'economics/lending_rates' and 'economics/inflation_rates', respectively.
         """
-        self.logger.info('Setting up economic data')
-        assert not project_future_until_year or project_future_until_year > reference_start_year, f"project_future_until_year ({project_future_until_year}) must be larger than reference_start_year ({reference_start_year})"
+        self.logger.info("Setting up economic data")
+        assert (
+            not project_future_until_year
+            or project_future_until_year > reference_start_year
+        ), f"project_future_until_year ({project_future_until_year}) must be larger than reference_start_year ({reference_start_year})"
 
-        lending_rates = self.data_catalog.get_dataframe('wb_lending_rate')
-        inflation_rates = self.data_catalog.get_dataframe('wb_inflation_rate')
+        lending_rates = self.data_catalog.get_dataframe("wb_lending_rate")
+        inflation_rates = self.data_catalog.get_dataframe("wb_inflation_rate")
 
-        lending_rates_dict, inflation_rates_dict = {'data': {}}, { 'data': {}}
-        years_lending_rates = [c for c in lending_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
-        lending_rates_dict['time'] = years_lending_rates
-        
-        years_inflation_rates = [c for c in inflation_rates.columns if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000]
-        inflation_rates_dict['time'] = years_inflation_rates
-        
-        for _, region in self.geoms['areamaps/regions'].iterrows():
-            region_id = region['region_id']
-            ISO3 = region['ISO3']
+        lending_rates_dict, inflation_rates_dict = {"data": {}}, {"data": {}}
+        years_lending_rates = [
+            c
+            for c in lending_rates.columns
+            if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000
+        ]
+        lending_rates_dict["time"] = years_lending_rates
 
-            lending_rates_country = (lending_rates.loc[lending_rates["Country Code"] == ISO3, years_lending_rates] / 100 + 1)  # percentage to rate
-            assert len(lending_rates_country) == 1, f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
-            lending_rates_dict['data'][region_id] = lending_rates_country.iloc[0].tolist()
+        years_inflation_rates = [
+            c
+            for c in inflation_rates.columns
+            if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000
+        ]
+        inflation_rates_dict["time"] = years_inflation_rates
 
-            inflation_rates_country = (inflation_rates.loc[inflation_rates["Country Code"] == ISO3, years_inflation_rates] / 100 + 1) # percentage to rate
-            assert len(inflation_rates_country) == 1, f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
-            inflation_rates_dict['data'][region_id] = inflation_rates_country.iloc[0].tolist()
+        for _, region in self.geoms["areamaps/regions"].iterrows():
+            region_id = region["region_id"]
+            ISO3 = region["ISO3"]
+
+            lending_rates_country = (
+                lending_rates.loc[
+                    lending_rates["Country Code"] == ISO3, years_lending_rates
+                ]
+                / 100
+                + 1
+            )  # percentage to rate
+            assert (
+                len(lending_rates_country) == 1
+            ), f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
+            lending_rates_dict["data"][region_id] = lending_rates_country.iloc[
+                0
+            ].tolist()
+
+            inflation_rates_country = (
+                inflation_rates.loc[
+                    inflation_rates["Country Code"] == ISO3, years_inflation_rates
+                ]
+                / 100
+                + 1
+            )  # percentage to rate
+            assert (
+                len(inflation_rates_country) == 1
+            ), f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
+            inflation_rates_dict["data"][region_id] = inflation_rates_country.iloc[
+                0
+            ].tolist()
 
         if project_future_until_year:
             # convert to pandas dataframe
-            inflation_rates = pd.DataFrame(inflation_rates_dict['data'], index=inflation_rates_dict['time']).dropna()
-            lending_rates = pd.DataFrame(lending_rates_dict['data'], index=lending_rates_dict['time']).dropna()
-            
+            inflation_rates = pd.DataFrame(
+                inflation_rates_dict["data"], index=inflation_rates_dict["time"]
+            ).dropna()
+            lending_rates = pd.DataFrame(
+                lending_rates_dict["data"], index=lending_rates_dict["time"]
+            ).dropna()
+
             inflation_rates.index = inflation_rates.index.astype(int)
             # extend inflation rates to future
-            mean_inflation_rate_since_reference_year = inflation_rates.loc[reference_start_year:].mean(axis=0)
-            inflation_rates = inflation_rates.reindex(range(inflation_rates.index.min(), project_future_until_year + 1)).fillna(mean_inflation_rate_since_reference_year)
+            mean_inflation_rate_since_reference_year = inflation_rates.loc[
+                reference_start_year:
+            ].mean(axis=0)
+            inflation_rates = inflation_rates.reindex(
+                range(inflation_rates.index.min(), project_future_until_year + 1)
+            ).fillna(mean_inflation_rate_since_reference_year)
 
-            inflation_rates_dict['time'] = inflation_rates.index.astype(str).tolist()
-            inflation_rates_dict['data'] = inflation_rates.to_dict(orient='list')
+            inflation_rates_dict["time"] = inflation_rates.index.astype(str).tolist()
+            inflation_rates_dict["data"] = inflation_rates.to_dict(orient="list")
 
             lending_rates.index = lending_rates.index.astype(int)
             # extend lending rates to future
-            mean_lending_rate_since_reference_year = lending_rates.loc[reference_start_year:].mean(axis=0)
-            lending_rates = lending_rates.reindex(range(lending_rates.index.min(), project_future_until_year + 1)).fillna(mean_lending_rate_since_reference_year)
+            mean_lending_rate_since_reference_year = lending_rates.loc[
+                reference_start_year:
+            ].mean(axis=0)
+            lending_rates = lending_rates.reindex(
+                range(lending_rates.index.min(), project_future_until_year + 1)
+            ).fillna(mean_lending_rate_since_reference_year)
 
             # convert back to dictionary
-            lending_rates_dict['time'] = lending_rates.index.astype(str).tolist()
-            lending_rates_dict['data'] = lending_rates.to_dict(orient='list')
+            lending_rates_dict["time"] = lending_rates.index.astype(str).tolist()
+            lending_rates_dict["data"] = lending_rates.to_dict(orient="list")
 
-        self.set_dict(inflation_rates_dict, name='economics/inflation_rates')
-        self.set_dict(lending_rates_dict, name='economics/lending_rates')
+        self.set_dict(inflation_rates_dict, name="economics/inflation_rates")
+        self.set_dict(lending_rates_dict, name="economics/lending_rates")
 
-    def setup_well_prices_by_reference_year(self, irrigation_maintenance: float,
-        pump_cost: float, borewell_cost_1: float, borewell_cost_2: float, electricity_cost: float, 
-        reference_year: int, start_year: int, end_year: int):
-
+    def setup_well_prices_by_reference_year(
+        self,
+        irrigation_maintenance: float,
+        pump_cost: float,
+        borewell_cost_1: float,
+        borewell_cost_2: float,
+        electricity_cost: float,
+        reference_year: int,
+        start_year: int,
+        end_year: int,
+    ):
         """
         Sets up the well prices and upkeep prices for the hydrological model based on a reference year.
 
@@ -1713,27 +2303,24 @@ class GEBModel(GridModel):
         The resulting well prices and upkeep prices data are set as dictionary with names of the form
         'economics/well_prices' and 'economics/upkeep_prices_well_per_m2', respectively.
         """
-        self.logger.info('Setting up well prices by reference year')
-    
+        self.logger.info("Setting up well prices by reference year")
+
         # Retrieve the inflation rates data
-        inflation_rates = self.dict['economics/inflation_rates']
-        regions = list(inflation_rates['data'].keys())
+        inflation_rates = self.dict["economics/inflation_rates"]
+        regions = list(inflation_rates["data"].keys())
 
         # Create a dictionary to store the various types of prices with their initial reference year values
         price_types = {
-            'irrigation_maintenance': irrigation_maintenance,
-            'pump_cost': pump_cost,
-            'borewell_cost_1': borewell_cost_1,
-            'borewell_cost_2': borewell_cost_2,
-            'electricity_cost': electricity_cost,    
+            "irrigation_maintenance": irrigation_maintenance,
+            "pump_cost": pump_cost,
+            "borewell_cost_1": borewell_cost_1,
+            "borewell_cost_2": borewell_cost_2,
+            "electricity_cost": electricity_cost,
         }
 
         # Iterate over each price type and calculate the prices across years for each region
         for price_type, initial_price in price_types.items():
-            prices_dict = {
-                'time': list(range(start_year, end_year + 1)),
-                'data': {}
-            }
+            prices_dict = {"time": list(range(start_year, end_year + 1)), "data": {}}
 
             for region in regions:
                 prices = pd.Series(index=range(start_year, end_year + 1))
@@ -1741,17 +2328,34 @@ class GEBModel(GridModel):
 
                 # Forward calculation from the reference year
                 for year in range(reference_year + 1, end_year + 1):
-                    prices.loc[year] = prices[year - 1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
+                    prices.loc[year] = (
+                        prices[year - 1]
+                        * inflation_rates["data"][region][
+                            inflation_rates["time"].index(str(year))
+                        ]
+                    )
                 # Backward calculation from the reference year
                 for year in range(reference_year - 1, start_year - 1, -1):
-                    prices.loc[year] = prices[year + 1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year + 1))]
+                    prices.loc[year] = (
+                        prices[year + 1]
+                        / inflation_rates["data"][region][
+                            inflation_rates["time"].index(str(year + 1))
+                        ]
+                    )
 
-                prices_dict['data'][region] = prices.tolist()
+                prices_dict["data"][region] = prices.tolist()
 
             # Set the calculated prices in the appropriate dictionary
-            self.set_dict(prices_dict, name=f'economics/{price_type}')
+            self.set_dict(prices_dict, name=f"economics/{price_type}")
 
-    def setup_drip_irrigation_prices_by_reference_year(self, drip_irrigation_price: float, upkeep_price_per_m2: float, reference_year: int, start_year: int, end_year: int):
+    def setup_drip_irrigation_prices_by_reference_year(
+        self,
+        drip_irrigation_price: float,
+        upkeep_price_per_m2: float,
+        reference_year: int,
+        start_year: int,
+        end_year: int,
+    ):
         """
         Sets up the drip_irrigation prices and upkeep prices for the hydrological model based on a reference year.
 
@@ -1781,44 +2385,67 @@ class GEBModel(GridModel):
         The resulting drip_irrigation prices and upkeep prices data are set as dictionary with names of the form
         'economics/drip_irrigation_prices' and 'economics/upkeep_prices_drip_irrigation_per_m2', respectively.
         """
-        self.logger.info('Setting up drip_irrigation prices by reference year')
+        self.logger.info("Setting up drip_irrigation prices by reference year")
         # create dictory with prices for drip_irrigation_prices per year by applying inflation rates
-        inflation_rates = self.dict['economics/inflation_rates']
-        regions = list(inflation_rates['data'].keys())
+        inflation_rates = self.dict["economics/inflation_rates"]
+        regions = list(inflation_rates["data"].keys())
 
         drip_irrigation_prices_dict = {
-            'time': list(range(start_year, end_year + 1)),
-            'data': {}
+            "time": list(range(start_year, end_year + 1)),
+            "data": {},
         }
         for region in regions:
             drip_irrigation_prices = pd.Series(index=range(start_year, end_year + 1))
             drip_irrigation_prices.loc[reference_year] = drip_irrigation_price
-            
+
             for year in range(reference_year + 1, end_year + 1):
-                drip_irrigation_prices.loc[year] = drip_irrigation_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
-            for year in range(reference_year -1, start_year -1, -1):
-                drip_irrigation_prices.loc[year] = drip_irrigation_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+                drip_irrigation_prices.loc[year] = (
+                    drip_irrigation_prices[year - 1]
+                    * inflation_rates["data"][region][
+                        inflation_rates["time"].index(str(year))
+                    ]
+                )
+            for year in range(reference_year - 1, start_year - 1, -1):
+                drip_irrigation_prices.loc[year] = (
+                    drip_irrigation_prices[year + 1]
+                    / inflation_rates["data"][region][
+                        inflation_rates["time"].index(str(year + 1))
+                    ]
+                )
 
-            drip_irrigation_prices_dict['data'][region] = drip_irrigation_prices.tolist()
+            drip_irrigation_prices_dict["data"][
+                region
+            ] = drip_irrigation_prices.tolist()
 
-        self.set_dict(drip_irrigation_prices_dict, name='economics/drip_irrigation_prices')
-            
-        upkeep_prices_dict = {
-            'time': list(range(start_year, end_year + 1)),
-            'data': {}
-        }
+        self.set_dict(
+            drip_irrigation_prices_dict, name="economics/drip_irrigation_prices"
+        )
+
+        upkeep_prices_dict = {"time": list(range(start_year, end_year + 1)), "data": {}}
         for region in regions:
             upkeep_prices = pd.Series(index=range(start_year, end_year + 1))
             upkeep_prices.loc[reference_year] = upkeep_price_per_m2
-            
+
             for year in range(reference_year + 1, end_year + 1):
-                upkeep_prices.loc[year] = upkeep_prices[year-1] * inflation_rates['data'][region][inflation_rates['time'].index(str(year))]
-            for year in range(reference_year -1, start_year -1, -1):
-                upkeep_prices.loc[year] = upkeep_prices[year+1] / inflation_rates['data'][region][inflation_rates['time'].index(str(year+1))]
+                upkeep_prices.loc[year] = (
+                    upkeep_prices[year - 1]
+                    * inflation_rates["data"][region][
+                        inflation_rates["time"].index(str(year))
+                    ]
+                )
+            for year in range(reference_year - 1, start_year - 1, -1):
+                upkeep_prices.loc[year] = (
+                    upkeep_prices[year + 1]
+                    / inflation_rates["data"][region][
+                        inflation_rates["time"].index(str(year + 1))
+                    ]
+                )
 
-            upkeep_prices_dict['data'][region] = upkeep_prices.tolist()
+            upkeep_prices_dict["data"][region] = upkeep_prices.tolist()
 
-        self.set_dict(upkeep_prices_dict, name='economics/upkeep_prices_drip_irrigation_per_m2')
+        self.set_dict(
+            upkeep_prices_dict, name="economics/upkeep_prices_drip_irrigation_per_m2"
+        )
 
     def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
         """
@@ -1856,70 +2483,93 @@ class GEBModel(GridModel):
         Finally, the method sets the binary data for each column of the `farmers` DataFrame as agents data in the model
         with names of the form 'agents/farmers/{column}'.
         """
-        regions = self.geoms['areamaps/regions']
-        regions_raster = self.region_subgrid['areamaps/region_subgrid'].compute()
-        full_region_cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land'].compute()
-        
+        regions = self.geoms["areamaps/regions"]
+        regions_raster = self.region_subgrid["areamaps/region_subgrid"].compute()
+        full_region_cultivated_land = self.region_subgrid[
+            "landsurface/full_region_cultivated_land"
+        ].compute()
+
         farms = hydromt.raster.full_like(regions_raster, nodata=-1, lazy=True)
         farms[:] = -1
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
-        
-        for region_id in regions['region_id']:
+
+        for region_id in regions["region_id"]:
             self.logger.info(f"Creating farms for region {region_id}")
             region = regions_raster == region_id
             region_clip, bounds = clip_with_grid(region, region)
 
             cultivated_land_region = full_region_cultivated_land.isel(bounds)
-            cultivated_land_region = xr.where(region_clip, cultivated_land_region, 0, keep_attrs=True)
-            # TODO: Why does nodata value disappear?     
-            # self.dict['areamaps/region_id_mapping'][farmers['region_id']]  
-            farmer_region_ids = farmers['region_id']
+            cultivated_land_region = xr.where(
+                region_clip, cultivated_land_region, 0, keep_attrs=True
+            )
+            # TODO: Why does nodata value disappear?
+            # self.dict['areamaps/region_id_mapping'][farmers['region_id']]
+            farmer_region_ids = farmers["region_id"]
             farmers_region = farmers[farmer_region_ids == region_id]
-            farms_region = create_farms(farmers_region, cultivated_land_region, farm_size_key='area_n_cells')
-            assert farms_region.min() >= -1  # -1 is nodata value, all farms should be positive
-            farms[bounds] = xr.where(region_clip, farms_region, farms.isel(bounds), keep_attrs=True)
+            farms_region = create_farms(
+                farmers_region, cultivated_land_region, farm_size_key="area_n_cells"
+            )
+            assert (
+                farms_region.min() >= -1
+            )  # -1 is nodata value, all farms should be positive
+            farms[bounds] = xr.where(
+                region_clip, farms_region, farms.isel(bounds), keep_attrs=True
+            )
             farms = farms.compute()  # perhaps this helps with memory issues?
-        
-        farmers = farmers.drop('area_n_cells', axis=1)
 
-        region_mask = self.region_subgrid['areamaps/region_mask'].astype(bool)
+        farmers = farmers.drop("area_n_cells", axis=1)
+
+        region_mask = self.region_subgrid["areamaps/region_mask"].astype(bool)
 
         # TODO: Again why is dtype changed? And export doesn't work?
-        cut_farms = np.unique(xr.where(region_mask, farms.copy().values, -1, keep_attrs=True))
+        cut_farms = np.unique(
+            xr.where(region_mask, farms.copy().values, -1, keep_attrs=True)
+        )
         cut_farms = cut_farms[cut_farms != -1]
 
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
         subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
 
-        subgrid_farms_in_study_area = xr.where(np.isin(subgrid_farms, cut_farms), -1, subgrid_farms, keep_attrs=True)
+        subgrid_farms_in_study_area = xr.where(
+            np.isin(subgrid_farms, cut_farms), -1, subgrid_farms, keep_attrs=True
+        )
         farmers = farmers[~farmers.index.isin(cut_farms)]
 
-        remap_farmer_ids = np.full(farmers.index.max() + 2, -1, dtype=np.int32) # +1 because 0 is also a farm, +1 because no farm is -1, set to -1 in next step
+        remap_farmer_ids = np.full(
+            farmers.index.max() + 2, -1, dtype=np.int32
+        )  # +1 because 0 is also a farm, +1 because no farm is -1, set to -1 in next step
         remap_farmer_ids[farmers.index] = np.arange(len(farmers))
-        subgrid_farms_in_study_area = remap_farmer_ids[subgrid_farms_in_study_area.values]
+        subgrid_farms_in_study_area = remap_farmer_ids[
+            subgrid_farms_in_study_area.values
+        ]
 
         farmers = farmers.reset_index(drop=True)
-        
-        assert np.setdiff1d(np.unique(subgrid_farms_in_study_area), -1).size == len(farmers)
+
+        assert np.setdiff1d(np.unique(subgrid_farms_in_study_area), -1).size == len(
+            farmers
+        )
         assert farmers.iloc[-1].name == subgrid_farms_in_study_area.max()
 
-        self.set_subgrid(subgrid_farms_in_study_area, name='agents/farmers/farms')
-        self.subgrid['agents/farmers/farms'].rio.set_nodata(-1)
+        self.set_subgrid(subgrid_farms_in_study_area, name="agents/farmers/farms")
+        self.subgrid["agents/farmers/farms"].rio.set_nodata(-1)
 
         crop_name_to_id = {
-            crop_name: int(ID)
-            for ID, crop_name in self.dict['crops/crop_ids'].items()
+            crop_name: int(ID) for ID, crop_name in self.dict["crops/crop_ids"].items()
         }
         crop_name_to_id[np.nan] = -1
         for season in range(1, n_seasons + 1):
-            farmers[f'season_#{season}_crop'] = farmers[f'season_#{season}_crop'].map(crop_name_to_id)
+            farmers[f"season_#{season}_crop"] = farmers[f"season_#{season}_crop"].map(
+                crop_name_to_id
+            )
 
         if irrigation_sources:
-            self.set_dict(irrigation_sources, name='agents/farmers/irrigation_sources')
-            farmers['irrigation_source'] = farmers['irrigation_source'].map(irrigation_sources)
+            self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
+            farmers["irrigation_source"] = farmers["irrigation_source"].map(
+                irrigation_sources
+            )
 
         for column in farmers.columns:
-            self.set_binary(farmers[column], name=f'agents/farmers/{column}')
+            self.set_binary(farmers[column], name=f"agents/farmers/{column}")
 
     def setup_farmers_from_csv(self, path=None, irrigation_sources=None, n_seasons=1):
         """
@@ -1943,7 +2593,13 @@ class GEBModel(GridModel):
         See the `setup_farmers` method for more information on how the farmer data is set up in the model.
         """
         if path is None:
-            path = Path(self.root).parent / 'preprocessing' / 'agents' / 'farmers' / 'farmers.csv'
+            path = (
+                Path(self.root).parent
+                / "preprocessing"
+                / "agents"
+                / "farmers"
+                / "farmers.csv"
+            )
         farmers = pd.read_csv(path, index_col=0)
         self.setup_farmers(farmers, irrigation_sources, n_seasons)
 
@@ -1952,8 +2608,8 @@ class GEBModel(GridModel):
         irrigation_sources,
         irrigation_choice,
         crop_choices,
-        region_id_column='UID',
-        country_iso3_column='ISO3',
+        region_id_column="UID",
+        country_iso3_column="ISO3",
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
@@ -1984,31 +2640,43 @@ class GEBModel(GridModel):
         A paper that reports risk aversion values for 75 countries is this one: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2646134
         """
         SIZE_CLASSES_BOUNDARIES = {
-            '< 1 Ha': (0, 10000),
-            '1 - 2 Ha': (10000, 20000),
-            '2 - 5 Ha': (20000, 50000),
-            '5 - 10 Ha': (50000, 100000),
-            '10 - 20 Ha': (100000, 200000),
-            '20 - 50 Ha': (200000, 500000),
-            '50 - 100 Ha': (500000, 1000000),
-            '100 - 200 Ha': (1000000, 2000000),
-            '200 - 500 Ha': (2000000, 5000000),
-            '500 - 1000 Ha': (5000000, 10000000),
-            '> 1000 Ha': (10000000, np.inf)
+            "< 1 Ha": (0, 10000),
+            "1 - 2 Ha": (10000, 20000),
+            "2 - 5 Ha": (20000, 50000),
+            "5 - 10 Ha": (50000, 100000),
+            "10 - 20 Ha": (100000, 200000),
+            "20 - 50 Ha": (200000, 500000),
+            "50 - 100 Ha": (500000, 1000000),
+            "100 - 200 Ha": (1000000, 2000000),
+            "200 - 500 Ha": (2000000, 5000000),
+            "500 - 1000 Ha": (5000000, 10000000),
+            "> 1000 Ha": (10000000, np.inf),
         }
 
-        cultivated_land = self.region_subgrid['landsurface/full_region_cultivated_land'].compute()
-        regions_grid = self.region_subgrid['areamaps/region_subgrid'].compute()
-        cell_area = self.region_subgrid['areamaps/region_cell_area_subgrid'].compute()
+        cultivated_land = self.region_subgrid[
+            "landsurface/full_region_cultivated_land"
+        ].compute()
+        regions_grid = self.region_subgrid["areamaps/region_subgrid"].compute()
+        cell_area = self.region_subgrid["areamaps/region_cell_area_subgrid"].compute()
 
-        regions_shapes = self.geoms['areamaps/regions']
-        assert country_iso3_column in regions_shapes.columns, f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
+        regions_shapes = self.geoms["areamaps/regions"]
+        assert (
+            country_iso3_column in regions_shapes.columns
+        ), f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
 
-        farm_sizes_per_country = self.data_catalog.get_dataframe('lowder_farm_sizes').dropna(subset=['Total'], axis=0).drop(['empty', 'income class'], axis=1)
-        farm_sizes_per_country['Country'] = farm_sizes_per_country['Country'].ffill()
+        farm_sizes_per_country = (
+            self.data_catalog.get_dataframe("lowder_farm_sizes")
+            .dropna(subset=["Total"], axis=0)
+            .drop(["empty", "income class"], axis=1)
+        )
+        farm_sizes_per_country["Country"] = farm_sizes_per_country["Country"].ffill()
         # Remove preceding and trailing white space from country names
-        farm_sizes_per_country['Country'] = farm_sizes_per_country['Country'].str.strip()
-        farm_sizes_per_country['Census Year'] = farm_sizes_per_country['Country'].ffill()
+        farm_sizes_per_country["Country"] = farm_sizes_per_country[
+            "Country"
+        ].str.strip()
+        farm_sizes_per_country["Census Year"] = farm_sizes_per_country[
+            "Country"
+        ].ffill()
 
         # convert country names to ISO3 codes
         iso3_codes = {
@@ -2122,145 +2790,253 @@ class GEBModel(GridModel):
             "Djibouti": "DJI",
             "Mali": "MLI",
             "Togo": "TGO",
-            "Zambia": "ZMB"
+            "Zambia": "ZMB",
         }
-        farm_sizes_per_country['ISO3'] = farm_sizes_per_country['Country'].map(iso3_codes)
-        assert not farm_sizes_per_country['ISO3'].isna().any(), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
+        farm_sizes_per_country["ISO3"] = farm_sizes_per_country["Country"].map(
+            iso3_codes
+        )
+        assert (
+            not farm_sizes_per_country["ISO3"].isna().any()
+        ), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
 
         all_agents = []
-        self.logger.debug(f'Starting processing of {len(regions_shapes)} regions')
+        self.logger.debug(f"Starting processing of {len(regions_shapes)} regions")
         for _, region in regions_shapes.iterrows():
             UID = region[region_id_column]
             country_ISO3 = region[country_iso3_column]
             if farm_size_donor_countries:
                 country_ISO3 = farm_size_donor_countries.get(country_ISO3, country_ISO3)
-            
-            self.logger.debug(f'Processing region {UID} in {country_ISO3}')
 
-            cultivated_land_region_total_cells = ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
-            total_cultivated_land_area_lu = (((regions_grid == UID) & (cultivated_land == True)) * cell_area).sum().compute()
-            if total_cultivated_land_area_lu == 0:  # when no agricultural area, just continue as there will be no farmers. Also avoiding some division by 0 errors.
+            self.logger.debug(f"Processing region {UID} in {country_ISO3}")
+
+            cultivated_land_region_total_cells = (
+                ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
+            )
+            total_cultivated_land_area_lu = (
+                (((regions_grid == UID) & (cultivated_land == True)) * cell_area)
+                .sum()
+                .compute()
+            )
+            if (
+                total_cultivated_land_area_lu == 0
+            ):  # when no agricultural area, just continue as there will be no farmers. Also avoiding some division by 0 errors.
                 continue
-            
-            average_cell_area_region = cell_area.where(((regions_grid == UID) & (cultivated_land == True))).mean().compute()
 
-            country_farm_sizes = farm_sizes_per_country.loc[(farm_sizes_per_country['ISO3'] == country_ISO3)].drop(['Country', "Census Year", "Total"], axis=1)
-            assert len(country_farm_sizes) == 2, f'Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}'
-            
-            n_holdings = country_farm_sizes.loc[
-                country_farm_sizes['Holdings/ agricultural area'] == 'Holdings'
-            ].iloc[0].drop(['Holdings/ agricultural area', 'ISO3']).replace('..', '0').astype(np.int64)
-            agricultural_area_db_ha = country_farm_sizes.loc[
-                country_farm_sizes['Holdings/ agricultural area'] == 'Agricultural area (Ha) '
-            ].iloc[0].drop(['Holdings/ agricultural area', 'ISO3']).replace('..', '0').astype(np.int64)
+            average_cell_area_region = (
+                cell_area.where(((regions_grid == UID) & (cultivated_land == True)))
+                .mean()
+                .compute()
+            )
+
+            country_farm_sizes = farm_sizes_per_country.loc[
+                (farm_sizes_per_country["ISO3"] == country_ISO3)
+            ].drop(["Country", "Census Year", "Total"], axis=1)
+            assert (
+                len(country_farm_sizes) == 2
+            ), f"Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}"
+
+            n_holdings = (
+                country_farm_sizes.loc[
+                    country_farm_sizes["Holdings/ agricultural area"] == "Holdings"
+                ]
+                .iloc[0]
+                .drop(["Holdings/ agricultural area", "ISO3"])
+                .replace("..", "0")
+                .astype(np.int64)
+            )
+            agricultural_area_db_ha = (
+                country_farm_sizes.loc[
+                    country_farm_sizes["Holdings/ agricultural area"]
+                    == "Agricultural area (Ha) "
+                ]
+                .iloc[0]
+                .drop(["Holdings/ agricultural area", "ISO3"])
+                .replace("..", "0")
+                .astype(np.int64)
+            )
             agricultural_area_db = agricultural_area_db_ha * 10000
             avg_size_class = agricultural_area_db / n_holdings
-            
+
             total_cultivated_land_area_db = agricultural_area_db.sum()
 
             n_cells_per_size_class = pd.Series(0, index=n_holdings.index)
 
             for size_class in agricultural_area_db.index:
                 if n_holdings[size_class] > 0:  # if no holdings, no need to calculate
-                    n_holdings[size_class] = n_holdings[size_class] * (total_cultivated_land_area_lu / total_cultivated_land_area_db)
-                    n_cells_per_size_class.loc[size_class] = n_holdings[size_class] * avg_size_class[size_class] / average_cell_area_region
+                    n_holdings[size_class] = n_holdings[size_class] * (
+                        total_cultivated_land_area_lu / total_cultivated_land_area_db
+                    )
+                    n_cells_per_size_class.loc[size_class] = (
+                        n_holdings[size_class]
+                        * avg_size_class[size_class]
+                        / average_cell_area_region
+                    )
                     assert not np.isnan(n_cells_per_size_class.loc[size_class])
 
-            assert math.isclose(cultivated_land_region_total_cells, n_cells_per_size_class.sum())
-            
+            assert math.isclose(
+                cultivated_land_region_total_cells, n_cells_per_size_class.sum()
+            )
+
             whole_cells_per_size_class = (n_cells_per_size_class // 1).astype(int)
             leftover_cells_per_size_class = n_cells_per_size_class % 1
             whole_cells = whole_cells_per_size_class.sum()
             n_missing_cells = cultivated_land_region_total_cells - whole_cells
             assert n_missing_cells <= len(agricultural_area_db)
 
-            index = list(zip(leftover_cells_per_size_class.index, leftover_cells_per_size_class % 1))
-            n_cells_to_add = sorted(index, key=lambda x: x[1], reverse=True)[:n_missing_cells.compute().item()]
+            index = list(
+                zip(
+                    leftover_cells_per_size_class.index,
+                    leftover_cells_per_size_class % 1,
+                )
+            )
+            n_cells_to_add = sorted(index, key=lambda x: x[1], reverse=True)[
+                : n_missing_cells.compute().item()
+            ]
             whole_cells_per_size_class.loc[[p[0] for p in n_cells_to_add]] += 1
 
             region_agents = []
             for size_class in whole_cells_per_size_class.index:
-                
                 # if no cells for this size class, just continue
                 if whole_cells_per_size_class.loc[size_class] == 0:
                     continue
 
-                number_of_agents_size_class = round(n_holdings[size_class].compute().item())
+                number_of_agents_size_class = round(
+                    n_holdings[size_class].compute().item()
+                )
                 # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
-                if number_of_agents_size_class == 0 and whole_cells_per_size_class[size_class] > 0:
+                if (
+                    number_of_agents_size_class == 0
+                    and whole_cells_per_size_class[size_class] > 0
+                ):
                     number_of_agents_size_class = 1
-                
+
                 min_size_m2, max_size_m2 = SIZE_CLASSES_BOUNDARIES[size_class]
                 if max_size_m2 == np.inf:
                     max_size_m2 = avg_size_class[size_class] * 2
 
                 min_size_cells = int(min_size_m2 / average_cell_area_region)
-                min_size_cells = max(min_size_cells, 1)  # farm can never be smaller than one cell
-                max_size_cells = int(max_size_m2 / average_cell_area_region) - 1  # otherwise they overlap with next size class
-                mean_cells_per_agent = int(avg_size_class[size_class] / average_cell_area_region)
+                min_size_cells = max(
+                    min_size_cells, 1
+                )  # farm can never be smaller than one cell
+                max_size_cells = (
+                    int(max_size_m2 / average_cell_area_region) - 1
+                )  # otherwise they overlap with next size class
+                mean_cells_per_agent = int(
+                    avg_size_class[size_class] / average_cell_area_region
+                )
 
-                if mean_cells_per_agent < min_size_cells or mean_cells_per_agent > max_size_cells:  # there must be an error in the data, thus assume centred
+                if (
+                    mean_cells_per_agent < min_size_cells
+                    or mean_cells_per_agent > max_size_cells
+                ):  # there must be an error in the data, thus assume centred
                     mean_cells_per_agent = (min_size_cells + max_size_cells) // 2
 
                 population = pd.DataFrame(index=range(number_of_agents_size_class))
-                
-                offset = whole_cells_per_size_class[size_class] - number_of_agents_size_class * mean_cells_per_agent
 
-                if number_of_agents_size_class * mean_cells_per_agent + offset < min_size_cells * number_of_agents_size_class:
-                    min_size_cells = (number_of_agents_size_class * mean_cells_per_agent + offset) // number_of_agents_size_class
-                if number_of_agents_size_class * mean_cells_per_agent + offset > max_size_cells * number_of_agents_size_class:
-                    max_size_cells = (number_of_agents_size_class * mean_cells_per_agent + offset) // number_of_agents_size_class + 1
+                offset = (
+                    whole_cells_per_size_class[size_class]
+                    - number_of_agents_size_class * mean_cells_per_agent
+                )
 
-                n_farms_size_class, farm_sizes_size_class = get_farm_distribution(number_of_agents_size_class, min_size_cells, max_size_cells, mean_cells_per_agent, offset, self.logger)
+                if (
+                    number_of_agents_size_class * mean_cells_per_agent + offset
+                    < min_size_cells * number_of_agents_size_class
+                ):
+                    min_size_cells = (
+                        number_of_agents_size_class * mean_cells_per_agent + offset
+                    ) // number_of_agents_size_class
+                if (
+                    number_of_agents_size_class * mean_cells_per_agent + offset
+                    > max_size_cells * number_of_agents_size_class
+                ):
+                    max_size_cells = (
+                        number_of_agents_size_class * mean_cells_per_agent + offset
+                    ) // number_of_agents_size_class + 1
+
+                n_farms_size_class, farm_sizes_size_class = get_farm_distribution(
+                    number_of_agents_size_class,
+                    min_size_cells,
+                    max_size_cells,
+                    mean_cells_per_agent,
+                    offset,
+                    self.logger,
+                )
                 assert n_farms_size_class.sum() == number_of_agents_size_class
                 assert (farm_sizes_size_class > 0).all()
-                assert (n_farms_size_class * farm_sizes_size_class).sum() == whole_cells_per_size_class[size_class]
+                assert (
+                    n_farms_size_class * farm_sizes_size_class
+                ).sum() == whole_cells_per_size_class[size_class]
                 farm_sizes = farm_sizes_size_class.repeat(n_farms_size_class)
                 np.random.shuffle(farm_sizes)
-                population['area_n_cells'] = farm_sizes
+                population["area_n_cells"] = farm_sizes
                 region_agents.append(population)
 
-                assert population['area_n_cells'].sum() == whole_cells_per_size_class[size_class]
+                assert (
+                    population["area_n_cells"].sum()
+                    == whole_cells_per_size_class[size_class]
+                )
 
             region_agents = pd.concat(region_agents, ignore_index=True)
-            region_agents['region_id'] = UID
+            region_agents["region_id"] = UID
             all_agents.append(region_agents)
 
         farmers = pd.concat(all_agents, ignore_index=True)
         # randomly sample from crops
         for season in (1, 2, 3):
-            if crop_choices[f'season_#{season}'] == 'random':        
-                farmers[f'season_#{season}_crop'] = random.choices(list(self.dict['crops/crop_ids'].values()), k=len(farmers))
+            if crop_choices[f"season_#{season}"] == "random":
+                farmers[f"season_#{season}_crop"] = random.choices(
+                    list(self.dict["crops/crop_ids"].values()), k=len(farmers)
+                )
             else:
-                farmers[f'season_#{season}_crop'] = np.full(len(farmers), crop_choices[f'season_#{season}'], dtype=np.int32)
+                farmers[f"season_#{season}_crop"] = np.full(
+                    len(farmers), crop_choices[f"season_#{season}"], dtype=np.int32
+                )
 
-        if irrigation_choice == 'random':
+        if irrigation_choice == "random":
             # randomly sample from irrigation sources
-            farmers['irrigation_source'] = random.choices(list(irrigation_sources.keys()), k=len(farmers))
+            farmers["irrigation_source"] = random.choices(
+                list(irrigation_sources.keys()), k=len(farmers)
+            )
         else:
-            farmers['irrigation_source'] = irrigation_choice
+            farmers["irrigation_source"] = irrigation_choice
 
-        farmers['household_size'] = random.choices([1, 2, 3, 4, 5, 6, 7], k=len(farmers))
+        farmers["household_size"] = random.choices(
+            [1, 2, 3, 4, 5, 6, 7], k=len(farmers)
+        )
 
-        farmers['daily_non_farm_income_family'] = random.choices([50, 100, 200, 500], k=len(farmers))
-        farmers['daily_consumption_per_capita'] = random.choices([50, 100, 200, 500], k=len(farmers))
-        farmers['risk_aversion'] = np.random.normal(loc=risk_aversion_mean, scale=risk_aversion_standard_deviation, size=len(farmers))
+        farmers["daily_non_farm_income_family"] = random.choices(
+            [50, 100, 200, 500], k=len(farmers)
+        )
+        farmers["daily_consumption_per_capita"] = random.choices(
+            [50, 100, 200, 500], k=len(farmers)
+        )
+        farmers["risk_aversion"] = np.random.normal(
+            loc=risk_aversion_mean,
+            scale=risk_aversion_standard_deviation,
+            size=len(farmers),
+        )
 
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def setup_population(self):
-        populaton_map = self.data_catalog.get_rasterdataset('ghs_pop_2020_54009_v2023a', bbox=self.bounds)
+        populaton_map = self.data_catalog.get_rasterdataset(
+            "ghs_pop_2020_54009_v2023a", bbox=self.bounds
+        )
         populaton_map_values = np.round(populaton_map.values).astype(np.int32)
         populaton_map_values[populaton_map_values < 0] = 0  # -200 is nodata value
 
         locations, sizes = generate_locations(
             population=populaton_map_values,
             geotransform=populaton_map.raster.transform.to_gdal(),
-            mean_household_size=5
+            mean_household_size=5,
         )
 
-        transformer = pyproj.Transformer.from_crs(populaton_map.raster.crs, self.epsg, always_xy=True)
-        locations[:, 0], locations[:, 1] = transformer.transform(locations[:, 0], locations[:, 1])
+        transformer = pyproj.Transformer.from_crs(
+            populaton_map.raster.crs, self.epsg, always_xy=True
+        )
+        locations[:, 0], locations[:, 1] = transformer.transform(
+            locations[:, 0], locations[:, 1]
+        )
 
         # sample_locatons = locations[::10]
         # import matplotlib.pyplot as plt
@@ -2271,23 +3047,34 @@ class GEBModel(GridModel):
         # plt.scatter(sample_locatons[:, 0], sample_locatons[:, 1], c=z, s=100)
         # plt.savefig('population.png')
 
-        self.set_binary(sizes, name='agents/households/sizes')
-        self.set_binary(locations, name='agents/households/locations')
+        self.set_binary(sizes, name="agents/households/sizes")
+        self.set_binary(locations, name="agents/households/locations")
 
         return None
 
-    def interpolate(self, ds, interpolation_method, ydim='y', xdim='x'):
+    def interpolate(self, ds, interpolation_method, ydim="y", xdim="x"):
         out_ds = ds.interp(
             method=interpolation_method,
             **{
-                ydim: self.grid.y.rename({'y': ydim}),
-                xdim: self.grid.x.rename({'x': xdim})
-            }
+                ydim: self.grid.y.rename({"y": ydim}),
+                xdim: self.grid.x.rename({"x": xdim}),
+            },
         )
         assert len(ds.dims) == len(out_ds.dims)
         return out_ds
 
-    def download_isimip(self, product, variable, forcing, starttime=None, endtime=None, simulation_round='ISIMIP3a', climate_scenario='obsclim', resolution=None, buffer=0):
+    def download_isimip(
+        self,
+        product,
+        variable,
+        forcing,
+        starttime=None,
+        endtime=None,
+        simulation_round="ISIMIP3a",
+        climate_scenario="obsclim",
+        resolution=None,
+        buffer=0,
+    ):
         """
         Downloads ISIMIP climate data for GEB.
 
@@ -2325,11 +3112,13 @@ class GEBModel(GridModel):
         """
         # if starttime is specified, endtime must be specified as well
         assert (starttime is None) == (endtime is None)
-        
+
         client = ISIMIPClient()
-        download_path = Path(self.root).parent / 'preprocessing' / 'climate' / forcing / variable
+        download_path = (
+            Path(self.root).parent / "preprocessing" / "climate" / forcing / variable
+        )
         download_path.mkdir(parents=True, exist_ok=True)
-        
+
         ## Code to get data from disk rather than server.
         # parse_files = []
         # for file in os.listdir(download_path):
@@ -2348,7 +3137,7 @@ class GEBModel(GridModel):
         )
         assert len(response["results"]) == 1
         dataset = response["results"][0]
-        files = dataset['files']
+        files = dataset["files"]
 
         xmin, ymin, xmax, ymax = self.bounds
         xmin -= buffer
@@ -2356,42 +3145,48 @@ class GEBModel(GridModel):
         xmax += buffer
         ymax += buffer
 
-        if variable == 'orog':
+        if variable == "orog":
             assert len(files) == 1
-            filename = files[0]['name'] # global should be included due to error in ISIMIP API .replace('_global', '') 
+            filename = files[0][
+                "name"
+            ]  # global should be included due to error in ISIMIP API .replace('_global', '')
             parse_files = [filename]
             if not (download_path / filename).exists():
-                download_files = [files[0]['path']]
+                download_files = [files[0]["path"]]
             else:
                 download_files = []
-                
+
         else:
             assert starttime is not None and endtime is not None
             download_files = []
             parse_files = []
             for file in files:
-                name = file['name']
-                assert name.endswith('.nc')
-                splitted_filename = name.split('_')
-                date = splitted_filename[-1].split('.')[0]
-                if '-' in date:
-                    start_date, end_date = date.split('-')
-                    start_date = datetime.strptime(start_date, '%Y%m%d').date()
-                    end_date = datetime.strptime(end_date, '%Y%m%d').date()
+                name = file["name"]
+                assert name.endswith(".nc")
+                splitted_filename = name.split("_")
+                date = splitted_filename[-1].split(".")[0]
+                if "-" in date:
+                    start_date, end_date = date.split("-")
+                    start_date = datetime.strptime(start_date, "%Y%m%d").date()
+                    end_date = datetime.strptime(end_date, "%Y%m%d").date()
                 elif len(date) == 6:
-                    start_date = datetime.strptime(date, '%Y%m').date()
-                    end_date = start_date + relativedelta(months=1) - relativedelta(days=1)
+                    start_date = datetime.strptime(date, "%Y%m").date()
+                    end_date = (
+                        start_date + relativedelta(months=1) - relativedelta(days=1)
+                    )
                 elif len(date) == 4:  # is year
                     assert splitted_filename[-2].isdigit()
-                    start_date = datetime.strptime(splitted_filename[-2], '%Y').date()
-                    end_date = datetime.strptime(date, '%Y').date()
+                    start_date = datetime.strptime(splitted_filename[-2], "%Y").date()
+                    end_date = datetime.strptime(date, "%Y").date()
                 else:
-                    raise ValueError(f'could not parse date {date} from file {name}')
+                    raise ValueError(f"could not parse date {date} from file {name}")
 
                 if not (end_date < starttime or start_date > endtime):
-                    parse_files.append(file['name'].replace('_global', ''))
-                    if not (download_path / file['name'].replace('_global', '')).exists():
-                        download_files.append(file['path'])
+                    parse_files.append(file["name"].replace("_global", ""))
+                    if not (
+                        download_path / file["name"].replace("_global", "")
+                    ).exists():
+                        download_files.append(file["path"])
 
         if download_files:
             self.logger.info(f"Requesting download of {len(download_files)} files")
@@ -2399,125 +3194,160 @@ class GEBModel(GridModel):
                 try:
                     response = client.cutout(download_files, [ymin, ymax, xmin, xmax])
                 except requests.exceptions.HTTPError:
-                    self.logger.warning("HTTPError, could not download files, retrying in 60 seconds")
+                    self.logger.warning(
+                        "HTTPError, could not download files, retrying in 60 seconds"
+                    )
                 else:
-                    if response['status'] == 'finished':
+                    if response["status"] == "finished":
                         break
-                    elif response['status'] == 'started':
-                        self.logger.debug(f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server for {variable}, waiting 60 seconds before retrying")
-                    elif response['status'] == 'queued':
-                        self.logger.debug(f"Data preparation queued for {variable} on ISIMIP server, waiting 60 seconds before retrying")
-                    elif response['status'] == 'failed':
-                        self.logger.debug("ISIMIP internal server error, waiting 60 seconds before retrying")
+                    elif response["status"] == "started":
+                        self.logger.debug(
+                            f"{response['meta']['created_files']}/{response['meta']['total_files']} files prepared on ISIMIP server for {variable}, waiting 60 seconds before retrying"
+                        )
+                    elif response["status"] == "queued":
+                        self.logger.debug(
+                            f"Data preparation queued for {variable} on ISIMIP server, waiting 60 seconds before retrying"
+                        )
+                    elif response["status"] == "failed":
+                        self.logger.debug(
+                            "ISIMIP internal server error, waiting 60 seconds before retrying"
+                        )
                     else:
-                        raise ValueError(f"Could not download files: {response['status']}")
+                        raise ValueError(
+                            f"Could not download files: {response['status']}"
+                        )
                 time.sleep(60)
             self.logger.info(f"Starting download of files for {variable}")
             # download the file when it is ready
             client.download(
-                response['file_url'],
-                path=download_path,
-                validate=False,
-                extract=False
+                response["file_url"], path=download_path, validate=False, extract=False
             )
             self.logger.info(f"Download finished for {variable}")
             # remove zip file
-            zip_file = (download_path / Path(urlparse(response['file_url']).path.split('/')[-1]))
+            zip_file = download_path / Path(
+                urlparse(response["file_url"]).path.split("/")[-1]
+            )
             # make sure the file exists
             assert zip_file.exists()
             # Open the zip file
-            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            with zipfile.ZipFile(zip_file, "r") as zip_ref:
                 # Get a list of all the files in the zip file
-                file_list = [f for f in zip_ref.namelist() if f.endswith('.nc')]
+                file_list = [f for f in zip_ref.namelist() if f.endswith(".nc")]
                 # Extract each file one by one
                 for i, file_name in enumerate(file_list):
                     # Rename the file
-                    bounds_str = ''
+                    bounds_str = ""
                     if isinstance(ymin, float):
-                        bounds_str += f'_lat{ymin}'
+                        bounds_str += f"_lat{ymin}"
                     else:
-                        bounds_str += f'_lat{ymin:.1f}'
+                        bounds_str += f"_lat{ymin:.1f}"
                     if isinstance(ymax, float):
-                        bounds_str += f'to{ymax}'
+                        bounds_str += f"to{ymax}"
                     else:
-                        bounds_str += f'to{ymax:.1f}'
+                        bounds_str += f"to{ymax:.1f}"
                     if isinstance(xmin, float):
-                        bounds_str += f'lon{xmin}'
+                        bounds_str += f"lon{xmin}"
                     else:
-                        bounds_str += f'lon{xmin:.1f}'
+                        bounds_str += f"lon{xmin:.1f}"
                     if isinstance(xmax, float):
-                        bounds_str += f'to{xmax}'
+                        bounds_str += f"to{xmax}"
                     else:
-                        bounds_str += f'to{xmax:.1f}'
+                        bounds_str += f"to{xmax:.1f}"
                     assert bounds_str in file_name
-                    new_file_name = file_name.replace(bounds_str, '')
+                    new_file_name = file_name.replace(bounds_str, "")
                     zip_ref.getinfo(file_name).filename = new_file_name
                     # Extract the file
-                    if os.name == 'nt':
+                    if os.name == "nt":
                         max_file_path_length = 260
                     else:
-                        max_file_path_length = os.pathconf('/', 'PC_PATH_MAX')
-                    assert len(str(download_path / new_file_name)) <= max_file_path_length, f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
+                        max_file_path_length = os.pathconf("/", "PC_PATH_MAX")
+                    assert (
+                        len(str(download_path / new_file_name)) <= max_file_path_length
+                    ), f"File path too long: {download_path / zip_ref.getinfo(file_name).filename}"
                     zip_ref.extract(file_name, path=download_path)
             # remove zip file
-            (download_path / Path(urlparse(response['file_url']).path.split('/')[-1])).unlink()
-            
+            (
+                download_path / Path(urlparse(response["file_url"]).path.split("/")[-1])
+            ).unlink()
+
         datasets = [
-            xr.open_dataset(download_path / file, chunks={'time': 365}, lock=False)
+            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=False)
             for file in parse_files
         ]
 
         # make sure y is decreasing rather than increasing
         datasets = [
-            dataset.reindex(lat = dataset.lat[::-1]) if dataset.lat[0] < dataset.lat[-1] else dataset
-            for dataset in datasets   
+            dataset.reindex(lat=dataset.lat[::-1])
+            if dataset.lat[0] < dataset.lat[-1]
+            else dataset
+            for dataset in datasets
         ]
-        
+
         reference = datasets[0]
         for dataset in datasets:
             # make sure all datasets have more or less the same coordinates
-            assert np.isclose(dataset.coords['lat'].values, reference['lat'].values, atol=abs(datasets[0].rio.resolution()[1] / 50), rtol=0).all()
-            assert np.isclose(dataset.coords['lon'].values, reference['lon'].values, atol=abs(datasets[0].rio.resolution()[0] / 50), rtol=0).all()
+            assert np.isclose(
+                dataset.coords["lat"].values,
+                reference["lat"].values,
+                atol=abs(datasets[0].rio.resolution()[1] / 50),
+                rtol=0,
+            ).all()
+            assert np.isclose(
+                dataset.coords["lon"].values,
+                reference["lon"].values,
+                atol=abs(datasets[0].rio.resolution()[0] / 50),
+                rtol=0,
+            ).all()
 
         datasets = [
             ds.assign_coords(
-                lon=reference['lon'].values,
-                lat=reference['lat'].values,
-                inplace=True
-            ) for ds in datasets
+                lon=reference["lon"].values, lat=reference["lat"].values, inplace=True
+            )
+            for ds in datasets
         ]
         if len(datasets) > 1:
-            ds = xr.concat(datasets, dim='time')
+            ds = xr.concat(datasets, dim="time")
         else:
             ds = datasets[0]
-        
+
         if starttime is not None:
             ds = ds.sel(time=slice(starttime, endtime))
             # assert that time is monotonically increasing with a constant step size
-            assert (ds.time.diff('time').astype(np.int64) == (ds.time[1] - ds.time[0]).astype(np.int64)).all()
+            assert (
+                ds.time.diff("time").astype(np.int64)
+                == (ds.time[1] - ds.time[0]).astype(np.int64)
+            ).all()
 
-        ds.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)
+        ds.rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=True)
         assert not ds.lat.attrs, "lat already has attributes"
         assert not ds.lon.attrs, "lon already has attributes"
-        ds.lat.attrs = {'long_name': 'latitude of grid cell center', 'units': 'degrees_north'}
-        ds.lon.attrs = {'long_name': 'longitude of grid cell center', 'units': 'degrees_east'}
+        ds.lat.attrs = {
+            "long_name": "latitude of grid cell center",
+            "units": "degrees_north",
+        }
+        ds.lon.attrs = {
+            "long_name": "longitude of grid cell center",
+            "units": "degrees_east",
+        }
         ds = ds.rio.write_crs(4326).rio.write_coordinate_system()
 
         # check whether data is for noon or midnight. If noon, subtract 12 hours from time coordinate to align with other datasets
-        if hasattr(ds, 'time') and pd.to_datetime(ds.time[0].values).hour == 12:
+        if hasattr(ds, "time") and pd.to_datetime(ds.time[0].values).hour == 12:
             # subtract 12 hours from time coordinate
-            self.logger.warning("Subtracting 12 hours from time coordinate to align climate datasets")
-            ds = ds.assign_coords(time=ds.time - np.timedelta64(12, 'h'))
+            self.logger.warning(
+                "Subtracting 12 hours from time coordinate to align climate datasets"
+            )
+            ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
     def write_grid(self):
         self._assert_write_mode
         for var, grid in self.grid.items():
-            if self.is_updated['grid'][var]['updated']:
+            if self.is_updated["grid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure['grid'][var] = var + '.tif'
-                self.is_updated['grid'][var]['filename'] = var + '.tif'
-                fp = Path(self.root, var + '.tif')
+                self.model_structure["grid"][var] = var + ".tif"
+                self.is_updated["grid"][var]["filename"] = var + ".tif"
+                fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
@@ -2526,11 +3356,11 @@ class GEBModel(GridModel):
     def write_subgrid(self):
         self._assert_write_mode
         for var, grid in self.subgrid.items():
-            if self.is_updated['subgrid'][var]['updated']:
+            if self.is_updated["subgrid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure['subgrid'][var] = var + '.tif'
-                self.is_updated['subgrid'][var]['filename'] = var + '.tif'
-                fp = Path(self.root, var + '.tif')
+                self.model_structure["subgrid"][var] = var + ".tif"
+                self.is_updated["subgrid"][var]["filename"] = var + ".tif"
+                fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
@@ -2539,11 +3369,11 @@ class GEBModel(GridModel):
     def write_region_subgrid(self):
         self._assert_write_mode
         for var, grid in self.region_subgrid.items():
-            if self.is_updated['region_subgrid'][var]['updated']:
+            if self.is_updated["region_subgrid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure['region_subgrid'][var] = var + '.tif'
-                self.is_updated['region_subgrid'][var]['filename'] = var + '.tif'
-                fp = Path(self.root, var + '.tif')
+                self.model_structure["region_subgrid"][var] = var + ".tif"
+                self.is_updated["region_subgrid"][var]["filename"] = var + ".tif"
+                fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
@@ -2552,11 +3382,11 @@ class GEBModel(GridModel):
     def write_MERIT_grid(self):
         self._assert_write_mode
         for var, grid in self.MERIT_grid.items():
-            if self.is_updated['MERIT_grid'][var]['updated']:
+            if self.is_updated["MERIT_grid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure['MERIT_grid'][var] = var + '.tif'
-                self.is_updated['MERIT_grid'][var]['filename'] = var + '.tif'
-                fp = Path(self.root, var + '.tif')
+                self.model_structure["MERIT_grid"][var] = var + ".tif"
+                self.is_updated["MERIT_grid"][var]["filename"] = var + ".tif"
+                fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
@@ -2565,11 +3395,11 @@ class GEBModel(GridModel):
     def write_MODFLOW_grid(self):
         self._assert_write_mode
         for var, grid in self.MODFLOW_grid.items():
-            if self.is_updated['MODFLOW_grid'][var]['updated']:
+            if self.is_updated["MODFLOW_grid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure['MODFLOW_grid'][var] = var + '.tif'
-                self.is_updated['MODFLOW_grid'][var]['filename'] = var + '.tif'
-                fp = Path(self.root, var + '.tif')
+                self.model_structure["MODFLOW_grid"][var] = var + ".tif"
+                self.is_updated["MODFLOW_grid"][var]["filename"] = var + ".tif"
+                fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
             else:
@@ -2580,16 +3410,27 @@ class GEBModel(GridModel):
         self.logger.info("Write forcing files")
         for var in self.forcing:
             forcing = self.forcing[var]
-            if self.is_updated['forcing'][var]['updated']:
+            if self.is_updated["forcing"][var]["updated"]:
                 self.logger.info(f"Write {var}")
-                fn = var + '.nc'
-                self.model_structure['forcing'][var] = fn
-                self.is_updated['forcing'][var]['filename'] = fn
+                fn = var + ".nc"
+                self.model_structure["forcing"][var] = fn
+                self.is_updated["forcing"][var]["filename"] = fn
                 fp = Path(self.root, fn)
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
                 with ProgressBar():
-                    forcing.to_netcdf(fp, mode='w', engine="netcdf4", encoding={forcing.name: {'chunksizes': (1, forcing.y.size, forcing.x.size), "zlib": True, "complevel": 9}})
+                    forcing.to_netcdf(
+                        fp,
+                        mode="w",
+                        engine="netcdf4",
+                        encoding={
+                            forcing.name: {
+                                "chunksizes": (1, forcing.y.size, forcing.x.size),
+                                "zlib": True,
+                                "complevel": 9,
+                            }
+                        },
+                    )
             else:
                 self.logger.info(f"Skip {var}")
 
@@ -2599,11 +3440,11 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             for name, data in self.table.items():
-                if self.is_updated['table'][name]['updated']:
-                    fn = os.path.join(name + '.csv')
+                if self.is_updated["table"][name]["updated"]:
+                    fn = os.path.join(name + ".csv")
                     self.logger.debug(f"Writing file {fn}")
-                    self.model_structure['table'][name] = fn
-                    self.is_updated['table'][name]['filename'] = fn
+                    self.model_structure["table"][name] = fn
+                    self.is_updated["table"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     fp = Path(self.root, fn)
                     fp.parent.mkdir(parents=True, exist_ok=True)
@@ -2617,11 +3458,11 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             for name, data in self.binary.items():
-                if self.is_updated['binary'][name]['updated']:
-                    fn = os.path.join(name + '.npz')
+                if self.is_updated["binary"][name]["updated"]:
+                    fn = os.path.join(name + ".npz")
                     self.logger.debug(f"Writing file {fn}")
-                    self.model_structure['binary'][name] = fn
-                    self.is_updated['binary'][name]['filename'] = fn
+                    self.model_structure["binary"][name] = fn
+                    self.is_updated["binary"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     fp = Path(self.root, fn)
                     fp.parent.mkdir(parents=True, exist_ok=True)
@@ -2630,7 +3471,6 @@ class GEBModel(GridModel):
                     self.logger.debug(f"Skip {name}")
 
     def write_dict(self):
-
         def convert_timestamp_to_string(timestamp):
             return timestamp.isoformat()
 
@@ -2639,14 +3479,14 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             for name, data in self.dict.items():
-                if self.is_updated['dict'][name]['updated']:
-                    fn = os.path.join(name + '.json')
-                    self.model_structure['dict'][name] = fn
-                    self.is_updated['dict'][name]['filename'] = fn
+                if self.is_updated["dict"][name]["updated"]:
+                    fn = os.path.join(name + ".json")
+                    self.model_structure["dict"][name] = fn
+                    self.is_updated["dict"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     output_path = Path(self.root) / fn
                     output_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(output_path, 'w') as f:
+                    with open(output_path, "w") as f:
                         json.dump(data, f, default=convert_timestamp_to_string)
                 else:
                     self.logger.debug(f"Skip {name}")
@@ -2670,27 +3510,27 @@ class GEBModel(GridModel):
             if "driver" not in kwargs:
                 kwargs.update(driver="GeoJSON")
             for name, gdf in self._geoms.items():
-                if self.is_updated['geoms'][name]['updated']:
+                if self.is_updated["geoms"][name]["updated"]:
                     self.logger.debug(f"Writing file {fn.format(name=name)}")
                     self.model_structure["geoms"][name] = fn.format(name=name)
                     _fn = os.path.join(self.root, fn.format(name=name))
                     if not os.path.isdir(os.path.dirname(_fn)):
                         os.makedirs(os.path.dirname(_fn))
-                    self.is_updated['geoms'][name]['filename'] = _fn
+                    self.is_updated["geoms"][name]["filename"] = _fn
                     gdf.to_file(_fn, **kwargs)
                 else:
                     self.logger.debug(f"Skip {name}")
 
     def set_table(self, table, name, update=True):
-        self.is_updated['table'][name] = {'updated': update}
+        self.is_updated["table"][name] = {"updated": update}
         self.table[name] = table
 
     def set_binary(self, data, name, update=True):
-        self.is_updated['binary'][name] = {'updated': update}
+        self.is_updated["binary"][name] = {"updated": update}
         self.binary[name] = data
 
     def set_dict(self, data, name, update=True):
-        self.is_updated['dict'][name] = {'updated': update}
+        self.is_updated["dict"][name] = {"updated": update}
         self.dict[name] = data
 
     def write_model_structure(self):
@@ -2714,7 +3554,9 @@ class GEBModel(GridModel):
         self.write_model_structure()
 
     def read_model_structure(self):
-        model_structure_is_empty = all(len(v) == 0 for v in self.model_structure.values())
+        model_structure_is_empty = all(
+            len(v) == 0 for v in self.model_structure.values()
+        )
         if model_structure_is_empty:
             with open(Path(self.root, "model_structure.json"), "r") as f:
                 self.model_structure = json.load(f)
@@ -2730,7 +3572,7 @@ class GEBModel(GridModel):
         for name, fn in self.model_structure["binary"].items():
             binary = np.load(Path(self.root, fn))["data"]
             self.set_binary(binary, name=name, update=False)
-    
+
     def read_table(self):
         self.read_model_structure()
         for name, fn in self.model_structure["table"].items():
@@ -2745,67 +3587,77 @@ class GEBModel(GridModel):
             self.set_dict(d, name=name, update=False)
 
     def read_netcdf(self, fn: str, name: str) -> xr.Dataset:
-        with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename({'band_data': name}) as da:
-            if fn.endswith('.tif') and 'band' in da.dims and da.band.size == 1:
+        with xr.load_dataset(Path(self.root) / fn, decode_cf=False).rename(
+            {"band_data": name}
+        ) as da:
+            if fn.endswith(".tif") and "band" in da.dims and da.band.size == 1:
                 da = da.sel(band=1)
-            if fn.endswith('.tif'):
-                da.x.attrs = {'long_name': 'latitude of grid cell center', 'units': 'degrees_north'}
-                da.y.attrs = {'long_name': 'longitude of grid cell center', 'units': 'degrees_east'}
+            if fn.endswith(".tif"):
+                da.x.attrs = {
+                    "long_name": "latitude of grid cell center",
+                    "units": "degrees_north",
+                }
+                da.y.attrs = {
+                    "long_name": "longitude of grid cell center",
+                    "units": "degrees_east",
+                }
             return da
 
     def read_grid(self) -> None:
-        for name, fn in self.model_structure['grid'].items():
+        for name, fn in self.model_structure["grid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_grid(data, name=name, update=False)
 
     def read_subgrid(self) -> None:
-        for name, fn in self.model_structure['subgrid'].items():
+        for name, fn in self.model_structure["subgrid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_subgrid(data, name=name, update=False)
 
     def read_region_subgrid(self) -> None:
-        for name, fn in self.model_structure['region_subgrid'].items():
+        for name, fn in self.model_structure["region_subgrid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_region_subgrid(data, name=name, update=False)
 
     def read_MERIT_grid(self) -> None:
-        for name, fn in self.model_structure['MERIT_grid'].items():
+        for name, fn in self.model_structure["MERIT_grid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_MERIT_grid(data, name=name, update=False)
-    
+
     def read_MODFLOW_grid(self) -> None:
-        for name, fn in self.model_structure['MODFLOW_grid'].items():
+        for name, fn in self.model_structure["MODFLOW_grid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_MODFLOW_grid(data, name=name, update=False)
 
     def read_forcing(self) -> None:
         self.read_model_structure()
-        for name, fn in self.model_structure['forcing'].items():
-            with xr.open_dataset(Path(self.root) / fn, chunks={'time': 365}, lock=False)[name.split('/')[-1]] as da:
+        for name, fn in self.model_structure["forcing"].items():
+            with xr.open_dataset(
+                Path(self.root) / fn, chunks={"time": 365}, lock=False
+            )[name.split("/")[-1]] as da:
                 self.set_forcing(da, name=name, update=False)
 
     def read(self):
         self.read_model_structure()
-        
+
         self.read_geoms()
         self.read_binary()
         self.read_table()
         self.read_dict()
-        
+
         self.read_grid()
         self.read_subgrid()
         self.read_region_subgrid()
         self.read_MERIT_grid()
         self.read_MODFLOW_grid()
-        
+
         self.read_forcing()
 
     def set_geoms(self, geoms, name, update=True):
-        self.is_updated['geoms'][name] = {'updated': update}
+        self.is_updated["geoms"][name] = {"updated": update}
         super().set_geoms(geoms, name=name)
 
     def set_forcing(self, data, name: str, update=True, *args, **kwargs):
-        self.is_updated['forcing'][name] = {'updated': update}
+        self.is_updated["forcing"][name] = {"updated": update}
         super().set_forcing(data, name=name, *args, **kwargs)
 
     def _set_grid(
@@ -2855,24 +3707,34 @@ class GEBModel(GridModel):
                 grid[dvar] = data[dvar]
         return grid
 
-    def set_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
-        self.is_updated['grid'][name] = {'updated': update}
+    def set_grid(
+        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
+    ) -> None:
+        self.is_updated["grid"][name] = {"updated": update}
         super().set_grid(data, name=name)
 
-    def set_subgrid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
-        self.is_updated['subgrid'][name] = {'updated': update}
+    def set_subgrid(
+        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
+    ) -> None:
+        self.is_updated["subgrid"][name] = {"updated": update}
         self._set_grid(self.subgrid, data, name=name)
 
-    def set_region_subgrid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
-        self.is_updated['region_subgrid'][name] = {'updated': update}
+    def set_region_subgrid(
+        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
+    ) -> None:
+        self.is_updated["region_subgrid"][name] = {"updated": update}
         self._set_grid(self.region_subgrid, data, name=name)
 
-    def set_MERIT_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
-        self.is_updated['MERIT_grid'][name] = {'updated': update}
+    def set_MERIT_grid(
+        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
+    ) -> None:
+        self.is_updated["MERIT_grid"][name] = {"updated": update}
         self._set_grid(self.MERIT_grid, data, name=name)
 
-    def set_MODFLOW_grid(self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True) -> None:
-        self.is_updated['MODFLOW_grid'][name] = {'updated': update}
+    def set_MODFLOW_grid(
+        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
+    ) -> None:
+        self.is_updated["MODFLOW_grid"][name] = {"updated": update}
         self._set_grid(self.MODFLOW_grid, data, name=name)
 
     def set_alternate_root(self, root, mode):
@@ -2884,6 +3746,6 @@ class GEBModel(GridModel):
 
     @property
     def subgrid_factor(self):
-        subgrid_factor = self.subgrid.dims['x'] // self.grid.dims['x']
-        assert subgrid_factor == self.subgrid.dims['y'] // self.grid.dims['y']
+        subgrid_factor = self.subgrid.dims["x"] // self.grid.dims["x"]
+        assert subgrid_factor == self.subgrid.dims["y"] // self.grid.dims["y"]
         return subgrid_factor

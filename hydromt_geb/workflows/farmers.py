@@ -4,6 +4,7 @@ import warnings
 from random import random
 from numba import njit
 
+
 @njit(cache=True)
 def create_farms_numba(cultivated_land, ids, farm_sizes):
     """
@@ -34,18 +35,21 @@ def create_farms_numba(cultivated_land, ids, farm_sizes):
             f = farms[y, x]
             if f == -1:
                 assert farm_size > 0
-                                
+
                 xmin, xmax, ymin, ymax = 1e6, -1e6, 1e6, -1e6
-                xlow, xhigh, ylow, yhigh = x, x+1, y, y+1
+                xlow, xhigh, ylow, yhigh = x, x + 1, y, y + 1
 
                 xsearch, ysearch = 0, 0
-                
+
                 while True:
-                    if not np.count_nonzero(farms[ylow:yhigh+1+ysearch, xlow:xhigh+1+xsearch] == -1):
+                    if not np.count_nonzero(
+                        farms[ylow : yhigh + 1 + ysearch, xlow : xhigh + 1 + xsearch]
+                        == -1
+                    ):
                         break
 
-                    for yf in range(ylow, yhigh+1):
-                        for xf in range(xlow, xhigh+1):
+                    for yf in range(ylow, yhigh + 1):
+                        for xf in range(xlow, xhigh + 1):
                             if xf < xsize and yf < ysize and farms[yf, xf] == -1:
                                 if xf > xmax:
                                     xmax = xf
@@ -61,7 +65,7 @@ def create_farms_numba(cultivated_land, ids, farm_sizes):
                                     cur_farm_size = 0
                                     farm_done = True
                                     break
-                        
+
                         if farm_done is True:
                             break
 
@@ -69,10 +73,10 @@ def create_farms_numba(cultivated_land, ids, farm_sizes):
                         break
 
                     if random() < 0.5:
-                        ylow -=1
+                        ylow -= 1
                         ysearch = 1
                     else:
-                        yhigh +=1
+                        yhigh += 1
                         ysearch = 0
 
                     if random() < 0.5:
@@ -92,7 +96,12 @@ def create_farms_numba(cultivated_land, ids, farm_sizes):
     farms = np.where(farms != -2, farms, -1)
     return farms
 
-def create_farms(agents: pd.DataFrame, cultivated_land_tehsil: np.ndarray, farm_size_key='farm_size_n_cells') -> np.ndarray:
+
+def create_farms(
+    agents: pd.DataFrame,
+    cultivated_land_tehsil: np.ndarray,
+    farm_size_key="farm_size_n_cells",
+) -> np.ndarray:
     assert cultivated_land_tehsil.sum().compute().item() == agents[farm_size_key].sum()
 
     agents = agents.sample(frac=1)
@@ -107,8 +116,9 @@ def create_farms(agents: pd.DataFrame, cultivated_land_tehsil: np.ndarray, farm_
     assert unique_farms.size == len(agents)
     assert agents[farm_size_key].sum() == np.count_nonzero(farms != -1)
     assert ((farms >= 0) == (cultivated_land_tehsil == 1)).all()
-    
+
     return farms
+
 
 def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
     target_area = n * mean + offset
@@ -127,27 +137,27 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
     leftover_estimate = estimate % 1
     for i in range(len(leftover_estimate)):
         v = leftover_estimate[i]
-        if v > .5:
+        if v > 0.5:
             extra[i] += 1
             if i < len(leftover_estimate) - 1:
-                leftover_estimate[i+1] -= (1 - v) / farm_sizes[i+1] * farm_sizes[i]
+                leftover_estimate[i + 1] -= (1 - v) / farm_sizes[i + 1] * farm_sizes[i]
         else:
             if i < len(leftover_estimate) - 1:
-                leftover_estimate[i+1] += v / farm_sizes[i+1] * farm_sizes[i]
-    
+                leftover_estimate[i + 1] += v / farm_sizes[i + 1] * farm_sizes[i]
+
     n_farms = n_farms + extra
     if n_farms.sum() != n:
         difference = n - n_farms.sum()
         n_farms[np.argmax(farm_sizes == mean)] += difference
 
     assert n_farms.sum() == n
-    
+
     estimated_area_int = (n_farms * farm_sizes).sum()
-    
+
     if estimated_area_int == target_area:
         assert n_farms.sum() == n
         return n_farms, farm_sizes
-    
+
     elif abs(estimated_area_int - target_area) < farm_sizes.size:
         while True:
             difference = target_area - estimated_area_int
@@ -159,15 +169,15 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
                             farm_sizes = np.append(farm_sizes, farm_sizes[i] + 1)
                             n_farms = np.append(n_farms, 1)
                         else:
-                            n_farms[min(i+difference, len(n_farms)-1)] += 1
+                            n_farms[min(i + difference, len(n_farms) - 1)] += 1
                         break
                 assert n_farms.sum() == n
             else:
                 assert n_farms.sum() == n
-                for i in range(len(n_farms)-1, -1, -1):
+                for i in range(len(n_farms) - 1, -1, -1):
                     if n_farms[i] > 0:
                         n_farms[i] -= 1
-                        n_farms[max(i+difference, 0)] += 1
+                        n_farms[max(i + difference, 0)] += 1
                         break
                 assert n_farms.sum() == n
             estimated_area_int = (n_farms * farm_sizes).sum()
@@ -177,39 +187,50 @@ def fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset):
                 n_farms[0] -= 1
                 n_farms = np.insert(n_farms, 0, 1)
                 assert n_farms.sum() == n
-                farm_sizes = np.insert(farm_sizes, 0, max(farm_sizes[0] + target_area - estimated_area_int, 0))
+                farm_sizes = np.insert(
+                    farm_sizes,
+                    0,
+                    max(farm_sizes[0] + target_area - estimated_area_int, 0),
+                )
                 break
         assert n_farms.sum() == n
         return n_farms, farm_sizes
 
     else:
-        raise Exception(f"Could not fit {n} farmers with mean {mean} and offset {offset}.")
+        raise Exception(
+            f"Could not fit {n} farmers with mean {mean} and offset {offset}."
+        )
+
 
 def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
-    assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
+    assert (
+        x0 * n <= n * mean + offset <= x1 * n
+    ), f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
 
     target_area = n * mean + offset
-    
+
     # when the number of farms is very small, it is sometimes difficult to find a solution. This becomes easier when the number of possible farm sizes is reduced.
     smallest_possible_farm = x1 - (n * x1 - target_area)
     x0 = max(x0, smallest_possible_farm)
 
     largest_possible_farm = x0 + (target_area - n * x0)
     x1 = min(x1, largest_possible_farm)
-    assert x0 * n <= n * mean + offset <= x1 * n, f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
+    assert (
+        x0 * n <= n * mean + offset <= x1 * n
+    ), f"There is no solution for this problem. The total farm size (incl. offset) is larger or smaller than possible with min (x0) and max (x1) farm size. n: {n}, x0: {x0}, x1: {x1}, mean: {mean}, offset: {offset}"  # make sure there is a solution to the problem.
 
-    farm_sizes = np.arange(x0, x1+1)
+    farm_sizes = np.arange(x0, x1 + 1)
     n_farm_sizes = farm_sizes.size
 
     if n == 0:
         n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
         assert target_area == (n_farms * farm_sizes).sum()
-    
+
     elif n == 1:
         farm_sizes = np.array([mean + offset])
         n_farms = np.array([1])
         assert target_area == (n_farms * farm_sizes).sum()
-    
+
     # elif mean == x0:
     #     n_farms = np.zeros(n_farm_sizes, dtype=np.int32)
     #     n_farms[0] = n
@@ -241,7 +262,7 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
     #         farm_sizes = np.insert(farm_sizes, 0, farm_sizes[-1] + offset)
     #         assert (farm_sizes > 0).all()
     #     assert target_area == (n_farms * farm_sizes).sum()
-    
+
     else:
         growth_factor = 1
 
@@ -251,27 +272,33 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
                 estimate = np.zeros(n_farm_sizes, dtype=np.float64)
                 estimate[0] = 1
                 for i in range(1, estimate.size):
-                    estimate[i] = estimate[i-1] * growth_factor
-                estimate /= (estimate.sum() / n)
-            
+                    estimate[i] = estimate[i - 1] * growth_factor
+                estimate /= estimate.sum() / n
+
             # when there are only some farms at the top of the farm size distribution, the growth factor can become very large and the estimate can become very small.
             # is can lead to NaNs in the estimate. In this case we can start from the top of the farm size distribution.
             if np.isnan(estimate).any() or not start_from_bottom:
-                if start_from_bottom: # reset growth factor, but only first time this code is run
+                if (
+                    start_from_bottom
+                ):  # reset growth factor, but only first time this code is run
                     start_from_bottom = False
                     growth_factor = 1
                 if logger is not None:
-                    logger.warning(f"estimate contains NaNs; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}, start from the top")
+                    logger.warning(
+                        f"estimate contains NaNs; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}, start from the top"
+                    )
                 estimate = np.zeros(n_farm_sizes, dtype=np.float64)
                 estimate[-1] = 1
-                for i in range(estimate.size-2, -1, -1):
-                    estimate[i] = estimate[i+1] * growth_factor
-                estimate /= (estimate.sum() / n)
-            
-            assert (estimate >= 0).all(), f"Some numbers are negative; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}"
+                for i in range(estimate.size - 2, -1, -1):
+                    estimate[i] = estimate[i + 1] * growth_factor
+                estimate /= estimate.sum() / n
+
+            assert (
+                estimate >= 0
+            ).all(), f"Some numbers are negative; growth_factor: {growth_factor}, estimate size: {estimate.size}, estimate: {estimate}"
 
             estimated_area = (estimate * farm_sizes).sum()
-            
+
             absolute_difference = target_area - estimated_area
             if absolute_difference == 0:
                 break
@@ -280,8 +307,10 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
             if difference == 1:
                 break
             growth_factor *= difference
-        
-        n_farms, farm_sizes = fit_n_farms_to_sizes(n, estimate, farm_sizes, mean, offset)
+
+        n_farms, farm_sizes = fit_n_farms_to_sizes(
+            n, estimate, farm_sizes, mean, offset
+        )
         assert n == n_farms.sum()
         estimated_area_int = (n_farms * farm_sizes).sum()
         assert estimated_area_int == target_area
