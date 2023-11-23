@@ -17,7 +17,7 @@ dependencies = [
     "isimip-client>=1.0.1",
     "xclim>=0.44.0",
     "pyogrio>=0.7",
-    "esmpy"
+    "xesmf"
 ]
 requires-python = ">=3.8"
 readme = "README.md"
