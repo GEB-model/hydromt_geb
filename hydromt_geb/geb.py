@@ -14,6 +14,7 @@ import zipfile
 import json
 from urllib.parse import urlparse
 import concurrent.futures
+from hydromt.exceptions import NoDataException
 
 import numpy as np
 import pandas as pd
@@ -885,7 +886,7 @@ class GEBModel(GridModel):
                     "average_area",
                 ],
             )
-        except IndexError:
+        except (IndexError, NoDataException):
             self.logger.info(
                 "No water bodies found in domain, skipping water bodies setup"
             )
@@ -2617,6 +2618,8 @@ class GEBModel(GridModel):
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
+        interest_rate=0.05,
+        discount_rate=0.1
     ):
         """
         Sets up the farmers for GEB.
@@ -3019,6 +3022,9 @@ class GEBModel(GridModel):
             scale=risk_aversion_standard_deviation,
             size=len(farmers),
         )
+
+        farmers['interest_rate'] = interest_rate
+        farmers['discount_rate'] = discount_rate
 
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
