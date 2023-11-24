@@ -35,7 +35,6 @@ if os.name == "nt":
 else:
     os.environ["ESMFMKFILE"] = str(Path(os.__file__).parent.parent / "esmf.mk")
 
-import xesmf as xe
 from affine import Affine
 import geopandas as gpd
 
@@ -1553,6 +1552,8 @@ class GEBModel(GridModel):
             "lon", "lat"
         )
 
+        import xesmf as xe
+
         regridder = xe.Regridder(
             hurs_30_min.isel(time=0).drop_vars("time"),
             hurs_ds_30sec.isel(time=0).drop_vars("time"),
@@ -1669,6 +1670,7 @@ class GEBModel(GridModel):
             buffer=1,
         ).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
 
+        import xesmf as xe
         regridder = xe.Regridder(
             hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
         )
@@ -1762,6 +1764,7 @@ class GEBModel(GridModel):
         orography = self.download_isimip(
             product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
         ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        import xesmf as xe
         regridder = xe.Regridder(orography, target, "bilinear")
         orography = regridder(orography).rename({"lon": "x", "lat": "y"})
 
@@ -1818,6 +1821,7 @@ class GEBModel(GridModel):
             "global_wind_atlas", bbox=self.grid.raster.bounds, buffer=10
         ).rename({"x": "lon", "y": "lat"})
         target = self.grid["areamaps/grid_mask"].rename({"x": "lon", "y": "lat"})
+        import xesmf as xe
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
 
