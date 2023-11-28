@@ -1536,6 +1536,7 @@ class GEBModel(GridModel):
                     hurs.to_netcdf(fn)
                 else:
                     hurs = xr.open_dataset(fn, chunks={"time": 365})["hurs"]
+                # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
 
@@ -1567,6 +1568,9 @@ class GEBModel(GridModel):
 
                 w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
                 w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                assert (w5e5_regridded >= 0.1).all(), "too low values in relative humidity"
+                assert (w5e5_regridded <= 1).all(), "relative humidity > 1"
+
                 w5e5_regridded_mean = w5e5_regridded.mean(
                     dim="time"
                 )  # get monthly mean
@@ -1577,9 +1581,10 @@ class GEBModel(GridModel):
                     w5e5_regridded_mean / (1 - w5e5_regridded_mean)
                 )  # logit transform
 
-                chelsa = (
-                    hurs_ds_30sec.sel(time=start_month) * 0.01
-                )  # convert to fraction
+                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.0001  # convert to fraction
+                assert (chelsa >= 0.1).all(), "too low values in relative humidity"
+                assert (chelsa <= 1).all(), "relative humidity > 1"
+
                 chelsa_tr = np.log(
                     chelsa / (1 - chelsa)
                 )  # assume beta distribuation => logit transform
@@ -1901,6 +1906,7 @@ class GEBModel(GridModel):
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
+        assert water_budget_positive.time.min().dt.date < date(2010, 1, 1) and water_budget_positive.time.max().dt.date > date(1980, 1, 1), "water budget data does not cover the reference period"
         wb_cal = water_budget_positive.sel(time=slice("1981-01-01", "2010-01-01"))
         assert wb_cal.time.size > 0
 
@@ -3281,7 +3287,7 @@ class GEBModel(GridModel):
             ).unlink()
 
         datasets = [
-            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=False)
+            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=None)
             for file in parse_files
         ]
 
