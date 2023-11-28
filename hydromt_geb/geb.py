@@ -40,7 +40,7 @@ from affine import Affine
 import geopandas as gpd
 
 # use pyogrio for substantial speedup reading and writing vector data
-# gpd.options.io_engine = "pyogrio"
+gpd.options.io_engine = "pyogrio"
 
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
@@ -1264,7 +1264,7 @@ class GEBModel(GridModel):
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
             raise ValueError(f"Unknown data source: {data_source}")
-
+        
         if calculate_SPEI:
             self.setup_SPEI()
         if calculate_GEV:
@@ -1576,7 +1576,7 @@ class GEBModel(GridModel):
                 )  # logit transform
 
                 chelsa = (
-                    hurs_ds_30sec.sel(time=start_month) * 0.01
+                    hurs_ds_30sec.sel(time=start_month) * 0.0001
                 )  # convert to fraction
                 chelsa_tr = np.log(
                     chelsa / (1 - chelsa)
@@ -1886,12 +1886,12 @@ class GEBModel(GridModel):
 
         pet = xci.potential_evapotranspiration(
             tasmin=tasmin_data, tasmax=tasmax_data, method="BR65"
-        )
+        ).compute()
         # Revert lon/lat to x/y
         pet = pet.rename({"longitude": "x", "latitude": "y"})
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet)
+        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet).compute()
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
@@ -1907,7 +1907,7 @@ class GEBModel(GridModel):
             window=12,
             dist="gamma",
             method="APP",
-        )
+        ).compute()
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
@@ -1928,7 +1928,7 @@ class GEBModel(GridModel):
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
         SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
 
-        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme")
+        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme").compute()
         GEV.name = "gev"
 
         self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")
@@ -3119,12 +3119,12 @@ class GEBModel(GridModel):
         )
         download_path.mkdir(parents=True, exist_ok=True)
 
-        ## Code to get data from disk rather than server.
-        # parse_files = []
-        # for file in os.listdir(download_path):
-        #     if file.endswith('.nc'):
-        #         fp = download_path / file
-        #         parse_files.append(fp)
+        # Code to get data from disk rather than server.
+        parse_files = []
+        for file in os.listdir(download_path):
+            if file.endswith('.nc'):
+                fp = download_path / file
+                parse_files.append(fp)
 
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
@@ -3565,7 +3565,7 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["geoms"].items():
             geom = gpd.read_file(Path(self.root, fn))
-            self.set_geoms(geom, name=name, update=False)
+            self.set_geoms(geom, name=name, update=True)
 
     def read_binary(self):
         self.read_model_structure()
