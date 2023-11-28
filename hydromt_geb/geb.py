@@ -14,6 +14,7 @@ import zipfile
 import json
 from urllib.parse import urlparse
 import concurrent.futures
+from hydromt.exceptions import NoDataException
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,6 @@ if os.name == "nt":
 else:
     os.environ["ESMFMKFILE"] = str(Path(os.__file__).parent.parent / "esmf.mk")
 
-import xesmf as xe
 from affine import Affine
 import geopandas as gpd
 
@@ -886,7 +886,7 @@ class GEBModel(GridModel):
                     "average_area",
                 ],
             )
-        except IndexError:
+        except (IndexError, NoDataException):
             self.logger.info(
                 "No water bodies found in domain, skipping water bodies setup"
             )
@@ -1536,6 +1536,7 @@ class GEBModel(GridModel):
                     hurs.to_netcdf(fn)
                 else:
                     hurs = xr.open_dataset(fn, chunks={"time": 365})["hurs"]
+                # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
 
@@ -1553,6 +1554,8 @@ class GEBModel(GridModel):
             "lon", "lat"
         )
 
+        import xesmf as xe
+
         regridder = xe.Regridder(
             hurs_30_min.isel(time=0).drop_vars("time"),
             hurs_ds_30sec.isel(time=0).drop_vars("time"),
@@ -1565,6 +1568,9 @@ class GEBModel(GridModel):
 
                 w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
                 w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                assert (w5e5_regridded >= 0.1).all(), "too low values in relative humidity"
+                assert (w5e5_regridded <= 1).all(), "relative humidity > 1"
+
                 w5e5_regridded_mean = w5e5_regridded.mean(
                     dim="time"
                 )  # get monthly mean
@@ -1575,9 +1581,10 @@ class GEBModel(GridModel):
                     w5e5_regridded_mean / (1 - w5e5_regridded_mean)
                 )  # logit transform
 
-                chelsa = (
-                    hurs_ds_30sec.sel(time=start_month) * 0.0001
-                )  # convert to fraction
+                chelsa = hurs_ds_30sec.sel(time=start_month) * 0.0001  # convert to fraction
+                assert (chelsa >= 0.1).all(), "too low values in relative humidity"
+                assert (chelsa <= 1).all(), "relative humidity > 1"
+
                 chelsa_tr = np.log(
                     chelsa / (1 - chelsa)
                 )  # assume beta distribuation => logit transform
@@ -1669,6 +1676,7 @@ class GEBModel(GridModel):
             buffer=1,
         ).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
 
+        import xesmf as xe
         regridder = xe.Regridder(
             hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
         )
@@ -1762,6 +1770,7 @@ class GEBModel(GridModel):
         orography = self.download_isimip(
             product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
         ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        import xesmf as xe
         regridder = xe.Regridder(orography, target, "bilinear")
         orography = regridder(orography).rename({"lon": "x", "lat": "y"})
 
@@ -1818,6 +1827,7 @@ class GEBModel(GridModel):
             "global_wind_atlas", bbox=self.grid.raster.bounds, buffer=10
         ).rename({"x": "lon", "y": "lat"})
         target = self.grid["areamaps/grid_mask"].rename({"x": "lon", "y": "lat"})
+        import xesmf as xe
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
 
@@ -1896,6 +1906,7 @@ class GEBModel(GridModel):
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
+        assert water_budget_positive.time.min().dt.date < date(2010, 1, 1) and water_budget_positive.time.max().dt.date > date(1980, 1, 1), "water budget data does not cover the reference period"
         wb_cal = water_budget_positive.sel(time=slice("1981-01-01", "2010-01-01"))
         assert wb_cal.time.size > 0
 
@@ -2613,6 +2624,8 @@ class GEBModel(GridModel):
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
+        interest_rate=0.05,
+        discount_rate=0.1
     ):
         """
         Sets up the farmers for GEB.
@@ -3016,6 +3029,9 @@ class GEBModel(GridModel):
             size=len(farmers),
         )
 
+        farmers['interest_rate'] = interest_rate
+        farmers['discount_rate'] = discount_rate
+
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def setup_population(self):
@@ -3271,7 +3287,7 @@ class GEBModel(GridModel):
             ).unlink()
 
         datasets = [
-            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=False)
+            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=None)
             for file in parse_files
         ]
 
