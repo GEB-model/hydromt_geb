@@ -3452,7 +3452,7 @@ class GEBModel(GridModel):
         if fp.exists():
             fp.unlink()
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-        with ProgressBar():
+        with ProgressBar(dt=10):  # print progress bar every 10 seconds
             assert (
                 forcing.dims[0] == "time"
             ), "time dimension must be first, otherwise xarray will not chunk correctly"
