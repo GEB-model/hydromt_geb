@@ -28,6 +28,8 @@ from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
 
+XY_CHUNKSIZE = 350
+
 # temporary fix for ESMF on Windows
 if os.name == "nt":
     os.environ["ESMFMKFILE"] = str(
@@ -1887,28 +1889,31 @@ class GEBModel(GridModel):
 
     def setup_SPEI(self):
         self.logger.info("setting up SPEI...")
-        pr_data = self.forcing[f"climate/pr"]
-        tasmin_data = self.forcing[f"climate/tasmin"]
-        tasmax_data = self.forcing[f"climate/tasmax"]
 
         # assert input data have the same coordinates
-        assert np.array_equal(pr_data.x, tasmin_data.x)
-        assert np.array_equal(pr_data.x, tasmax_data.x)
-        assert np.array_equal(pr_data.y, tasmax_data.y)
-        assert np.array_equal(pr_data.y, tasmax_data.y)
-
-        # PET needs latitude, needs to be named latitude
-        tasmin_data = tasmin_data.rename({"x": "longitude", "y": "latitude"})
-        tasmax_data = tasmax_data.rename({"x": "longitude", "y": "latitude"})
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmin"].x
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmax"].x
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmin"].y
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmax"].y
+        )
 
         pet = xci.potential_evapotranspiration(
-            tasmin=tasmin_data, tasmax=tasmax_data, method="BR65"
-        ).compute()
-        # Revert lon/lat to x/y
-        pet = pet.rename({"longitude": "x", "latitude": "y"})
+            tasmin=self.forcing[f"climate/tasmin"],
+            tasmax=self.forcing[f"climate/tasmax"],
+            method="BR65",
+        )
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet).compute()
+        water_budget = xci._agro.water_budget(
+            pr=self.forcing[f"climate/pr"], evspsblpot=pet
+        )
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
@@ -1929,7 +1934,7 @@ class GEBModel(GridModel):
             window=12,
             dist="gamma",
             method="APP",
-        ).compute()
+        )
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
@@ -1941,16 +1946,15 @@ class GEBModel(GridModel):
 
     def setup_GEV(self):
         self.logger.info("calculating GEV parameters...")
-        spei_data = self.forcing[f"climate/spei"]
 
         # invert the values and take the max
-        SPEI_changed = spei_data * -1
+        SPEI_changed = self.forcing[f"climate/spei"] * -1
 
         # Group the data by year and find the maximum monthly sum for each year
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
         SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
 
-        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme").compute()
+        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
         GEV.name = "gev"
 
         self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")
@@ -3298,9 +3302,15 @@ class GEBModel(GridModel):
             ).unlink()
 
         datasets = [
-            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=None)
+            xr.open_dataset(
+                download_path / file,
+                chunks={"time": 365, "lat": XY_CHUNKSIZE, "lon": XY_CHUNKSIZE},
+                lock=False,
+            )
             for file in parse_files
         ]
+        for dataset in datasets:
+            assert "lat" in dataset.coords and "lon" in dataset.coords
 
         # make sure y is decreasing rather than increasing
         datasets = [
@@ -3432,32 +3442,45 @@ class GEBModel(GridModel):
             else:
                 self.logger.info(f"Skip {var}")
 
+    def write_forcing_to_netcdf(self, var, forcing) -> None:
+        self.logger.info(f"Write {var}")
+        fn = var + ".nc"
+        self.model_structure["forcing"][var] = fn
+        self.is_updated["forcing"][var]["filename"] = fn
+        fp = Path(self.root, fn)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        if fp.exists():
+            fp.unlink()
+        forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
+        with ProgressBar():
+            assert (
+                forcing.dims[0] == "time"
+            ), "time dimension must be first, otherwise xarray will not chunk correctly"
+            forcing.to_netcdf(
+                fp,
+                mode="w",
+                engine="netcdf4",
+                encoding={
+                    forcing.name: {
+                        "chunksizes": (
+                            1,
+                            min(forcing.y.size, XY_CHUNKSIZE),
+                            min(forcing.x.size, XY_CHUNKSIZE),
+                        ),
+                        "zlib": True,
+                        "complevel": 9,
+                    }
+                },
+            )
+            return xr.open_dataset(fp, lock=False)[forcing.name]
+
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
         for var in self.forcing:
             forcing = self.forcing[var]
             if self.is_updated["forcing"][var]["updated"]:
-                self.logger.info(f"Write {var}")
-                fn = var + ".nc"
-                self.model_structure["forcing"][var] = fn
-                self.is_updated["forcing"][var]["filename"] = fn
-                fp = Path(self.root, fn)
-                fp.parent.mkdir(parents=True, exist_ok=True)
-                forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-                with ProgressBar():
-                    forcing.to_netcdf(
-                        fp,
-                        mode="w",
-                        engine="netcdf4",
-                        encoding={
-                            forcing.name: {
-                                "chunksizes": (1, forcing.y.size, forcing.x.size),
-                                "zlib": True,
-                                "complevel": 9,
-                            }
-                        },
-                    )
+                self.write_forcing_to_netcdf(var, forcing)
             else:
                 self.logger.info(f"Skip {var}")
 
@@ -3659,8 +3682,11 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["forcing"].items():
             with xr.open_dataset(
-                Path(self.root) / fn, chunks={"time": 365}, lock=False
+                Path(self.root) / fn,
+                chunks={"time": 365, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                lock=False,
             )[name.split("/")[-1]] as da:
+                assert "x" in da.dims and "y" in da.dims
                 self.set_forcing(da, name=name, update=False)
 
     def read(self):
@@ -3683,8 +3709,11 @@ class GEBModel(GridModel):
         self.is_updated["geoms"][name] = {"updated": update}
         super().set_geoms(geoms, name=name)
 
-    def set_forcing(self, data, name: str, update=True, *args, **kwargs):
+    def set_forcing(self, data, name: str, update=True, write=True, *args, **kwargs):
         self.is_updated["forcing"][name] = {"updated": update}
+        if update and write:
+            data = self.write_forcing_to_netcdf(name, data)
+            self.is_updated["forcing"][name]["updated"] = False
         super().set_forcing(data, name=name, *args, **kwargs)
 
     def _set_grid(
