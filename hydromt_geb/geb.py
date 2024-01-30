@@ -14,6 +14,7 @@ import zipfile
 import json
 from urllib.parse import urlparse
 import concurrent.futures
+from shapely.geometry import Polygon
 
 import numpy as np
 import pandas as pd
@@ -40,7 +41,7 @@ from affine import Affine
 import geopandas as gpd
 
 # use pyogrio for substantial speedup reading and writing vector data
-# gpd.options.io_engine = "pyogrio"
+gpd.options.io_engine = "pyogrio"
 
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
@@ -1192,6 +1193,11 @@ class GEBModel(GridModel):
         resolution_arcsec: int = 30,
         forcing: str = "chelsa-w5e5v1.0",
         ssp=None,
+        alternative_timeline: bool = False,
+        timeline_old_start: date = None,
+        timeline_old_end: date = None,
+        timeline_new_start: date = None,
+        timeline_new_end: date = None,
         calculate_SPEI: bool = True,
         calculate_GEV: bool = True,
     ):
@@ -1224,6 +1230,16 @@ class GEBModel(GridModel):
         """
         assert starttime < endtime, "Start time must be before end time"
 
+        common_params = {
+            'starttime': starttime, 
+            'endtime': endtime, 
+            'alternative_timeline': alternative_timeline,
+            'timeline_old_start': timeline_old_start, 
+            'timeline_old_end': timeline_old_end,
+            'timeline_new_start': timeline_new_start,
+            'timeline_new_end': timeline_new_end,
+        }
+
         if data_source == "isimip":
             if resolution_arcsec == 30:
                 assert (
@@ -1232,19 +1248,15 @@ class GEBModel(GridModel):
                 # download source data from ISIMIP
                 self.logger.info("setting up forcing data")
                 high_res_variables = ["pr", "rsds", "tas", "tasmax", "tasmin"]
-                self.setup_30arcsec_variables_isimip(
-                    high_res_variables, starttime, endtime
-                )
+                self.setup_30arcsec_variables_isimip(variables=high_res_variables, **common_params)
                 self.logger.info("setting up relative humidity...")
-                self.setup_hurs_isimip_30arcsec(starttime, endtime)
+                self.setup_hurs_isimip_30arcsec(**common_params)
                 self.logger.info("setting up longwave radiation...")
-                self.setup_longwave_isimip_30arcsec(
-                    starttime=starttime, endtime=endtime
-                )
+                self.setup_longwave_isimip_30arcsec(**common_params)
                 self.logger.info("setting up pressure...")
-                self.setup_pressure_isimip_30arcsec(starttime, endtime)
+                self.setup_pressure_isimip_30arcsec(**common_params)
                 self.logger.info("setting up wind...")
-                self.setup_wind_isimip_30arcsec(starttime, endtime)
+                self.setup_wind_isimip_30arcsec(**common_params)
             elif resolution_arcsec == 1800:
                 variables = [
                     "pr",
@@ -1413,8 +1425,15 @@ class GEBModel(GridModel):
         # # Wait for all threads to complete
         # concurrent.futures.wait(futures)
 
-    def setup_30arcsec_variables_isimip(
-        self, variables: List[str], starttime: date, endtime: date
+    def setup_30arcsec_variables_isimip(self, 
+                                        variables: List[str], 
+                                        starttime: date, 
+                                        endtime: date, 
+                                        timeline_old_start: date, 
+                                        timeline_old_end: date, 
+                                        timeline_new_start: date, 
+                                        timeline_new_end: date,
+                                        alternative_timeline = False,
     ):
         """
         Sets up the high-resolution climate variables for GEB.
@@ -1455,6 +1474,8 @@ class GEBModel(GridModel):
             ds = ds.rename({"lon": "x", "lat": "y"})
             var = ds[variable].raster.clip_bbox(ds.raster.bounds)
             var = self.snap_to_grid(var, self.grid)
+            if alternative_timeline:
+                var = self.cut_timeline(var, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end)
             self.logger.info(f"Completed {variable}")
             self.set_forcing(var, name=f"climate/{variable}")
 
@@ -1468,7 +1489,14 @@ class GEBModel(GridModel):
         # # Wait for all threads to complete
         # concurrent.futures.wait(futures)
 
-    def setup_hurs_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_hurs_isimip_30arcsec(self, 
+                                   starttime: date, 
+                                   endtime: date, 
+                                   timeline_old_start: date, 
+                                   timeline_old_end: date, 
+                                   timeline_new_start: date, 
+                                   timeline_new_end: date,
+                                   alternative_timeline = False,):
         """
         Sets up the relative humidity data for GEB.
 
@@ -1604,9 +1632,18 @@ class GEBModel(GridModel):
                 )
 
         hurs_output = hurs_output.rename({"lon": "x", "lat": "y"})
+        if alternative_timeline:
+            hurs_output = self.cut_timeline(hurs_output, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end)
         self.set_forcing(hurs_output, f"climate/hurs")
 
-    def setup_longwave_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_longwave_isimip_30arcsec(self, 
+                                       starttime: date, 
+                                       endtime: date, 
+                                       timeline_old_start: date, 
+                                       timeline_old_end: date, 
+                                       timeline_new_start: date, 
+                                       timeline_new_end: date,
+                                       alternative_timeline = False,):
         """
         Sets up the longwave radiation data for GEB.
 
@@ -1716,9 +1753,18 @@ class GEBModel(GridModel):
 
         lw_fine.name = "rlds"
         lw_fine = self.snap_to_grid(lw_fine, self.grid)
+        if alternative_timeline:
+            lw_fine = self.cut_timeline(lw_fine, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end)
         self.set_forcing(lw_fine, name=f"climate/rlds")
 
-    def setup_pressure_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_pressure_isimip_30arcsec(self, 
+                                       starttime: date, 
+                                       endtime: date, 
+                                       timeline_old_start: date, 
+                                       timeline_old_end: date, 
+                                       timeline_new_start: date, 
+                                       timeline_new_end: date,
+                                       alternative_timeline = False,):
         """
         Sets up the surface pressure data for GEB.
 
@@ -1781,9 +1827,18 @@ class GEBModel(GridModel):
         pressure.data = pressure_30_min_regridded_corr
 
         pressure = self.snap_to_grid(pressure, self.grid)
+        if alternative_timeline:
+            pressure = self.cut_timeline(pressure, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end)
         self.set_forcing(pressure, name=f"climate/ps")
 
-    def setup_wind_isimip_30arcsec(self, starttime: date, endtime: date):
+    def setup_wind_isimip_30arcsec(self, 
+                                   starttime: date, 
+                                   endtime: date, 
+                                   timeline_old_start: date, 
+                                   timeline_old_end: date, 
+                                   timeline_new_start: date, 
+                                   timeline_new_end: date,
+                                   alternative_timeline = False,):
         """
         Sets up the wind data for GEB.
 
@@ -1816,7 +1871,7 @@ class GEBModel(GridModel):
         """
         global_wind_atlas = self.data_catalog.get_rasterdataset(
             "global_wind_atlas", bbox=self.grid.raster.bounds, buffer=10
-        ).rename({"x": "lon", "y": "lat"})
+        ).rename({"x": "lon", "y": "lat"}).compute()
         target = self.grid["areamaps/grid_mask"].rename({"x": "lon", "y": "lat"})
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
@@ -1830,7 +1885,7 @@ class GEBModel(GridModel):
             buffer=1,
         ).sfcWind.mean(
             dim="time"
-        )  # some buffer to avoid edge effects / errors in ISIMIP API
+        ).compute()  # some buffer to avoid edge effects / errors in ISIMIP API
         regridder_30_min = xe.Regridder(wind_30_min_avg, target, "bilinear")
         wind_30_min_avg_regridded = regridder_30_min(wind_30_min_avg)
 
@@ -1866,7 +1921,45 @@ class GEBModel(GridModel):
         wind_output_clipped.name = "sfcwind"
 
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
+        if alternative_timeline:
+            wind_output_clipped = self.cut_timeline(wind_output_clipped, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end)
         self.set_forcing(wind_output_clipped, f"climate/sfcwind")
+
+    def cut_timeline(self, climate_input, timeline_old_start, timeline_old_end, timeline_new_start, timeline_new_end):
+        # Convert the string dates to pandas timestamps
+        timeline_old_start = pd.to_datetime(timeline_old_start)
+        timeline_old_end = pd.to_datetime(timeline_old_end)
+        timeline_new_start = pd.to_datetime(timeline_new_start)
+        timeline_new_end = pd.to_datetime(timeline_new_end)
+
+        # Calculate the lengths of the old and new periods
+        old_period_length = timeline_old_end - timeline_old_start
+        new_period_length = timeline_new_end - timeline_new_start
+
+        # Assert that the old and new periods are of similar length
+        if old_period_length != new_period_length:
+            raise ValueError("The old and new periods must be of the same length.")
+        
+        # The data is already provided in the climate_input
+        data = climate_input
+
+        # Check if the time dimension is named 'time', adjust if needed
+        time_dim = 'time'
+
+        # Slice the data for the old timeline
+        data_old = data.sel({time_dim: slice(timeline_old_start, timeline_old_end)})
+
+        # Calculate the time delta
+        time_delta = timeline_new_start - timeline_old_start
+
+        # Adjust the time coordinates of the sliced data
+        data_old.coords[time_dim] = data_old.coords[time_dim] + time_delta
+
+        # Assign the sliced data to the new timeline segment
+        data.loc[{time_dim: slice(timeline_new_start, timeline_new_end)}] = data_old
+
+        # Return the modified dataset
+        return data
 
     def setup_SPEI(self):
         self.logger.info("setting up SPEI...")
@@ -1877,7 +1970,7 @@ class GEBModel(GridModel):
         # assert input data have the same coordinates
         assert np.array_equal(pr_data.x, tasmin_data.x)
         assert np.array_equal(pr_data.x, tasmax_data.x)
-        assert np.array_equal(pr_data.y, tasmax_data.y)
+        assert np.array_equal(pr_data.y, tasmin_data.y)
         assert np.array_equal(pr_data.y, tasmax_data.y)
 
         # PET needs latitude, needs to be named latitude
@@ -1886,12 +1979,12 @@ class GEBModel(GridModel):
 
         pet = xci.potential_evapotranspiration(
             tasmin=tasmin_data, tasmax=tasmax_data, method="BR65"
-        )
+        ).compute()
         # Revert lon/lat to x/y
         pet = pet.rename({"longitude": "x", "latitude": "y"})
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet)
+        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet).compute()
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
@@ -1907,7 +2000,7 @@ class GEBModel(GridModel):
             window=12,
             dist="gamma",
             method="APP",
-        )
+        ).compute()
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
@@ -1928,7 +2021,7 @@ class GEBModel(GridModel):
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
         SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
 
-        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme")
+        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme").compute()
         GEV.name = "gev"
 
         self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")

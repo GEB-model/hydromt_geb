@@ -9,14 +9,14 @@ authors = [
     {name = "Maurice Kalthof", email = "w.m.l.kalthof@vu.nl"},
 ]
 dependencies = [
-    "s3fs>=2023.6.0",
-    "xesmf==0.7.1",
-    "hydromt==0.9.0",
-    "tqdm>=4.66.1",
-    "openpyxl>=3.1.2",
+    #"s3fs>=2023.6.0",
+    #"xesmf==0.7.1",
+    #"hydromt==0.9.1",
+    #"tqdm>=4.66.1",
+    #"openpyxl>=3.1.2",
     "isimip-client>=1.0.1",
-    "xclim>=0.44.0",
-    "pyogrio>=0.7"
+    #"xclim>=0.44.0",
+    #"pyogrio>=0.7"
 ]
 requires-python = ">=3.8"
 readme = "README.md"
