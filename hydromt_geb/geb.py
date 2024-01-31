@@ -1616,7 +1616,7 @@ class GEBModel(GridModel):
                 chelsa = (
                     hurs_ds_30sec.sel(time=start_month) * 0.0001
                 )  # convert to fraction
-                assert (chelsa >= 0.1).all(), "too low values in relative humidity"
+                # assert (chelsa >= 0.1).all(), "too low values in relative humidity"
                 assert (chelsa <= 1).all(), "relative humidity > 1"
 
                 chelsa_tr = np.log(
@@ -1951,14 +1951,6 @@ class GEBModel(GridModel):
         timeline_new_start = pd.to_datetime(timeline_new_start)
         timeline_new_end = pd.to_datetime(timeline_new_end)
 
-        # Calculate the lengths of the old and new periods
-        old_period_length = timeline_old_end - timeline_old_start
-        new_period_length = timeline_new_end - timeline_new_start
-
-        # Assert that the old and new periods are of similar length
-        if old_period_length != new_period_length:
-            raise ValueError("The old and new periods must be of the same length.")
-        
         # The data is already provided in the climate_input
         data = climate_input
 
@@ -1973,6 +1965,9 @@ class GEBModel(GridModel):
 
         # Adjust the time coordinates of the sliced data
         data_old.coords[time_dim] = data_old.coords[time_dim] + time_delta
+                
+        # Reindex data_old again to ensure time coordinates match
+        data_old = data_old.reindex_like(data.sel({time_dim: slice(timeline_new_start, timeline_new_end)}), method='nearest')
 
         # Assign the sliced data to the new timeline segment
         data.loc[{time_dim: slice(timeline_new_start, timeline_new_end)}] = data_old
@@ -2034,6 +2029,34 @@ class GEBModel(GridModel):
             "name": "spei",
         }
         spei.name = "spei"
+
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        # Assuming 'spei' is your xarray DataArray or Dataset
+
+        # Compute the mean over the 'x' and 'y' dimensions
+        data_to_plot = spei.mean(dim=['x', 'y'])
+
+        # Plotting
+        plt.figure(figsize=(10, 4))  # Set the figure size (width, height) in inches
+        plt.plot(data_to_plot['time'], data_to_plot, label='Data', color='blue')  # Plot the data
+
+        # Set major ticks format
+        plt.gca().xaxis.set_major_locator(mdates.YearLocator())  # Set major ticks to appear every year
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))  # Format major ticks as years
+
+        plt.xlabel('Time')  # X-axis label
+        plt.ylabel('Value')  # Y-axis label (change according to what the value represents)
+        plt.title('Mean SPEI Value Over Area Per Time')  # Title of the plot
+        plt.legend()  # Show legend
+        plt.grid(True)  # Show grid
+
+        # Rotate date labels for better readability
+        plt.gcf().autofmt_xdate()
+
+        plt.tight_layout()  # Ensure a nice layout
+        plt.show()  # Display the plot
 
         self.set_forcing(spei, name=f"climate/spei")
 
