@@ -1952,7 +1952,7 @@ class GEBModel(GridModel):
 
         # Group the data by year and find the maximum monthly sum for each year
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
-        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
+        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"}).chunk({"time": -1})
 
         GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
         GEV.name = "gev"
@@ -3605,7 +3605,7 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["geoms"].items():
             geom = gpd.read_file(Path(self.root, fn))
-            self.set_geoms(geom, name=name, update=True)
+            self.set_geoms(geom, name=name, update=False)
 
     def read_binary(self):
         self.read_model_structure()
