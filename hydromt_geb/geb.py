@@ -15,6 +15,7 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from shapely.geometry import Polygon
+from hydromt.exceptions import NoDataException
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,8 @@ from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
 
+XY_CHUNKSIZE = 350
+
 # temporary fix for ESMF on Windows
 if os.name == "nt":
     os.environ["ESMFMKFILE"] = str(
@@ -36,7 +39,6 @@ if os.name == "nt":
 else:
     os.environ["ESMFMKFILE"] = str(Path(os.__file__).parent.parent / "esmf.mk")
 
-import xesmf as xe
 from affine import Affine
 import geopandas as gpd
 
@@ -887,7 +889,7 @@ class GEBModel(GridModel):
                     "average_area",
                 ],
             )
-        except IndexError:
+        except (IndexError, NoDataException):
             self.logger.info(
                 "No water bodies found in domain, skipping water bodies setup"
             )
@@ -1564,6 +1566,7 @@ class GEBModel(GridModel):
                     hurs.to_netcdf(fn)
                 else:
                     hurs = xr.open_dataset(fn, chunks={"time": 365})["hurs"]
+                # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
 
@@ -1581,6 +1584,8 @@ class GEBModel(GridModel):
             "lon", "lat"
         )
 
+        import xesmf as xe
+
         regridder = xe.Regridder(
             hurs_30_min.isel(time=0).drop_vars("time"),
             hurs_ds_30sec.isel(time=0).drop_vars("time"),
@@ -1593,6 +1598,11 @@ class GEBModel(GridModel):
 
                 w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
                 w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                assert (
+                    w5e5_regridded >= 0.1
+                ).all(), "too low values in relative humidity"
+                assert (w5e5_regridded <= 1).all(), "relative humidity > 1"
+
                 w5e5_regridded_mean = w5e5_regridded.mean(
                     dim="time"
                 )  # get monthly mean
@@ -1604,8 +1614,11 @@ class GEBModel(GridModel):
                 )  # logit transform
 
                 chelsa = (
-                    hurs_ds_30sec.sel(time=start_month) * 0.01
+                    hurs_ds_30sec.sel(time=start_month) * 0.0001
                 )  # convert to fraction
+                assert (chelsa >= 0.1).all(), "too low values in relative humidity"
+                assert (chelsa <= 1).all(), "relative humidity > 1"
+
                 chelsa_tr = np.log(
                     chelsa / (1 - chelsa)
                 )  # assume beta distribuation => logit transform
@@ -1705,6 +1718,8 @@ class GEBModel(GridModel):
             forcing="w5e5v2.0",
             buffer=1,
         ).rlds  # some buffer to avoid edge effects / errors in ISIMIP API
+
+        import xesmf as xe
 
         regridder = xe.Regridder(
             hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
@@ -1808,6 +1823,8 @@ class GEBModel(GridModel):
         orography = self.download_isimip(
             product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
         ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
+        import xesmf as xe
+
         regridder = xe.Regridder(orography, target, "bilinear")
         orography = regridder(orography).rename({"lon": "x", "lat": "y"})
 
@@ -1873,6 +1890,8 @@ class GEBModel(GridModel):
             "global_wind_atlas", bbox=self.grid.raster.bounds, buffer=10
         ).rename({"x": "lon", "y": "lat"}).compute()
         target = self.grid["areamaps/grid_mask"].rename({"x": "lon", "y": "lat"})
+        import xesmf as xe
+
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
         global_wind_atlas_regridded = regridder(global_wind_atlas)
 
@@ -1963,32 +1982,40 @@ class GEBModel(GridModel):
 
     def setup_SPEI(self):
         self.logger.info("setting up SPEI...")
-        pr_data = self.forcing[f"climate/pr"]
-        tasmin_data = self.forcing[f"climate/tasmin"]
-        tasmax_data = self.forcing[f"climate/tasmax"]
 
         # assert input data have the same coordinates
-        assert np.array_equal(pr_data.x, tasmin_data.x)
-        assert np.array_equal(pr_data.x, tasmax_data.x)
-        assert np.array_equal(pr_data.y, tasmin_data.y)
-        assert np.array_equal(pr_data.y, tasmax_data.y)
-
-        # PET needs latitude, needs to be named latitude
-        tasmin_data = tasmin_data.rename({"x": "longitude", "y": "latitude"})
-        tasmax_data = tasmax_data.rename({"x": "longitude", "y": "latitude"})
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmin"].x
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmax"].x
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmin"].y
+        )
+        assert np.array_equal(
+            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmax"].y
+        )
 
         pet = xci.potential_evapotranspiration(
-            tasmin=tasmin_data, tasmax=tasmax_data, method="BR65"
-        ).compute()
-        # Revert lon/lat to x/y
-        pet = pet.rename({"longitude": "x", "latitude": "y"})
+            tasmin=self.forcing[f"climate/tasmin"],
+            tasmax=self.forcing[f"climate/tasmax"],
+            method="BR65",
+        )
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(pr=pr_data, evspsblpot=pet).compute()
+        water_budget = xci._agro.water_budget(
+            pr=self.forcing[f"climate/pr"], evspsblpot=pet
+        )
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
+        assert water_budget_positive.time.min().dt.date < date(
+            2010, 1, 1
+        ) and water_budget_positive.time.max().dt.date > date(
+            1980, 1, 1
+        ), "water budget data does not cover the reference period"
         wb_cal = water_budget_positive.sel(time=slice("1981-01-01", "2010-01-01"))
         assert wb_cal.time.size > 0
 
@@ -2012,16 +2039,15 @@ class GEBModel(GridModel):
 
     def setup_GEV(self):
         self.logger.info("calculating GEV parameters...")
-        spei_data = self.forcing[f"climate/spei"]
 
         # invert the values and take the max
-        SPEI_changed = spei_data * -1
+        SPEI_changed = self.forcing[f"climate/spei"] * -1
 
         # Group the data by year and find the maximum monthly sum for each year
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
         SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
 
-        GEV = xci.stats.fit(SPEI_yearly_max.compute(), dist="genextreme").compute()
+        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
         GEV.name = "gev"
 
         self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")
@@ -2706,6 +2732,8 @@ class GEBModel(GridModel):
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
+        interest_rate=0.05,
+        discount_rate=0.1,
     ):
         """
         Sets up the farmers for GEB.
@@ -3109,6 +3137,9 @@ class GEBModel(GridModel):
             size=len(farmers),
         )
 
+        farmers["interest_rate"] = interest_rate
+        farmers["discount_rate"] = discount_rate
+
         self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
 
     def setup_population(self):
@@ -3212,12 +3243,12 @@ class GEBModel(GridModel):
         )
         download_path.mkdir(parents=True, exist_ok=True)
 
-        ## Code to get data from disk rather than server.
-        # parse_files = []
-        # for file in os.listdir(download_path):
-        #     if file.endswith('.nc'):
-        #         fp = download_path / file
-        #         parse_files.append(fp)
+        # Code to get data from disk rather than server.
+        parse_files = []
+        for file in os.listdir(download_path):
+            if file.endswith(".nc"):
+                fp = download_path / file
+                parse_files.append(fp)
 
         # get the dataset metadata from the ISIMIP repository
         response = client.datasets(
@@ -3364,9 +3395,15 @@ class GEBModel(GridModel):
             ).unlink()
 
         datasets = [
-            xr.open_dataset(download_path / file, chunks={"time": 365}, lock=False)
+            xr.open_dataset(
+                download_path / file,
+                chunks={"time": 365, "lat": XY_CHUNKSIZE, "lon": XY_CHUNKSIZE},
+                lock=False,
+            )
             for file in parse_files
         ]
+        for dataset in datasets:
+            assert "lat" in dataset.coords and "lon" in dataset.coords
 
         # make sure y is decreasing rather than increasing
         datasets = [
@@ -3498,32 +3535,45 @@ class GEBModel(GridModel):
             else:
                 self.logger.info(f"Skip {var}")
 
+    def write_forcing_to_netcdf(self, var, forcing) -> None:
+        self.logger.info(f"Write {var}")
+        fn = var + ".nc"
+        self.model_structure["forcing"][var] = fn
+        self.is_updated["forcing"][var]["filename"] = fn
+        fp = Path(self.root, fn)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        if fp.exists():
+            fp.unlink()
+        forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
+        with ProgressBar(dt=10):  # print progress bar every 10 seconds
+            assert (
+                forcing.dims[0] == "time"
+            ), "time dimension must be first, otherwise xarray will not chunk correctly"
+            forcing.to_netcdf(
+                fp,
+                mode="w",
+                engine="netcdf4",
+                encoding={
+                    forcing.name: {
+                        "chunksizes": (
+                            1,
+                            min(forcing.y.size, XY_CHUNKSIZE),
+                            min(forcing.x.size, XY_CHUNKSIZE),
+                        ),
+                        "zlib": True,
+                        "complevel": 9,
+                    }
+                },
+            )
+            return xr.open_dataset(fp, lock=False)[forcing.name]
+
     def write_forcing(self) -> None:
         self._assert_write_mode
         self.logger.info("Write forcing files")
         for var in self.forcing:
             forcing = self.forcing[var]
             if self.is_updated["forcing"][var]["updated"]:
-                self.logger.info(f"Write {var}")
-                fn = var + ".nc"
-                self.model_structure["forcing"][var] = fn
-                self.is_updated["forcing"][var]["filename"] = fn
-                fp = Path(self.root, fn)
-                fp.parent.mkdir(parents=True, exist_ok=True)
-                forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-                with ProgressBar():
-                    forcing.to_netcdf(
-                        fp,
-                        mode="w",
-                        engine="netcdf4",
-                        encoding={
-                            forcing.name: {
-                                "chunksizes": (1, forcing.y.size, forcing.x.size),
-                                "zlib": True,
-                                "complevel": 9,
-                            }
-                        },
-                    )
+                self.write_forcing_to_netcdf(var, forcing)
             else:
                 self.logger.info(f"Skip {var}")
 
@@ -3658,7 +3708,7 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["geoms"].items():
             geom = gpd.read_file(Path(self.root, fn))
-            self.set_geoms(geom, name=name, update=False)
+            self.set_geoms(geom, name=name, update=True)
 
     def read_binary(self):
         self.read_model_structure()
@@ -3725,8 +3775,11 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["forcing"].items():
             with xr.open_dataset(
-                Path(self.root) / fn, chunks={"time": 365}, lock=False
+                Path(self.root) / fn,
+                chunks={"time": 365, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                lock=False,
             )[name.split("/")[-1]] as da:
+                assert "x" in da.dims and "y" in da.dims
                 self.set_forcing(da, name=name, update=False)
 
     def read(self):
@@ -3749,8 +3802,11 @@ class GEBModel(GridModel):
         self.is_updated["geoms"][name] = {"updated": update}
         super().set_geoms(geoms, name=name)
 
-    def set_forcing(self, data, name: str, update=True, *args, **kwargs):
+    def set_forcing(self, data, name: str, update=True, write=True, *args, **kwargs):
         self.is_updated["forcing"][name] = {"updated": update}
+        if update and write:
+            data = self.write_forcing_to_netcdf(name, data)
+            self.is_updated["forcing"][name]["updated"] = False
         super().set_forcing(data, name=name, *args, **kwargs)
 
     def _set_grid(
