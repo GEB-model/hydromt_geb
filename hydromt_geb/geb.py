@@ -16,8 +16,6 @@ from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
 
-test
-
 import numpy as np
 import pandas as pd
 import geopandas as gpd
