@@ -1616,7 +1616,7 @@ class GEBModel(GridModel):
                 chelsa = (
                     hurs_ds_30sec.sel(time=start_month) * 0.0001
                 )  # convert to fraction
-                # assert (chelsa >= 0.1).all(), "too low values in relative humidity"
+                assert (chelsa >= 0.1).all(), "too low values in relative humidity"
                 assert (chelsa <= 1).all(), "relative humidity > 1"
 
                 chelsa_tr = np.log(
