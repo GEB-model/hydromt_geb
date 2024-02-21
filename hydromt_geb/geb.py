@@ -3148,7 +3148,7 @@ class GEBModel(GridModel):
         command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
         canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
         canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
-        irrigation_source[canal_irrigated_farms] = irrigation_sources["canals"]
+        irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
