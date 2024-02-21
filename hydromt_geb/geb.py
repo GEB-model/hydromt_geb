@@ -2537,7 +2537,7 @@ class GEBModel(GridModel):
             upkeep_prices_dict, name="economics/upkeep_prices_drip_irrigation_per_m2"
         )
 
-    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
+    def setup_farmers(self, farmers):
         """
         Sets up the farmers data for GEB.
 
@@ -2643,23 +2643,8 @@ class GEBModel(GridModel):
         self.set_subgrid(subgrid_farms_in_study_area, name="agents/farmers/farms")
         self.subgrid["agents/farmers/farms"].rio.set_nodata(-1)
 
-        crop_name_to_id = {
-            crop_name: int(ID) for ID, crop_name in self.dict["crops/crop_ids"].items()
-        }
-        crop_name_to_id[np.nan] = -1
-        for season in range(1, n_seasons + 1):
-            farmers[f"season_#{season}_crop"] = farmers[f"season_#{season}_crop"].map(
-                crop_name_to_id
-            )
-
-        if irrigation_sources:
-            self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
-            farmers["irrigation_source"] = farmers["irrigation_source"].map(
-                irrigation_sources
-            )
-
-        for column in farmers.columns:
-            self.set_binary(farmers[column], name=f"agents/farmers/{column}")
+        self.set_binary(farmers.index.values, name=f"agents/farmers/id")
+        self.set_binary(farmers["region_id"].values, name=f"agents/farmers/region_id")
 
     def setup_farmers_from_csv(self, path=None, irrigation_sources=None, n_seasons=1):
         """
@@ -2693,18 +2678,11 @@ class GEBModel(GridModel):
         farmers = pd.read_csv(path, index_col=0)
         self.setup_farmers(farmers, irrigation_sources, n_seasons)
 
-    def setup_farmers_simple(
+    def setup_create_farms_simple(
         self,
-        irrigation_sources,
-        irrigation_choice,
-        crop_choices,
-        region_id_column="UID",
+        region_id_column="region_id",
         country_iso3_column="ISO3",
-        risk_aversion_mean=1.5,
-        risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
-        interest_rate=0.05,
-        discount_rate=0.1,
     ):
         """
         Sets up the farmers for GEB.
@@ -3073,45 +3051,76 @@ class GEBModel(GridModel):
             all_agents.append(region_agents)
 
         farmers = pd.concat(all_agents, ignore_index=True)
-        # randomly sample from crops
-        for season in (1, 2, 3):
+        self.setup_farmers(farmers)
+
+    def setup_farmer_characteristics_simple(
+        self,
+        irrigation_sources=None,
+        irrigation_choice=None,
+        crop_choices=None,
+        risk_aversion_mean=1.5,
+        risk_aversion_standard_deviation=0.5,
+        interest_rate=0.05,
+        discount_rate=0.1,
+        n_seasons=3,
+    ):
+        crop_name_to_id = {
+            crop_name: int(ID) for ID, crop_name in self.dict["crops/crop_ids"].items()
+        }
+        crop_name_to_id[np.nan] = -1
+
+        n_farmers = self.binary["agents/farmers/id"].size
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
             if crop_choices[f"season_#{season}"] == "random":
-                farmers[f"season_#{season}_crop"] = random.choices(
-                    list(self.dict["crops/crop_ids"].values()), k=len(farmers)
-                )
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
             else:
-                farmers[f"season_#{season}_crop"] = np.full(
-                    len(farmers), crop_choices[f"season_#{season}"], dtype=np.int32
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
                 )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
-            farmers["irrigation_source"] = random.choices(
-                list(irrigation_sources.keys()), k=len(farmers)
+            irrigation_source = random.choices(
+                list(irrigation_sources.values()), k=n_farmers
             )
         else:
-            farmers["irrigation_source"] = irrigation_choice
+            irrigation_source = np.full(n_farmers, irrigation_choice, dtype=np.int32)
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
-        farmers["household_size"] = random.choices(
-            [1, 2, 3, 4, 5, 6, 7], k=len(farmers)
+        if irrigation_sources:
+            self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
+
+        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        self.set_binary(household_size, name="agents/farmers/household_size")
+
+        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_non_farm_income_family,
+            name="agents/farmers/daily_non_farm_income_family",
         )
 
-        farmers["daily_non_farm_income_family"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
+        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_consumption_per_capita,
+            name="agents/farmers/daily_consumption_per_capita",
         )
-        farmers["daily_consumption_per_capita"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
-        )
-        farmers["risk_aversion"] = np.random.normal(
+
+        risk_aversion = np.random.normal(
             loc=risk_aversion_mean,
             scale=risk_aversion_standard_deviation,
-            size=len(farmers),
+            size=n_farmers,
         )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
 
-        farmers["interest_rate"] = interest_rate
-        farmers["discount_rate"] = discount_rate
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
 
-        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
+        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
     def setup_population(self):
         populaton_map = self.data_catalog.get_rasterdataset(
