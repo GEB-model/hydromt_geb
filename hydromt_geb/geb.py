@@ -1295,6 +1295,12 @@ class GEBModel(GridModel):
 
         (xmin, ymin, xmax, ymax) = self.bounds
 
+        # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
+        xmin -= 0.1
+        ymin -= 0.1
+        xmax += 0.1
+        ymax += 0.1
+
         c = cdsapi.Client()
 
         c.retrieve(
