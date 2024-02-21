@@ -1284,9 +1284,7 @@ class GEBModel(GridModel):
 
         """
 
-        download_path = (
-            Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
-        )
+        download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
         download_path.mkdir(parents=True, exist_ok=True)
 
         output_fn = download_path / f"{starttime}_{endtime}.nc"
@@ -1294,6 +1292,8 @@ class GEBModel(GridModel):
         if output_fn.exists():
             self.logger.info(f"ERA5 data already downloaded to {output_fn}")
             return
+
+        (xmin, ymin, xmax, ymax) = self.bounds
 
         c = cdsapi.Client()
 
@@ -1305,7 +1305,7 @@ class GEBModel(GridModel):
                 "variable": [
                     "total_precipitation",
                 ],
-                "date": f"{starttime}/to/{endtime}",
+                "date": f"{starttime}/{endtime}",
                 "time": [
                     "00:00",
                     "01:00",
@@ -1332,7 +1332,7 @@ class GEBModel(GridModel):
                     "22:00",
                     "23:00",
                 ],
-                "area": self.bounds,  # North, West, South, East
+                "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
             },
             output_fn,
         )
