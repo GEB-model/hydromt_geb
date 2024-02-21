@@ -3118,7 +3118,15 @@ class GEBModel(GridModel):
         discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
-    def setup_farmer_characteristics_india(self, n_seasons, crop_choices, risk_aversion_mean, risk_aversion_standard_deviation, discount_rate):
+    def setup_farmer_characteristics_india(
+        self,
+        n_seasons,
+        crop_choices,
+        risk_aversion_mean,
+        risk_aversion_standard_deviation,
+        discount_rate,
+        interest_rate,
+    ):
         n_farmers = self.binary["agents/farmers/id"].size
 
         for season in range(1, n_seasons + 1):
@@ -3134,7 +3142,7 @@ class GEBModel(GridModel):
 
         irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
 
-        irrigation_source = np.full(n_farmers, irrigation_sources[None], dtype=np.int32)
+        irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
 
         farms = self.subgrid["agents/farmers/farms"]
         command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
@@ -3165,6 +3173,9 @@ class GEBModel(GridModel):
             size=n_farmers,
         )
         self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
 
         discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
