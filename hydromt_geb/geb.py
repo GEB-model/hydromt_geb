@@ -1272,6 +1272,71 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
+    def setup_ERA(self, starttime: date, endtime: date):
+        import cdsapi
+
+        """
+        Download hourly ERA5 data for a specified time frame and bounding box.
+
+        Parameters:
+        start_date (str): Start date in 'YYYY-MM-DD' format.
+        end_date (str): End date in 'YYYY-MM-DD' format.
+
+        """
+
+        download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
+        download_path.mkdir(parents=True, exist_ok=True)
+
+        output_fn = download_path / f"{starttime}_{endtime}.nc"
+
+        if output_fn.exists():
+            self.logger.info(f"ERA5 data already downloaded to {output_fn}")
+            return
+
+        (xmin, ymin, xmax, ymax) = self.bounds
+
+        c = cdsapi.Client()
+
+        c.retrieve(
+            "reanalysis-era5-land",
+            {
+                "product_type": "reanalysis",
+                "format": "netcdf",
+                "variable": [
+                    "total_precipitation",
+                ],
+                "date": f"{starttime}/{endtime}",
+                "time": [
+                    "00:00",
+                    "01:00",
+                    "02:00",
+                    "03:00",
+                    "04:00",
+                    "05:00",
+                    "06:00",
+                    "07:00",
+                    "08:00",
+                    "09:00",
+                    "10:00",
+                    "11:00",
+                    "12:00",
+                    "13:00",
+                    "14:00",
+                    "15:00",
+                    "16:00",
+                    "17:00",
+                    "18:00",
+                    "19:00",
+                    "20:00",
+                    "21:00",
+                    "22:00",
+                    "23:00",
+                ],
+                "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+            },
+            output_fn,
+        )
+
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
         assert np.isclose(
