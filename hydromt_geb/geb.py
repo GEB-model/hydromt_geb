@@ -1284,6 +1284,71 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
+    def setup_ERA(self, starttime: date, endtime: date):
+        import cdsapi
+
+        """
+        Download hourly ERA5 data for a specified time frame and bounding box.
+
+        Parameters:
+        start_date (str): Start date in 'YYYY-MM-DD' format.
+        end_date (str): End date in 'YYYY-MM-DD' format.
+
+        """
+
+        download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
+        download_path.mkdir(parents=True, exist_ok=True)
+
+        output_fn = download_path / f"{starttime}_{endtime}.nc"
+
+        if output_fn.exists():
+            self.logger.info(f"ERA5 data already downloaded to {output_fn}")
+            return
+
+        (xmin, ymin, xmax, ymax) = self.bounds
+
+        c = cdsapi.Client()
+
+        c.retrieve(
+            "reanalysis-era5-land",
+            {
+                "product_type": "reanalysis",
+                "format": "netcdf",
+                "variable": [
+                    "total_precipitation",
+                ],
+                "date": f"{starttime}/{endtime}",
+                "time": [
+                    "00:00",
+                    "01:00",
+                    "02:00",
+                    "03:00",
+                    "04:00",
+                    "05:00",
+                    "06:00",
+                    "07:00",
+                    "08:00",
+                    "09:00",
+                    "10:00",
+                    "11:00",
+                    "12:00",
+                    "13:00",
+                    "14:00",
+                    "15:00",
+                    "16:00",
+                    "17:00",
+                    "18:00",
+                    "19:00",
+                    "20:00",
+                    "21:00",
+                    "22:00",
+                    "23:00",
+                ],
+                "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+            },
+            output_fn,
+        )
+
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
         assert np.isclose(
@@ -1565,7 +1630,7 @@ class GEBModel(GridModel):
                     hurs.name = "hurs"
                     hurs.to_netcdf(fn)
                 else:
-                    hurs = xr.open_dataset(fn, chunks={"time": 365})["hurs"]
+                    hurs = xr.open_dataset(fn, chunks={"time": 1})["hurs"]
                 # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
@@ -1638,10 +1703,10 @@ class GEBModel(GridModel):
                     w5e5_regridded_corr_clipped.rio.set_spatial_dims("lon", "lat")
                 )
 
-                hurs_output.loc[
-                    dict(time=slice(start_month, end_month))
-                ] = self.snap_to_grid(
-                    w5e5_regridded_corr_clipped, hurs_output, xdim="lon", ydim="lat"
+                hurs_output.loc[dict(time=slice(start_month, end_month))] = (
+                    self.snap_to_grid(
+                        w5e5_regridded_corr_clipped, hurs_output, xdim="lon", ydim="lat"
+                    )
                 )
 
         hurs_output = hurs_output.rename({"lon": "x", "lat": "y"})
@@ -1980,27 +2045,27 @@ class GEBModel(GridModel):
 
         # assert input data have the same coordinates
         assert np.array_equal(
-            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmin"].x
+            self.forcing["climate/pr"].x, self.forcing["climate/tasmin"].x
         )
         assert np.array_equal(
-            self.forcing[f"climate/pr"].x, self.forcing[f"climate/tasmax"].x
+            self.forcing["climate/pr"].x, self.forcing["climate/tasmax"].x
         )
         assert np.array_equal(
-            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmin"].y
+            self.forcing["climate/pr"].y, self.forcing["climate/tasmin"].y
         )
         assert np.array_equal(
-            self.forcing[f"climate/pr"].y, self.forcing[f"climate/tasmax"].y
+            self.forcing["climate/pr"].y, self.forcing["climate/tasmax"].y
         )
 
         pet = xci.potential_evapotranspiration(
-            tasmin=self.forcing[f"climate/tasmin"],
-            tasmax=self.forcing[f"climate/tasmax"],
+            tasmin=self.forcing["climate/tasmin"],
+            tasmax=self.forcing["climate/tasmax"],
             method="BR65",
         )
 
         # Compute the potential evapotranspiration
         water_budget = xci._agro.water_budget(
-            pr=self.forcing[f"climate/pr"], evspsblpot=pet
+            pr=self.forcing["climate/pr"], evspsblpot=pet
         )
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
@@ -2040,9 +2105,9 @@ class GEBModel(GridModel):
 
         # Group the data by year and find the maximum monthly sum for each year
         SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
-        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"})
+        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"}).chunk({"time": -1})
 
-        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme")
+        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme").compute()
         GEV.name = "gev"
 
         self.set_grid(GEV.sel(dparams="c"), name=f"climate/gev_c")
@@ -2164,8 +2229,7 @@ class GEBModel(GridModel):
 
         # calculate the cell area for the subgrid for the entire region
         region_cell_area_subgrid.data = (
-            repeat_grid(region_cell_area, self.subgrid_factor)
-            / self.subgrid_factor**2
+            repeat_grid(region_cell_area, self.subgrid_factor) / self.subgrid_factor**2
         )
 
         # create new subgrid for the region without padding
@@ -3392,7 +3456,7 @@ class GEBModel(GridModel):
         datasets = [
             xr.open_dataset(
                 download_path / file,
-                chunks={"time": 365, "lat": XY_CHUNKSIZE, "lon": XY_CHUNKSIZE},
+                chunks={"time": 1, "lat": XY_CHUNKSIZE, "lon": XY_CHUNKSIZE},
                 lock=False,
             )
             for file in parse_files
@@ -3402,9 +3466,11 @@ class GEBModel(GridModel):
 
         # make sure y is decreasing rather than increasing
         datasets = [
-            dataset.reindex(lat=dataset.lat[::-1])
-            if dataset.lat[0] < dataset.lat[-1]
-            else dataset
+            (
+                dataset.reindex(lat=dataset.lat[::-1])
+                if dataset.lat[0] < dataset.lat[-1]
+                else dataset
+            )
             for dataset in datasets
         ]
 
@@ -3475,8 +3541,6 @@ class GEBModel(GridModel):
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_subgrid(self):
         self._assert_write_mode
@@ -3488,8 +3552,6 @@ class GEBModel(GridModel):
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_region_subgrid(self):
         self._assert_write_mode
@@ -3501,8 +3563,6 @@ class GEBModel(GridModel):
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_MERIT_grid(self):
         self._assert_write_mode
@@ -3514,8 +3574,6 @@ class GEBModel(GridModel):
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_MODFLOW_grid(self):
         self._assert_write_mode
@@ -3527,8 +3585,6 @@ class GEBModel(GridModel):
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_forcing_to_netcdf(self, var, forcing) -> None:
         self.logger.info(f"Write {var}")
@@ -3540,6 +3596,13 @@ class GEBModel(GridModel):
         if fp.exists():
             fp.unlink()
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
+        forcing = forcing.chunk(
+            {
+                "time": 1,
+                "y": min(forcing.y.size, XY_CHUNKSIZE),
+                "x": min(forcing.x.size, XY_CHUNKSIZE),
+            }
+        )
         with ProgressBar(dt=10):  # print progress bar every 10 seconds
             assert (
                 forcing.dims[0] == "time"
@@ -3560,7 +3623,9 @@ class GEBModel(GridModel):
                     }
                 },
             )
-            return xr.open_dataset(fp, lock=False)[forcing.name]
+            return xr.open_dataset(
+                fp, chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE}, lock=False
+            )[forcing.name]
 
     def write_forcing(self) -> None:
         self._assert_write_mode
@@ -3569,8 +3634,6 @@ class GEBModel(GridModel):
             forcing = self.forcing[var]
             if self.is_updated["forcing"][var]["updated"]:
                 self.write_forcing_to_netcdf(var, forcing)
-            else:
-                self.logger.info(f"Skip {var}")
 
     def write_table(self):
         if len(self.table) == 0:
@@ -3587,8 +3650,6 @@ class GEBModel(GridModel):
                     fp = Path(self.root, fn)
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     data.to_csv(fp)
-                else:
-                    self.logger.debug(f"Skip {name}")
 
     def write_binary(self):
         if len(self.binary) == 0:
@@ -3605,8 +3666,6 @@ class GEBModel(GridModel):
                     fp = Path(self.root, fn)
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     np.savez_compressed(fp, data=data)
-                else:
-                    self.logger.debug(f"Skip {name}")
 
     def write_dict(self):
         def convert_timestamp_to_string(timestamp):
@@ -3626,8 +3685,6 @@ class GEBModel(GridModel):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(output_path, "w") as f:
                         json.dump(data, f, default=convert_timestamp_to_string)
-                else:
-                    self.logger.debug(f"Skip {name}")
 
     def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:
         """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
@@ -3656,8 +3713,6 @@ class GEBModel(GridModel):
                         os.makedirs(os.path.dirname(_fn))
                     self.is_updated["geoms"][name]["filename"] = _fn
                     gdf.to_file(_fn, **kwargs)
-                else:
-                    self.logger.debug(f"Skip {name}")
 
     def set_table(self, table, name, update=True):
         self.is_updated["table"][name] = {"updated": update}
@@ -3703,7 +3758,7 @@ class GEBModel(GridModel):
         self.read_model_structure()
         for name, fn in self.model_structure["geoms"].items():
             geom = gpd.read_file(Path(self.root, fn))
-            self.set_geoms(geom, name=name, update=True)
+            self.set_geoms(geom, name=name, update=False)
 
     def read_binary(self):
         self.read_model_structure()
@@ -3771,7 +3826,7 @@ class GEBModel(GridModel):
         for name, fn in self.model_structure["forcing"].items():
             with xr.open_dataset(
                 Path(self.root) / fn,
-                chunks={"time": 365, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
                 lock=False,
             )[name.split("/")[-1]] as da:
                 assert "x" in da.dims and "y" in da.dims
