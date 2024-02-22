@@ -2030,34 +2030,6 @@ class GEBModel(GridModel):
         }
         spei.name = "spei"
 
-        import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
-
-        # Assuming 'spei' is your xarray DataArray or Dataset
-
-        # Compute the mean over the 'x' and 'y' dimensions
-        data_to_plot = spei.mean(dim=['x', 'y'])
-
-        # Plotting
-        plt.figure(figsize=(10, 4))  # Set the figure size (width, height) in inches
-        plt.plot(data_to_plot['time'], data_to_plot, label='Data', color='blue')  # Plot the data
-
-        # Set major ticks format
-        plt.gca().xaxis.set_major_locator(mdates.YearLocator())  # Set major ticks to appear every year
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))  # Format major ticks as years
-
-        plt.xlabel('Time')  # X-axis label
-        plt.ylabel('Value')  # Y-axis label (change according to what the value represents)
-        plt.title('Mean SPEI Value Over Area Per Time')  # Title of the plot
-        plt.legend()  # Show legend
-        plt.grid(True)  # Show grid
-
-        # Rotate date labels for better readability
-        plt.gcf().autofmt_xdate()
-
-        plt.tight_layout()  # Ensure a nice layout
-        plt.show()  # Display the plot
-
         self.set_forcing(spei, name=f"climate/spei")
 
     def setup_GEV(self):
