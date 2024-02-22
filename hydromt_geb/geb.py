@@ -57,6 +57,7 @@ from .workflows import (
     create_farms,
     get_farm_distribution,
     calculate_cell_area,
+    fetch_and_save,
 )
 from .workflows.population import generate_locations
 
@@ -1291,57 +1292,76 @@ class GEBModel(GridModel):
 
         if output_fn.exists():
             self.logger.info(f"ERA5 data already downloaded to {output_fn}")
-            return
+        else:
 
-        (xmin, ymin, xmax, ymax) = self.bounds
+            (xmin, ymin, xmax, ymax) = self.bounds
 
-        # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
-        xmin -= 0.1
-        ymin -= 0.1
-        xmax += 0.1
-        ymax += 0.1
+            # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
+            xmin -= 0.1
+            ymin -= 0.1
+            xmax += 0.1
+            ymax += 0.1
 
-        c = cdsapi.Client()
+            c = cdsapi.Client()
 
-        c.retrieve(
-            "reanalysis-era5-land",
-            {
-                "product_type": "reanalysis",
-                "format": "netcdf",
-                "variable": [
-                    "total_precipitation",
-                ],
-                "date": f"{starttime}/{endtime}",
-                "time": [
-                    "00:00",
-                    "01:00",
-                    "02:00",
-                    "03:00",
-                    "04:00",
-                    "05:00",
-                    "06:00",
-                    "07:00",
-                    "08:00",
-                    "09:00",
-                    "10:00",
-                    "11:00",
-                    "12:00",
-                    "13:00",
-                    "14:00",
-                    "15:00",
-                    "16:00",
-                    "17:00",
-                    "18:00",
-                    "19:00",
-                    "20:00",
-                    "21:00",
-                    "22:00",
-                    "23:00",
-                ],
-                "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
-            },
-            output_fn,
+            c.retrieve(
+                "reanalysis-era5-land",
+                {
+                    "product_type": "reanalysis",
+                    "format": "netcdf",
+                    "variable": [
+                        "total_precipitation",
+                    ],
+                    "date": f"{starttime}/{endtime}",
+                    "time": [
+                        "00:00",
+                        "01:00",
+                        "02:00",
+                        "03:00",
+                        "04:00",
+                        "05:00",
+                        "06:00",
+                        "07:00",
+                        "08:00",
+                        "09:00",
+                        "10:00",
+                        "11:00",
+                        "12:00",
+                        "13:00",
+                        "14:00",
+                        "15:00",
+                        "16:00",
+                        "17:00",
+                        "18:00",
+                        "19:00",
+                        "20:00",
+                        "21:00",
+                        "22:00",
+                        "23:00",
+                    ],
+                    "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+                },
+                output_fn,
+            )
+
+        # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
+        # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
+        # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
+        # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
+        # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
+        ds = xr.open_dataset(output_fn)["tp"].rename(
+            {"longitude": "x", "latitude": "y"}
         )
+        # forecasts are the difference between the current and previous time step
+        hourly = ds.diff("time")
+        # remove first from ds as well
+        ds = ds.isel(time=slice(1, None))
+        # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
+        hourly = hourly.where(hourly.time.dt.hour != 1, ds)
+        hourly = hourly / 3600  # convert from m/hr to m/s
+        hourly.name = "ERA5"
+
+        self.set_forcing(hourly, name="forcing/ERA5")
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
@@ -3060,7 +3080,7 @@ class GEBModel(GridModel):
     def setup_farmer_characteristics_simple(
         self,
         irrigation_sources=None,
-        irrigation_choice=None,
+        irrigation_choice=0,
         crop_choices=None,
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
@@ -3072,7 +3092,7 @@ class GEBModel(GridModel):
 
         for season in range(1, n_seasons + 1):
             # randomly sample from crops
-            if crop_choices[f"season_#{season}"] == "random":
+            if crop_choices[season - 1] == "random":
                 crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
                 farmer_crops = random.choices(crop_ids, k=n_farmers)
             else:
@@ -3145,10 +3165,11 @@ class GEBModel(GridModel):
         irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
 
         farms = self.subgrid["agents/farmers/farms"]
-        command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
-        canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
-        canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
-        irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
+        if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
+            command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
+            canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
+            canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
+            irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
@@ -3213,6 +3234,60 @@ class GEBModel(GridModel):
         self.set_binary(locations, name="agents/households/locations")
 
         return None
+
+    def setup_assets(self, feature_types):
+        import osm_flex.download
+        import osm_flex.extract
+
+        if isinstance(feature_types, str):
+            feature_types = [feature_types]
+
+        OSM_data_dir = Path(self.root).parent / "preprocessing" / "osm"
+        OSM_data_dir.mkdir(exist_ok=True, parents=True)
+
+        index_file = OSM_data_dir / "geofabrik_region_index.geojson"
+        fetch_and_save(
+            "https://download.geofabrik.de/index-v1.json", index_file, overwrite=False
+        )
+
+        index = gpd.read_file(index_file)
+        # remove Dach region as all individual regions within dach countries are also in the index
+        index = index[index["id"] != "dach"]
+
+        # find all regions that intersect with the bbox
+        intersecting_regions = index[index.intersects(self.region.geometry[0])]
+
+        def filter_regions(ID, parents):
+            return ID not in parents
+
+        intersecting_regions = intersecting_regions[
+            intersecting_regions["id"].apply(
+                lambda x: filter_regions(x, intersecting_regions["parent"].tolist())
+            )
+        ]
+
+        # download all regions
+        all_features = {}
+        for _, row in tqdm(intersecting_regions.iterrows()):
+            url = json.loads(row["urls"])["pbf"]
+            filepath = OSM_data_dir / url.split("/")[-1]
+            fetch_and_save(url, filepath, overwrite=False)
+            for feature_type in feature_types:
+                if feature_type not in all_features:
+                    all_features[feature_type] = []
+                features = osm_flex.extract.extract_cis(filepath, feature_type)
+                # features = features.clip(self.geoms["areamaps/region"])
+                features = gpd.sjoin(
+                    features,
+                    self.geoms["areamaps/region"],
+                    how="inner",
+                    op="intersects",
+                )
+                all_features[feature_type].append(features)
+
+        for feature_type in feature_types:
+            features = pd.concat(all_features[feature_type], ignore_index=True)
+            self.set_geoms(features, name=f"assets/{feature_type}")
 
     def interpolate(self, ds, interpolation_method, ydim="y", xdim="x"):
         out_ds = ds.interp(
@@ -3665,8 +3740,8 @@ class GEBModel(GridModel):
                     with open(output_path, "w") as f:
                         json.dump(data, f, default=convert_timestamp_to_string)
 
-    def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:
-        """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
+    def write_geoms(self, fn: str = "{name}.gpkg", **kwargs) -> None:
+        """Write model geometries to a vector file (by default gpkg) at <root>/<fn>
 
         key-word arguments are passed to :py:meth:`geopandas.GeoDataFrame.to_file`
 
@@ -3674,7 +3749,7 @@ class GEBModel(GridModel):
         ----------
         fn : str, optional
             filename relative to model root and should contain a {name} placeholder,
-            by default 'geoms/{name}.geojson'
+            by default 'geoms/{name}.gpkg'
         """
         if len(self._geoms) == 0:
             self.logger.debug("No geoms data found, skip writing.")
@@ -3682,7 +3757,7 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             if "driver" not in kwargs:
-                kwargs.update(driver="GeoJSON")
+                kwargs.update(driver="GPKG")
             for name, gdf in self._geoms.items():
                 if self.is_updated["geoms"][name]["updated"]:
                     self.logger.debug(f"Writing file {fn.format(name=name)}")
