@@ -57,6 +57,7 @@ from .workflows import (
     create_farms,
     get_farm_distribution,
     calculate_cell_area,
+    fetch_and_save,
 )
 from .workflows.population import generate_locations
 
@@ -1291,51 +1292,76 @@ class GEBModel(GridModel):
 
         if output_fn.exists():
             self.logger.info(f"ERA5 data already downloaded to {output_fn}")
-            return
+        else:
 
-        (xmin, ymin, xmax, ymax) = self.bounds
+            (xmin, ymin, xmax, ymax) = self.bounds
 
-        c = cdsapi.Client()
+            # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
+            xmin -= 0.1
+            ymin -= 0.1
+            xmax += 0.1
+            ymax += 0.1
 
-        c.retrieve(
-            "reanalysis-era5-land",
-            {
-                "product_type": "reanalysis",
-                "format": "netcdf",
-                "variable": [
-                    "total_precipitation",
-                ],
-                "date": f"{starttime}/{endtime}",
-                "time": [
-                    "00:00",
-                    "01:00",
-                    "02:00",
-                    "03:00",
-                    "04:00",
-                    "05:00",
-                    "06:00",
-                    "07:00",
-                    "08:00",
-                    "09:00",
-                    "10:00",
-                    "11:00",
-                    "12:00",
-                    "13:00",
-                    "14:00",
-                    "15:00",
-                    "16:00",
-                    "17:00",
-                    "18:00",
-                    "19:00",
-                    "20:00",
-                    "21:00",
-                    "22:00",
-                    "23:00",
-                ],
-                "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
-            },
-            output_fn,
+            c = cdsapi.Client()
+
+            c.retrieve(
+                "reanalysis-era5-land",
+                {
+                    "product_type": "reanalysis",
+                    "format": "netcdf",
+                    "variable": [
+                        "total_precipitation",
+                    ],
+                    "date": f"{starttime}/{endtime}",
+                    "time": [
+                        "00:00",
+                        "01:00",
+                        "02:00",
+                        "03:00",
+                        "04:00",
+                        "05:00",
+                        "06:00",
+                        "07:00",
+                        "08:00",
+                        "09:00",
+                        "10:00",
+                        "11:00",
+                        "12:00",
+                        "13:00",
+                        "14:00",
+                        "15:00",
+                        "16:00",
+                        "17:00",
+                        "18:00",
+                        "19:00",
+                        "20:00",
+                        "21:00",
+                        "22:00",
+                        "23:00",
+                    ],
+                    "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+                },
+                output_fn,
+            )
+
+        # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
+        # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
+        # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
+        # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
+        # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
+        ds = xr.open_dataset(output_fn)["tp"].rename(
+            {"longitude": "x", "latitude": "y"}
         )
+        # forecasts are the difference between the current and previous time step
+        hourly = ds.diff("time")
+        # remove first from ds as well
+        ds = ds.isel(time=slice(1, None))
+        # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
+        hourly = hourly.where(hourly.time.dt.hour != 1, ds)
+        hourly = hourly / 3600  # convert from m/hr to m/s
+        hourly.name = "ERA5"
+
+        self.set_forcing(hourly, name="forcing/ERA5")
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
@@ -2353,6 +2379,9 @@ class GEBModel(GridModel):
         self.set_dict(inflation_rates_dict, name="economics/inflation_rates")
         self.set_dict(lending_rates_dict, name="economics/lending_rates")
 
+    def setup_irrigation_sources(self, irrigation_sources):
+        self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
+
     def setup_well_prices_by_reference_year(
         self,
         irrigation_maintenance: float,
@@ -2537,7 +2566,7 @@ class GEBModel(GridModel):
             upkeep_prices_dict, name="economics/upkeep_prices_drip_irrigation_per_m2"
         )
 
-    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
+    def setup_farmers(self, farmers):
         """
         Sets up the farmers data for GEB.
 
@@ -2643,25 +2672,10 @@ class GEBModel(GridModel):
         self.set_subgrid(subgrid_farms_in_study_area, name="agents/farmers/farms")
         self.subgrid["agents/farmers/farms"].rio.set_nodata(-1)
 
-        crop_name_to_id = {
-            crop_name: int(ID) for ID, crop_name in self.dict["crops/crop_ids"].items()
-        }
-        crop_name_to_id[np.nan] = -1
-        for season in range(1, n_seasons + 1):
-            farmers[f"season_#{season}_crop"] = farmers[f"season_#{season}_crop"].map(
-                crop_name_to_id
-            )
+        self.set_binary(farmers.index.values, name=f"agents/farmers/id")
+        self.set_binary(farmers["region_id"].values, name=f"agents/farmers/region_id")
 
-        if irrigation_sources:
-            self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
-            farmers["irrigation_source"] = farmers["irrigation_source"].map(
-                irrigation_sources
-            )
-
-        for column in farmers.columns:
-            self.set_binary(farmers[column], name=f"agents/farmers/{column}")
-
-    def setup_farmers_from_csv(self, path=None, irrigation_sources=None, n_seasons=1):
+    def setup_farmers_from_csv(self, path=None):
         """
         Sets up the farmers data for GEB from a CSV file.
 
@@ -2669,16 +2683,11 @@ class GEBModel(GridModel):
         ----------
         path : str
             The path to the CSV file containing the farmer data.
-        irrigation_sources : dict, optional
-            A dictionary mapping irrigation source names to IDs.
-        n_seasons : int, optional
-            The number of seasons to simulate.
 
         Notes
         -----
         This method sets up the farmers data for GEB from a CSV file. It first reads the farmer data from
-        the CSV file using the `pandas.read_csv` method. The resulting DataFrame is passed to the `setup_farmers` method
-        along with the optional `irrigation_sources` and `n_seasons` parameters.
+        the CSV file using the `pandas.read_csv` method.
 
         See the `setup_farmers` method for more information on how the farmer data is set up in the model.
         """
@@ -2691,20 +2700,13 @@ class GEBModel(GridModel):
                 / "farmers.csv"
             )
         farmers = pd.read_csv(path, index_col=0)
-        self.setup_farmers(farmers, irrigation_sources, n_seasons)
+        self.setup_farmers(farmers)
 
-    def setup_farmers_simple(
+    def setup_create_farms_simple(
         self,
-        irrigation_sources,
-        irrigation_choice,
-        crop_choices,
-        region_id_column="UID",
+        region_id_column="region_id",
         country_iso3_column="ISO3",
-        risk_aversion_mean=1.5,
-        risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
-        interest_rate=0.05,
-        discount_rate=0.1,
     ):
         """
         Sets up the farmers for GEB.
@@ -3073,45 +3075,131 @@ class GEBModel(GridModel):
             all_agents.append(region_agents)
 
         farmers = pd.concat(all_agents, ignore_index=True)
-        # randomly sample from crops
-        for season in (1, 2, 3):
-            if crop_choices[f"season_#{season}"] == "random":
-                farmers[f"season_#{season}_crop"] = random.choices(
-                    list(self.dict["crops/crop_ids"].values()), k=len(farmers)
-                )
+        self.setup_farmers(farmers)
+
+    def setup_farmer_characteristics_simple(
+        self,
+        irrigation_sources=None,
+        irrigation_choice=0,
+        crop_choices=None,
+        risk_aversion_mean=1.5,
+        risk_aversion_standard_deviation=0.5,
+        interest_rate=0.05,
+        discount_rate=0.1,
+        n_seasons=3,
+    ):
+        n_farmers = self.binary["agents/farmers/id"].size
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
+            if crop_choices[season - 1] == "random":
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
             else:
-                farmers[f"season_#{season}_crop"] = np.full(
-                    len(farmers), crop_choices[f"season_#{season}"], dtype=np.int32
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
                 )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
-            farmers["irrigation_source"] = random.choices(
-                list(irrigation_sources.keys()), k=len(farmers)
+            irrigation_source = random.choices(
+                list(irrigation_sources.values()), k=n_farmers
             )
         else:
-            farmers["irrigation_source"] = irrigation_choice
+            irrigation_source = np.full(n_farmers, irrigation_choice, dtype=np.int32)
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
-        farmers["household_size"] = random.choices(
-            [1, 2, 3, 4, 5, 6, 7], k=len(farmers)
+        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        self.set_binary(household_size, name="agents/farmers/household_size")
+
+        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_non_farm_income_family,
+            name="agents/farmers/daily_non_farm_income_family",
         )
 
-        farmers["daily_non_farm_income_family"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
+        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_consumption_per_capita,
+            name="agents/farmers/daily_consumption_per_capita",
         )
-        farmers["daily_consumption_per_capita"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
-        )
-        farmers["risk_aversion"] = np.random.normal(
+
+        risk_aversion = np.random.normal(
             loc=risk_aversion_mean,
             scale=risk_aversion_standard_deviation,
-            size=len(farmers),
+            size=n_farmers,
+        )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
+
+        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
+
+    def setup_farmer_characteristics_india(
+        self,
+        n_seasons,
+        crop_choices,
+        risk_aversion_mean,
+        risk_aversion_standard_deviation,
+        discount_rate,
+        interest_rate,
+    ):
+        n_farmers = self.binary["agents/farmers/id"].size
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
+            if crop_choices[season - 1] == "random":
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
+            else:
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
+                )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
+
+        irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
+
+        irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
+
+        farms = self.subgrid["agents/farmers/farms"]
+        if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
+            command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
+            canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
+            canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
+            irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
+
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
+
+        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        self.set_binary(household_size, name="agents/farmers/household_size")
+
+        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_non_farm_income_family,
+            name="agents/farmers/daily_non_farm_income_family",
         )
 
-        farmers["interest_rate"] = interest_rate
-        farmers["discount_rate"] = discount_rate
+        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_consumption_per_capita,
+            name="agents/farmers/daily_consumption_per_capita",
+        )
 
-        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
+        risk_aversion = np.random.normal(
+            loc=risk_aversion_mean,
+            scale=risk_aversion_standard_deviation,
+            size=n_farmers,
+        )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
+
+        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
     def setup_population(self):
         populaton_map = self.data_catalog.get_rasterdataset(
@@ -3146,6 +3234,60 @@ class GEBModel(GridModel):
         self.set_binary(locations, name="agents/households/locations")
 
         return None
+
+    def setup_assets(self, feature_types):
+        import osm_flex.download
+        import osm_flex.extract
+
+        if isinstance(feature_types, str):
+            feature_types = [feature_types]
+
+        OSM_data_dir = Path(self.root).parent / "preprocessing" / "osm"
+        OSM_data_dir.mkdir(exist_ok=True, parents=True)
+
+        index_file = OSM_data_dir / "geofabrik_region_index.geojson"
+        fetch_and_save(
+            "https://download.geofabrik.de/index-v1.json", index_file, overwrite=False
+        )
+
+        index = gpd.read_file(index_file)
+        # remove Dach region as all individual regions within dach countries are also in the index
+        index = index[index["id"] != "dach"]
+
+        # find all regions that intersect with the bbox
+        intersecting_regions = index[index.intersects(self.region.geometry[0])]
+
+        def filter_regions(ID, parents):
+            return ID not in parents
+
+        intersecting_regions = intersecting_regions[
+            intersecting_regions["id"].apply(
+                lambda x: filter_regions(x, intersecting_regions["parent"].tolist())
+            )
+        ]
+
+        # download all regions
+        all_features = {}
+        for _, row in tqdm(intersecting_regions.iterrows()):
+            url = json.loads(row["urls"])["pbf"]
+            filepath = OSM_data_dir / url.split("/")[-1]
+            fetch_and_save(url, filepath, overwrite=False)
+            for feature_type in feature_types:
+                if feature_type not in all_features:
+                    all_features[feature_type] = []
+                features = osm_flex.extract.extract_cis(filepath, feature_type)
+                # features = features.clip(self.geoms["areamaps/region"])
+                features = gpd.sjoin(
+                    features,
+                    self.geoms["areamaps/region"],
+                    how="inner",
+                    op="intersects",
+                )
+                all_features[feature_type].append(features)
+
+        for feature_type in feature_types:
+            features = pd.concat(all_features[feature_type], ignore_index=True)
+            self.set_geoms(features, name=f"assets/{feature_type}")
 
     def interpolate(self, ds, interpolation_method, ydim="y", xdim="x"):
         out_ds = ds.interp(
@@ -3598,8 +3740,8 @@ class GEBModel(GridModel):
                     with open(output_path, "w") as f:
                         json.dump(data, f, default=convert_timestamp_to_string)
 
-    def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:
-        """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
+    def write_geoms(self, fn: str = "{name}.gpkg", **kwargs) -> None:
+        """Write model geometries to a vector file (by default gpkg) at <root>/<fn>
 
         key-word arguments are passed to :py:meth:`geopandas.GeoDataFrame.to_file`
 
@@ -3607,7 +3749,7 @@ class GEBModel(GridModel):
         ----------
         fn : str, optional
             filename relative to model root and should contain a {name} placeholder,
-            by default 'geoms/{name}.geojson'
+            by default 'geoms/{name}.gpkg'
         """
         if len(self._geoms) == 0:
             self.logger.debug("No geoms data found, skip writing.")
@@ -3615,7 +3757,7 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             if "driver" not in kwargs:
-                kwargs.update(driver="GeoJSON")
+                kwargs.update(driver="GPKG")
             for name, gdf in self._geoms.items():
                 if self.is_updated["geoms"][name]["updated"]:
                     self.logger.debug(f"Writing file {fn.format(name=name)}")
