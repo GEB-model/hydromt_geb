@@ -2707,6 +2707,8 @@ class GEBModel(GridModel):
         region_id_column="region_id",
         country_iso3_column="ISO3",
         farm_size_donor_countries=None,
+        data_source="lowder",
+        size_class_boundaries=None,
     ):
         """
         Sets up the farmers for GEB.
@@ -2733,19 +2735,25 @@ class GEBModel(GridModel):
 
         A paper that reports risk aversion values for 75 countries is this one: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2646134
         """
-        SIZE_CLASSES_BOUNDARIES = {
-            "< 1 Ha": (0, 10000),
-            "1 - 2 Ha": (10000, 20000),
-            "2 - 5 Ha": (20000, 50000),
-            "5 - 10 Ha": (50000, 100000),
-            "10 - 20 Ha": (100000, 200000),
-            "20 - 50 Ha": (200000, 500000),
-            "50 - 100 Ha": (500000, 1000000),
-            "100 - 200 Ha": (1000000, 2000000),
-            "200 - 500 Ha": (2000000, 5000000),
-            "500 - 1000 Ha": (5000000, 10000000),
-            "> 1000 Ha": (10000000, np.inf),
-        }
+        if data_source == "lowder":
+            size_class_boundaries = {
+                "< 1 Ha": (0, 10000),
+                "1 - 2 Ha": (10000, 20000),
+                "2 - 5 Ha": (20000, 50000),
+                "5 - 10 Ha": (50000, 100000),
+                "10 - 20 Ha": (100000, 200000),
+                "20 - 50 Ha": (200000, 500000),
+                "50 - 100 Ha": (500000, 1000000),
+                "100 - 200 Ha": (1000000, 2000000),
+                "200 - 500 Ha": (2000000, 5000000),
+                "500 - 1000 Ha": (5000000, 10000000),
+                "> 1000 Ha": (10000000, np.inf),
+            }
+        else:
+            assert size_class_boundaries is not None
+            assert (
+                farm_size_donor_countries is None
+            ), "farm_size_donor_countries is only used for lowder data"
 
         cultivated_land = self.region_subgrid[
             "landsurface/full_region_cultivated_land"
@@ -2754,154 +2762,173 @@ class GEBModel(GridModel):
         cell_area = self.region_subgrid["areamaps/region_cell_area_subgrid"].compute()
 
         regions_shapes = self.geoms["areamaps/regions"]
-        assert (
-            country_iso3_column in regions_shapes.columns
-        ), f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
+        if data_source == "lowder":
+            assert (
+                country_iso3_column in regions_shapes.columns
+            ), f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
 
-        farm_sizes_per_country = (
-            self.data_catalog.get_dataframe("lowder_farm_sizes")
-            .dropna(subset=["Total"], axis=0)
-            .drop(["empty", "income class"], axis=1)
-        )
-        farm_sizes_per_country["Country"] = farm_sizes_per_country["Country"].ffill()
-        # Remove preceding and trailing white space from country names
-        farm_sizes_per_country["Country"] = farm_sizes_per_country[
-            "Country"
-        ].str.strip()
-        farm_sizes_per_country["Census Year"] = farm_sizes_per_country[
-            "Country"
-        ].ffill()
+            farm_sizes_per_region = (
+                self.data_catalog.get_dataframe("lowder_farm_sizes")
+                .dropna(subset=["Total"], axis=0)
+                .drop(["empty", "income class"], axis=1)
+            )
+            farm_sizes_per_region["Country"] = farm_sizes_per_region["Country"].ffill()
+            # Remove preceding and trailing white space from country names
+            farm_sizes_per_region["Country"] = farm_sizes_per_region[
+                "Country"
+            ].str.strip()
+            farm_sizes_per_region["Census Year"] = farm_sizes_per_region[
+                "Country"
+            ].ffill()
 
-        # convert country names to ISO3 codes
-        iso3_codes = {
-            "Albania": "ALB",
-            "Algeria": "DZA",
-            "American Samoa": "ASM",
-            "Argentina": "ARG",
-            "Austria": "AUT",
-            "Bahamas": "BHS",
-            "Barbados": "BRB",
-            "Belgium": "BEL",
-            "Brazil": "BRA",
-            "Bulgaria": "BGR",
-            "Burkina Faso": "BFA",
-            "Chile": "CHL",
-            "Colombia": "COL",
-            "Côte d'Ivoire": "CIV",
-            "Croatia": "HRV",
-            "Cyprus": "CYP",
-            "Czech Republic": "CZE",
-            "Democratic Republic of the Congo": "COD",
-            "Denmark": "DNK",
-            "Dominica": "DMA",
-            "Ecuador": "ECU",
-            "Egypt": "EGY",
-            "Estonia": "EST",
-            "Ethiopia": "ETH",
-            "Fiji": "FJI",
-            "Finland": "FIN",
-            "France": "FRA",
-            "French Polynesia": "PYF",
-            "Georgia": "GEO",
-            "Germany": "DEU",
-            "Greece": "GRC",
-            "Grenada": "GRD",
-            "Guam": "GUM",
-            "Guatemala": "GTM",
-            "Guinea": "GIN",
-            "Honduras": "HND",
-            "India": "IND",
-            "Indonesia": "IDN",
-            "Iran (Islamic Republic of)": "IRN",
-            "Ireland": "IRL",
-            "Italy": "ITA",
-            "Japan": "JPN",
-            "Jamaica": "JAM",
-            "Jordan": "JOR",
-            "Korea, Rep. of": "KOR",
-            "Kyrgyzstan": "KGZ",
-            "Lao People's Democratic Republic": "LAO",
-            "Latvia": "LVA",
-            "Lebanon": "LBN",
-            "Lithuania": "LTU",
-            "Luxembourg": "LUX",
-            "Malta": "MLT",
-            "Morocco": "MAR",
-            "Myanmar": "MMR",
-            "Namibia": "NAM",
-            "Nepal": "NPL",
-            "Netherlands": "NLD",
-            "Nicaragua": "NIC",
-            "Northern Mariana Islands": "MNP",
-            "Norway": "NOR",
-            "Pakistan": "PAK",
-            "Panama": "PAN",
-            "Paraguay": "PRY",
-            "Peru": "PER",
-            "Philippines": "PHL",
-            "Poland": "POL",
-            "Portugal": "PRT",
-            "Puerto Rico": "PRI",
-            "Qatar": "QAT",
-            "Romania": "ROU",
-            "Saint Lucia": "LCA",
-            "Saint Vincent and the Grenadines": "VCT",
-            "Samoa": "WSM",
-            "Senegal": "SEN",
-            "Serbia": "SRB",
-            "Sweden": "SWE",
-            "Switzerland": "CHE",
-            "Thailand": "THA",
-            "Trinidad and Tobago": "TTO",
-            "Turkey": "TUR",
-            "Uganda": "UGA",
-            "United Kingdom": "GBR",
-            "United States of America": "USA",
-            "Uruguay": "URY",
-            "Venezuela (Bolivarian Republic of)": "VEN",
-            "Virgin Islands, United States": "VIR",
-            "Yemen": "YEM",
-            "Cook Islands": "COK",
-            "French Guiana": "GUF",
-            "Guadeloupe": "GLP",
-            "Martinique": "MTQ",
-            "Réunion": "REU",
-            "Canada": "CAN",
-            "China": "CHN",
-            "Guinea Bissau": "GNB",
-            "Hungary": "HUN",
-            "Lesotho": "LSO",
-            "Libya": "LBY",
-            "Malawi": "MWI",
-            "Mozambique": "MOZ",
-            "New Zealand": "NZL",
-            "Slovakia": "SVK",
-            "Slovenia": "SVN",
-            "Spain": "ESP",
-            "St. Kitts & Nevis": "KNA",
-            "Viet Nam": "VNM",
-            "Australia": "AUS",
-            "Djibouti": "DJI",
-            "Mali": "MLI",
-            "Togo": "TGO",
-            "Zambia": "ZMB",
-        }
-        farm_sizes_per_country["ISO3"] = farm_sizes_per_country["Country"].map(
-            iso3_codes
-        )
-        assert (
-            not farm_sizes_per_country["ISO3"].isna().any()
-        ), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
+            # convert country names to ISO3 codes
+            iso3_codes = {
+                "Albania": "ALB",
+                "Algeria": "DZA",
+                "American Samoa": "ASM",
+                "Argentina": "ARG",
+                "Austria": "AUT",
+                "Bahamas": "BHS",
+                "Barbados": "BRB",
+                "Belgium": "BEL",
+                "Brazil": "BRA",
+                "Bulgaria": "BGR",
+                "Burkina Faso": "BFA",
+                "Chile": "CHL",
+                "Colombia": "COL",
+                "Côte d'Ivoire": "CIV",
+                "Croatia": "HRV",
+                "Cyprus": "CYP",
+                "Czech Republic": "CZE",
+                "Democratic Republic of the Congo": "COD",
+                "Denmark": "DNK",
+                "Dominica": "DMA",
+                "Ecuador": "ECU",
+                "Egypt": "EGY",
+                "Estonia": "EST",
+                "Ethiopia": "ETH",
+                "Fiji": "FJI",
+                "Finland": "FIN",
+                "France": "FRA",
+                "French Polynesia": "PYF",
+                "Georgia": "GEO",
+                "Germany": "DEU",
+                "Greece": "GRC",
+                "Grenada": "GRD",
+                "Guam": "GUM",
+                "Guatemala": "GTM",
+                "Guinea": "GIN",
+                "Honduras": "HND",
+                "India": "IND",
+                "Indonesia": "IDN",
+                "Iran (Islamic Republic of)": "IRN",
+                "Ireland": "IRL",
+                "Italy": "ITA",
+                "Japan": "JPN",
+                "Jamaica": "JAM",
+                "Jordan": "JOR",
+                "Korea, Rep. of": "KOR",
+                "Kyrgyzstan": "KGZ",
+                "Lao People's Democratic Republic": "LAO",
+                "Latvia": "LVA",
+                "Lebanon": "LBN",
+                "Lithuania": "LTU",
+                "Luxembourg": "LUX",
+                "Malta": "MLT",
+                "Morocco": "MAR",
+                "Myanmar": "MMR",
+                "Namibia": "NAM",
+                "Nepal": "NPL",
+                "Netherlands": "NLD",
+                "Nicaragua": "NIC",
+                "Northern Mariana Islands": "MNP",
+                "Norway": "NOR",
+                "Pakistan": "PAK",
+                "Panama": "PAN",
+                "Paraguay": "PRY",
+                "Peru": "PER",
+                "Philippines": "PHL",
+                "Poland": "POL",
+                "Portugal": "PRT",
+                "Puerto Rico": "PRI",
+                "Qatar": "QAT",
+                "Romania": "ROU",
+                "Saint Lucia": "LCA",
+                "Saint Vincent and the Grenadines": "VCT",
+                "Samoa": "WSM",
+                "Senegal": "SEN",
+                "Serbia": "SRB",
+                "Sweden": "SWE",
+                "Switzerland": "CHE",
+                "Thailand": "THA",
+                "Trinidad and Tobago": "TTO",
+                "Turkey": "TUR",
+                "Uganda": "UGA",
+                "United Kingdom": "GBR",
+                "United States of America": "USA",
+                "Uruguay": "URY",
+                "Venezuela (Bolivarian Republic of)": "VEN",
+                "Virgin Islands, United States": "VIR",
+                "Yemen": "YEM",
+                "Cook Islands": "COK",
+                "French Guiana": "GUF",
+                "Guadeloupe": "GLP",
+                "Martinique": "MTQ",
+                "Réunion": "REU",
+                "Canada": "CAN",
+                "China": "CHN",
+                "Guinea Bissau": "GNB",
+                "Hungary": "HUN",
+                "Lesotho": "LSO",
+                "Libya": "LBY",
+                "Malawi": "MWI",
+                "Mozambique": "MOZ",
+                "New Zealand": "NZL",
+                "Slovakia": "SVK",
+                "Slovenia": "SVN",
+                "Spain": "ESP",
+                "St. Kitts & Nevis": "KNA",
+                "Viet Nam": "VNM",
+                "Australia": "AUS",
+                "Djibouti": "DJI",
+                "Mali": "MLI",
+                "Togo": "TGO",
+                "Zambia": "ZMB",
+            }
+            farm_sizes_per_region["ISO3"] = farm_sizes_per_region["Country"].map(
+                iso3_codes
+            )
+            assert (
+                not farm_sizes_per_region["ISO3"].isna().any()
+            ), f"Found {farm_sizes_per_region['ISO3'].isna().sum()} countries without ISO3 code"
+        else:
+            # load data source
+            farm_sizes_per_region = pd.read_excel(
+                data_source["farm_size"], index_col=(0, 1, 2)
+            )
+            n_farms_per_region = pd.read_excel(
+                data_source["n_farms"],
+                index_col=(0, 1, 2),
+            )
 
         all_agents = []
         self.logger.debug(f"Starting processing of {len(regions_shapes)} regions")
         for _, region in regions_shapes.iterrows():
             UID = region[region_id_column]
-            country_ISO3 = region[country_iso3_column]
-            if farm_size_donor_countries:
-                country_ISO3 = farm_size_donor_countries.get(country_ISO3, country_ISO3)
+            if data_source == "lowder":
+                country_ISO3 = region[country_iso3_column]
+                if farm_size_donor_countries:
+                    country_ISO3 = farm_size_donor_countries.get(
+                        country_ISO3, country_ISO3
+                    )
+            else:
+                state, district, tehsil = (
+                    region["state_name"],
+                    region["district_n"],
+                    region["sub_dist_1"],
+                )
 
-            self.logger.debug(f"Processing region {UID} in {country_ISO3}")
+            self.logger.debug(f"Processing region {UID}")
 
             cultivated_land_region_total_cells = (
                 ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
@@ -2922,47 +2949,54 @@ class GEBModel(GridModel):
                 .compute()
             )
 
-            country_farm_sizes = farm_sizes_per_country.loc[
-                (farm_sizes_per_country["ISO3"] == country_ISO3)
-            ].drop(["Country", "Census Year", "Total"], axis=1)
-            assert (
-                len(country_farm_sizes) == 2
-            ), f"Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}"
+            if data_source == "lowder":
+                region_farm_sizes = farm_sizes_per_region.loc[
+                    (farm_sizes_per_region["ISO3"] == country_ISO3)
+                ].drop(["Country", "Census Year", "Total"], axis=1)
+                assert (
+                    len(region_farm_sizes) == 2
+                ), f"Found {len(region_farm_sizes) / 2} region_farm_sizes for {country_ISO3}"
 
-            n_holdings = (
-                country_farm_sizes.loc[
-                    country_farm_sizes["Holdings/ agricultural area"] == "Holdings"
-                ]
-                .iloc[0]
-                .drop(["Holdings/ agricultural area", "ISO3"])
-                .replace("..", "0")
-                .astype(np.int64)
-            )
-            agricultural_area_db_ha = (
-                country_farm_sizes.loc[
-                    country_farm_sizes["Holdings/ agricultural area"]
-                    == "Agricultural area (Ha) "
-                ]
-                .iloc[0]
-                .drop(["Holdings/ agricultural area", "ISO3"])
-                .replace("..", "0")
-                .astype(np.int64)
-            )
-            agricultural_area_db = agricultural_area_db_ha * 10000
-            avg_size_class = agricultural_area_db / n_holdings
+                region_n_holdings = (
+                    region_farm_sizes.loc[
+                        region_farm_sizes["Holdings/ agricultural area"] == "Holdings"
+                    ]
+                    .iloc[0]
+                    .drop(["Holdings/ agricultural area", "ISO3"])
+                    .replace("..", "0")
+                    .astype(np.int64)
+                )
+                agricultural_area_db_ha = (
+                    region_farm_sizes.loc[
+                        region_farm_sizes["Holdings/ agricultural area"]
+                        == "Agricultural area (Ha) "
+                    ]
+                    .iloc[0]
+                    .drop(["Holdings/ agricultural area", "ISO3"])
+                    .replace("..", "0")
+                    .astype(np.int64)
+                )
+                agricultural_area_db = agricultural_area_db_ha * 10000
+                region_farm_sizes = agricultural_area_db / region_n_holdings
+            else:
+                region_farm_sizes = farm_sizes_per_region.loc[(state, district, tehsil)]
+                region_n_holdings = n_farms_per_region.loc[(state, district, tehsil)]
+                agricultural_area_db = region_farm_sizes * region_n_holdings
 
             total_cultivated_land_area_db = agricultural_area_db.sum()
 
-            n_cells_per_size_class = pd.Series(0, index=n_holdings.index)
+            n_cells_per_size_class = pd.Series(0, index=region_n_holdings.index)
 
             for size_class in agricultural_area_db.index:
-                if n_holdings[size_class] > 0:  # if no holdings, no need to calculate
-                    n_holdings[size_class] = n_holdings[size_class] * (
+                if (
+                    region_n_holdings[size_class] > 0
+                ):  # if no holdings, no need to calculate
+                    region_n_holdings[size_class] = region_n_holdings[size_class] * (
                         total_cultivated_land_area_lu / total_cultivated_land_area_db
                     )
                     n_cells_per_size_class.loc[size_class] = (
-                        n_holdings[size_class]
-                        * avg_size_class[size_class]
+                        region_n_holdings[size_class]
+                        * region_farm_sizes[size_class]
                         / average_cell_area_region
                     )
                     assert not np.isnan(n_cells_per_size_class.loc[size_class])
@@ -2995,7 +3029,7 @@ class GEBModel(GridModel):
                     continue
 
                 number_of_agents_size_class = round(
-                    n_holdings[size_class].compute().item()
+                    region_n_holdings[size_class].compute().item()
                 )
                 # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
                 if (
@@ -3004,9 +3038,9 @@ class GEBModel(GridModel):
                 ):
                     number_of_agents_size_class = 1
 
-                min_size_m2, max_size_m2 = SIZE_CLASSES_BOUNDARIES[size_class]
-                if max_size_m2 == np.inf:
-                    max_size_m2 = avg_size_class[size_class] * 2
+                min_size_m2, max_size_m2 = size_class_boundaries[size_class]
+                if max_size_m2 in (np.inf, 'inf', 'infinity', 'Infinity'):
+                    max_size_m2 = region_farm_sizes[size_class] * 2
 
                 min_size_cells = int(min_size_m2 / average_cell_area_region)
                 min_size_cells = max(
@@ -3016,7 +3050,7 @@ class GEBModel(GridModel):
                     int(max_size_m2 / average_cell_area_region) - 1
                 )  # otherwise they overlap with next size class
                 mean_cells_per_agent = int(
-                    avg_size_class[size_class] / average_cell_area_region
+                    region_farm_sizes[size_class] / average_cell_area_region
                 )
 
                 if (
