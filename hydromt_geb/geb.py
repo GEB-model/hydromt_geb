@@ -1263,6 +1263,25 @@ class GEBModel(GridModel):
                 self.setup_1800arcsec_variables_isimip(
                     forcing, variables, starttime, endtime, ssp=ssp
                 )
+        elif data_source == "era5":
+            variables = [
+                "total_precipitation",
+                "surface_solar_radiation_downwards",
+                "surface_thermal_radiation_downwards",
+                "2m_temperature",
+                "2m_dewpoint_temperature",  # used to calculate relative humidity
+                "surface_pressure",
+                "10m_u_component_of_wind",
+                "10m_v_component_of_wind",
+            ]
+            # Create a thread pool and map the set_forcing function to the variables
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = [executor.submit(self.setup_ERA, variable, starttime, endtime) for variable in variables]
+
+            # Wait for all threads to complete
+            concurrent.futures.wait(futures)
+            # for variable in variables:
+            #     self.setup_ERA(variable, starttime, endtime)
         elif data_source == "cmip":
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
@@ -1273,7 +1292,9 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
-    def setup_ERA(self, starttime: date, endtime: date):
+    def setup_ERA(self, variable, starttime: date, endtime: date):
+        # https://cds.climate.copernicus.eu/cdsapp#!/software/app-c3s-daily-era5-statistics?tab=appcode
+        # https://earthscience.stackexchange.com/questions/24156/era5-single-level-calculate-relative-humidity
         import cdsapi
 
         """
@@ -1288,7 +1309,7 @@ class GEBModel(GridModel):
         download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
         download_path.mkdir(parents=True, exist_ok=True)
 
-        output_fn = download_path / f"{starttime}_{endtime}.nc"
+        output_fn = download_path / f"{variable}_{starttime}_{endtime}.nc"
 
         if output_fn.exists():
             self.logger.info(f"ERA5 data already downloaded to {output_fn}")
@@ -1310,7 +1331,7 @@ class GEBModel(GridModel):
                     "product_type": "reanalysis",
                     "format": "netcdf",
                     "variable": [
-                        "total_precipitation",
+                        variable,
                     ],
                     "date": f"{starttime}/{endtime}",
                     "time": [
