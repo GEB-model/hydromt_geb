@@ -3146,6 +3146,7 @@ class GEBModel(GridModel):
         risk_aversion_standard_deviation,
         discount_rate,
         interest_rate,
+        well_irrigated_ratio,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3170,6 +3171,16 @@ class GEBModel(GridModel):
             canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
             canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
             irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
+
+        well_irrigated_farms = np.random.choice(
+            [0, 1],
+            size=n_farmers,
+            replace=True,
+            p=[1 - well_irrigated_ratio, well_irrigated_ratio],
+        ).astype(bool)
+        irrigation_source[
+            (well_irrigated_farms) & (irrigation_source == irrigation_sources["no"])
+        ] = irrigation_sources["well"]
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
