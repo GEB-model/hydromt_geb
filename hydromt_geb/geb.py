@@ -1275,13 +1275,14 @@ class GEBModel(GridModel):
             pr_hourly = self.setup_ERA(
                 "total_precipitation", starttime, endtime, method="accumulation"
             )
-            pr_hourly = (
-                (pr_hourly * (1000 / 3600))
-            )  # convert from m/hr to kg/m2/s 
-            pr_hourly.name = "pr"
+            pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
+            # ensure no negative values for precipitation, which may arise due to float precision
+            pr_hourly = xr.where(pr_hourly > 0, pr_hourly, 0, keep_attrs=True)
+            pr_hourly.name = "pr_hourly"
             self.set_forcing(pr_hourly, name="climate/pr_hourly")
             pr = pr_hourly.resample(time="D").mean()  # get daily mean
             pr = pr.raster.reproject_like(DEM, method="average")
+            pr.name = "pr"
             self.set_forcing(pr, name="climate/pr")
 
             hourly_rsds = self.setup_ERA(
@@ -3759,7 +3760,7 @@ class GEBModel(GridModel):
                 self.is_updated["grid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
-                grid.rio.to_raster(fp)
+                grid.rio.to_raster(fp, compress="LZW")
 
     def write_subgrid(self):
         self._assert_write_mode
