@@ -1263,6 +1263,116 @@ class GEBModel(GridModel):
                 self.setup_1800arcsec_variables_isimip(
                     forcing, variables, starttime, endtime, ssp=ssp
                 )
+        elif data_source == "era5":
+            # # Create a thread pool and map the set_forcing function to the variables
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     futures = [executor.submit(self.setup_ERA, variable, starttime, endtime) for variable in variables]
+
+            # # Wait for all threads to complete
+            # concurrent.futures.wait(futures)
+            DEM = self.grid["landsurface/topo/elevation"]
+
+            pr_hourly = self.setup_ERA(
+                "total_precipitation", starttime, endtime, method="accumulation"
+            )
+            pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
+            # ensure no negative values for precipitation, which may arise due to float precision
+            pr_hourly = xr.where(pr_hourly > 0, pr_hourly, 0, keep_attrs=True)
+            pr_hourly.name = "pr_hourly"
+            self.set_forcing(pr_hourly, name="climate/pr_hourly")
+            pr = pr_hourly.resample(time="D").mean()  # get daily mean
+            pr = pr.raster.reproject_like(DEM, method="average")
+            pr.name = "pr"
+            self.set_forcing(pr, name="climate/pr")
+
+            hourly_rsds = self.setup_ERA(
+                "surface_solar_radiation_downwards",
+                starttime,
+                endtime,
+                method="accumulation",
+            )
+            rsds = hourly_rsds.resample(time="D").sum() / (
+                24 * 3600
+            )  # get daily sum and convert from J/m2 to W/m2
+            rsds = rsds.raster.reproject_like(DEM, method="average")
+            rsds.name = "rsds"
+            self.set_forcing(rsds, name="climate/rsds")
+
+            hourly_rlds = self.setup_ERA(
+                "surface_thermal_radiation_downwards",
+                starttime,
+                endtime,
+                method="accumulation",
+            )
+            rlds = hourly_rlds.resample(time="D").sum() / (24 * 3600)
+            rlds = rlds.raster.reproject_like(DEM, method="average")
+            rlds.name = "rlds"
+            self.set_forcing(rlds, name="climate/rlds")
+
+            hourly_tas = self.setup_ERA(
+                "2m_temperature", starttime, endtime, method="raw"
+            )
+            tas = hourly_tas.resample(time="D").mean()
+            tas_reprojected = tas.raster.reproject_like(DEM, method="average")
+            tas_reprojected.name = "tas"
+            self.set_forcing(tas_reprojected, name="climate/tas")
+
+            tasmax = hourly_tas.resample(time="D").max()
+            tasmax = tasmax.raster.reproject_like(DEM, method="average")
+            tasmax.name = "tasmax"
+            self.set_forcing(tasmax, name="climate/tasmax")
+
+            tasmin = hourly_tas.resample(time="D").min()
+            tasmin = tasmin.raster.reproject_like(DEM, method="average")
+            tasmin.name = "tasmin"
+            self.set_forcing(tasmin, name="climate/tasmin")
+
+            dew_point_tas_C = (
+                self.setup_ERA(
+                    "2m_dewpoint_temperature", starttime, endtime, method="raw"
+                )
+                - 273.15
+            )
+            hourly_tas_C = hourly_tas - 273.15
+            water_vapour_pressure = 0.6108 * np.exp(
+                17.27 * dew_point_tas_C / (237.3 + dew_point_tas_C)
+            )  # calculate water vapour pressure (kPa)
+            saturation_vapour_pressure = 0.6108 * np.exp(
+                17.27 * hourly_tas_C / (237.3 + hourly_tas_C)
+            )
+            assert water_vapour_pressure.shape == saturation_vapour_pressure.shape
+            relative_humidity = (
+                water_vapour_pressure / saturation_vapour_pressure
+            ) * 100
+            relative_humidity = relative_humidity.resample(time="D").mean()
+            relative_humidity = relative_humidity.raster.reproject_like(
+                DEM, method="average"
+            )
+            relative_humidity.name = "hurs"
+            self.set_forcing(relative_humidity, name="climate/hurs")
+
+            pressure = self.setup_ERA(
+                "surface_pressure", starttime, endtime, method="raw"
+            )
+            pressure = pressure.resample(time="D").mean()
+            pressure = pressure.raster.reproject_like(DEM, method="average")
+            pressure.name = "ps"
+            self.set_forcing(pressure, name="climate/ps")
+
+            u_wind = self.setup_ERA(
+                "10m_u_component_of_wind", starttime, endtime, method="raw"
+            )
+            u_wind = u_wind.resample(time="D").mean()
+
+            v_wind = self.setup_ERA(
+                "10m_v_component_of_wind", starttime, endtime, method="raw"
+            )
+            v_wind = v_wind.resample(time="D").mean()
+            wind_speed = np.sqrt(u_wind**2 + v_wind**2)
+            wind_speed = wind_speed.raster.reproject_like(DEM, method="average")
+            wind_speed.name = "sfcwind"
+            self.set_forcing(wind_speed, name="climate/sfcwind")
+
         elif data_source == "cmip":
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
@@ -1273,7 +1383,9 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
-    def setup_ERA(self, starttime: date, endtime: date):
+    def setup_ERA(self, variable, starttime: date, endtime: date, method: str):
+        # https://cds.climate.copernicus.eu/cdsapp#!/software/app-c3s-daily-era5-statistics?tab=appcode
+        # https://earthscience.stackexchange.com/questions/24156/era5-single-level-calculate-relative-humidity
         import cdsapi
 
         """
@@ -1288,7 +1400,7 @@ class GEBModel(GridModel):
         download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
         download_path.mkdir(parents=True, exist_ok=True)
 
-        output_fn = download_path / f"{starttime}_{endtime}.nc"
+        output_fn = download_path / f"{variable}_{starttime}_{endtime}.nc"
 
         if output_fn.exists():
             self.logger.info(f"ERA5 data already downloaded to {output_fn}")
@@ -1310,7 +1422,7 @@ class GEBModel(GridModel):
                     "product_type": "reanalysis",
                     "format": "netcdf",
                     "variable": [
-                        "total_precipitation",
+                        variable,
                     ],
                     "date": f"{starttime}/{endtime}",
                     "time": [
@@ -1344,24 +1456,33 @@ class GEBModel(GridModel):
                 output_fn,
             )
 
-        # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
-        # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
-        # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
-        # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
-        # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
-        ds = xr.open_dataset(output_fn)["tp"].rename(
-            {"longitude": "x", "latitude": "y"}
-        )
-        # forecasts are the difference between the current and previous time step
-        hourly = ds.diff("time")
-        # remove first from ds as well
-        ds = ds.isel(time=slice(1, None))
-        # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
-        hourly = hourly.where(hourly.time.dt.hour != 1, ds)
-        hourly = hourly / 3600  # convert from m/hr to m/s
-        hourly.name = "ERA5"
+        ds = xr.open_dataset(output_fn)
+        ds.raster.set_crs(4326)
 
-        self.set_forcing(hourly, name="forcing/ERA5")
+        # assert there is only one data variable
+        assert len(ds.data_vars) == 1
+
+        # select the variable
+        ds = ds[list(ds.data_vars)[0]].rename({"longitude": "x", "latitude": "y"})
+
+        if method == "accumulation":
+            # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
+            # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
+            # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
+            # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
+            # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
+            # forecasts are the difference between the current and previous time step
+            hourly = ds.diff("time")
+            # remove first from ds as well
+            ds = ds.isel(time=slice(1, None))
+            # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
+            hourly = hourly.where(hourly.time.dt.hour != 1, ds)
+        elif method == "raw":
+            hourly = ds
+        else:
+            raise NotImplementedError
+
+        return hourly
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
@@ -3039,7 +3160,7 @@ class GEBModel(GridModel):
                     number_of_agents_size_class = 1
 
                 min_size_m2, max_size_m2 = size_class_boundaries[size_class]
-                if max_size_m2 in (np.inf, 'inf', 'infinity', 'Infinity'):
+                if max_size_m2 in (np.inf, "inf", "infinity", "Infinity"):
                     max_size_m2 = region_farm_sizes[size_class] * 2
 
                 min_size_cells = int(min_size_m2 / average_cell_area_region)
@@ -3639,7 +3760,7 @@ class GEBModel(GridModel):
                 self.is_updated["grid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
-                grid.rio.to_raster(fp)
+                grid.rio.to_raster(fp, compress="LZW")
 
     def write_subgrid(self):
         self._assert_write_mode
