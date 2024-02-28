@@ -57,6 +57,7 @@ from .workflows import (
     create_farms,
     get_farm_distribution,
     calculate_cell_area,
+    fetch_and_save,
 )
 from .workflows.population import generate_locations
 
@@ -1262,6 +1263,116 @@ class GEBModel(GridModel):
                 self.setup_1800arcsec_variables_isimip(
                     forcing, variables, starttime, endtime, ssp=ssp
                 )
+        elif data_source == "era5":
+            # # Create a thread pool and map the set_forcing function to the variables
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     futures = [executor.submit(self.setup_ERA, variable, starttime, endtime) for variable in variables]
+
+            # # Wait for all threads to complete
+            # concurrent.futures.wait(futures)
+            DEM = self.grid["landsurface/topo/elevation"]
+
+            pr_hourly = self.setup_ERA(
+                "total_precipitation", starttime, endtime, method="accumulation"
+            )
+            pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
+            # ensure no negative values for precipitation, which may arise due to float precision
+            pr_hourly = xr.where(pr_hourly > 0, pr_hourly, 0, keep_attrs=True)
+            pr_hourly.name = "pr_hourly"
+            self.set_forcing(pr_hourly, name="climate/pr_hourly")
+            pr = pr_hourly.resample(time="D").mean()  # get daily mean
+            pr = pr.raster.reproject_like(DEM, method="average")
+            pr.name = "pr"
+            self.set_forcing(pr, name="climate/pr")
+
+            hourly_rsds = self.setup_ERA(
+                "surface_solar_radiation_downwards",
+                starttime,
+                endtime,
+                method="accumulation",
+            )
+            rsds = hourly_rsds.resample(time="D").sum() / (
+                24 * 3600
+            )  # get daily sum and convert from J/m2 to W/m2
+            rsds = rsds.raster.reproject_like(DEM, method="average")
+            rsds.name = "rsds"
+            self.set_forcing(rsds, name="climate/rsds")
+
+            hourly_rlds = self.setup_ERA(
+                "surface_thermal_radiation_downwards",
+                starttime,
+                endtime,
+                method="accumulation",
+            )
+            rlds = hourly_rlds.resample(time="D").sum() / (24 * 3600)
+            rlds = rlds.raster.reproject_like(DEM, method="average")
+            rlds.name = "rlds"
+            self.set_forcing(rlds, name="climate/rlds")
+
+            hourly_tas = self.setup_ERA(
+                "2m_temperature", starttime, endtime, method="raw"
+            )
+            tas = hourly_tas.resample(time="D").mean()
+            tas_reprojected = tas.raster.reproject_like(DEM, method="average")
+            tas_reprojected.name = "tas"
+            self.set_forcing(tas_reprojected, name="climate/tas")
+
+            tasmax = hourly_tas.resample(time="D").max()
+            tasmax = tasmax.raster.reproject_like(DEM, method="average")
+            tasmax.name = "tasmax"
+            self.set_forcing(tasmax, name="climate/tasmax")
+
+            tasmin = hourly_tas.resample(time="D").min()
+            tasmin = tasmin.raster.reproject_like(DEM, method="average")
+            tasmin.name = "tasmin"
+            self.set_forcing(tasmin, name="climate/tasmin")
+
+            dew_point_tas_C = (
+                self.setup_ERA(
+                    "2m_dewpoint_temperature", starttime, endtime, method="raw"
+                )
+                - 273.15
+            )
+            hourly_tas_C = hourly_tas - 273.15
+            water_vapour_pressure = 0.6108 * np.exp(
+                17.27 * dew_point_tas_C / (237.3 + dew_point_tas_C)
+            )  # calculate water vapour pressure (kPa)
+            saturation_vapour_pressure = 0.6108 * np.exp(
+                17.27 * hourly_tas_C / (237.3 + hourly_tas_C)
+            )
+            assert water_vapour_pressure.shape == saturation_vapour_pressure.shape
+            relative_humidity = (
+                water_vapour_pressure / saturation_vapour_pressure
+            ) * 100
+            relative_humidity = relative_humidity.resample(time="D").mean()
+            relative_humidity = relative_humidity.raster.reproject_like(
+                DEM, method="average"
+            )
+            relative_humidity.name = "hurs"
+            self.set_forcing(relative_humidity, name="climate/hurs")
+
+            pressure = self.setup_ERA(
+                "surface_pressure", starttime, endtime, method="raw"
+            )
+            pressure = pressure.resample(time="D").mean()
+            pressure = pressure.raster.reproject_like(DEM, method="average")
+            pressure.name = "ps"
+            self.set_forcing(pressure, name="climate/ps")
+
+            u_wind = self.setup_ERA(
+                "10m_u_component_of_wind", starttime, endtime, method="raw"
+            )
+            u_wind = u_wind.resample(time="D").mean()
+
+            v_wind = self.setup_ERA(
+                "10m_v_component_of_wind", starttime, endtime, method="raw"
+            )
+            v_wind = v_wind.resample(time="D").mean()
+            wind_speed = np.sqrt(u_wind**2 + v_wind**2)
+            wind_speed = wind_speed.raster.reproject_like(DEM, method="average")
+            wind_speed.name = "sfcwind"
+            self.set_forcing(wind_speed, name="climate/sfcwind")
+
         elif data_source == "cmip":
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
@@ -1271,6 +1382,107 @@ class GEBModel(GridModel):
             self.setup_SPEI()
         if calculate_GEV:
             self.setup_GEV()
+
+    def setup_ERA(self, variable, starttime: date, endtime: date, method: str):
+        # https://cds.climate.copernicus.eu/cdsapp#!/software/app-c3s-daily-era5-statistics?tab=appcode
+        # https://earthscience.stackexchange.com/questions/24156/era5-single-level-calculate-relative-humidity
+        import cdsapi
+
+        """
+        Download hourly ERA5 data for a specified time frame and bounding box.
+
+        Parameters:
+        start_date (str): Start date in 'YYYY-MM-DD' format.
+        end_date (str): End date in 'YYYY-MM-DD' format.
+
+        """
+
+        download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
+        download_path.mkdir(parents=True, exist_ok=True)
+
+        output_fn = download_path / f"{variable}_{starttime}_{endtime}.nc"
+
+        if output_fn.exists():
+            self.logger.info(f"ERA5 data already downloaded to {output_fn}")
+        else:
+
+            (xmin, ymin, xmax, ymax) = self.bounds
+
+            # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
+            xmin -= 0.1
+            ymin -= 0.1
+            xmax += 0.1
+            ymax += 0.1
+
+            c = cdsapi.Client()
+
+            c.retrieve(
+                "reanalysis-era5-land",
+                {
+                    "product_type": "reanalysis",
+                    "format": "netcdf",
+                    "variable": [
+                        variable,
+                    ],
+                    "date": f"{starttime}/{endtime}",
+                    "time": [
+                        "00:00",
+                        "01:00",
+                        "02:00",
+                        "03:00",
+                        "04:00",
+                        "05:00",
+                        "06:00",
+                        "07:00",
+                        "08:00",
+                        "09:00",
+                        "10:00",
+                        "11:00",
+                        "12:00",
+                        "13:00",
+                        "14:00",
+                        "15:00",
+                        "16:00",
+                        "17:00",
+                        "18:00",
+                        "19:00",
+                        "20:00",
+                        "21:00",
+                        "22:00",
+                        "23:00",
+                    ],
+                    "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+                },
+                output_fn,
+            )
+
+        ds = xr.open_dataset(output_fn)
+        ds.raster.set_crs(4326)
+
+        # assert there is only one data variable
+        assert len(ds.data_vars) == 1
+
+        # select the variable
+        ds = ds[list(ds.data_vars)[0]].rename({"longitude": "x", "latitude": "y"})
+
+        if method == "accumulation":
+            # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
+            # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
+            # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
+            # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
+            # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
+            # forecasts are the difference between the current and previous time step
+            hourly = ds.diff("time")
+            # remove first from ds as well
+            ds = ds.isel(time=slice(1, None))
+            # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
+            hourly = hourly.where(hourly.time.dt.hour != 1, ds)
+        elif method == "raw":
+            hourly = ds
+        else:
+            raise NotImplementedError
+
+        return hourly
 
     def snap_to_grid(self, ds, reference, relative_tollerance=0.02, ydim="y", xdim="x"):
         # make sure all datasets have more or less the same coordinates
@@ -2288,6 +2500,9 @@ class GEBModel(GridModel):
         self.set_dict(inflation_rates_dict, name="economics/inflation_rates")
         self.set_dict(lending_rates_dict, name="economics/lending_rates")
 
+    def setup_irrigation_sources(self, irrigation_sources):
+        self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
+
     def setup_well_prices_by_reference_year(
         self,
         irrigation_maintenance: float,
@@ -2472,7 +2687,7 @@ class GEBModel(GridModel):
             upkeep_prices_dict, name="economics/upkeep_prices_drip_irrigation_per_m2"
         )
 
-    def setup_farmers(self, farmers, irrigation_sources=None, n_seasons=1):
+    def setup_farmers(self, farmers):
         """
         Sets up the farmers data for GEB.
 
@@ -2578,25 +2793,10 @@ class GEBModel(GridModel):
         self.set_subgrid(subgrid_farms_in_study_area, name="agents/farmers/farms")
         self.subgrid["agents/farmers/farms"].rio.set_nodata(-1)
 
-        crop_name_to_id = {
-            crop_name: int(ID) for ID, crop_name in self.dict["crops/crop_ids"].items()
-        }
-        crop_name_to_id[np.nan] = -1
-        for season in range(1, n_seasons + 1):
-            farmers[f"season_#{season}_crop"] = farmers[f"season_#{season}_crop"].map(
-                crop_name_to_id
-            )
+        self.set_binary(farmers.index.values, name=f"agents/farmers/id")
+        self.set_binary(farmers["region_id"].values, name=f"agents/farmers/region_id")
 
-        if irrigation_sources:
-            self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
-            farmers["irrigation_source"] = farmers["irrigation_source"].map(
-                irrigation_sources
-            )
-
-        for column in farmers.columns:
-            self.set_binary(farmers[column], name=f"agents/farmers/{column}")
-
-    def setup_farmers_from_csv(self, path=None, irrigation_sources=None, n_seasons=1):
+    def setup_farmers_from_csv(self, path=None):
         """
         Sets up the farmers data for GEB from a CSV file.
 
@@ -2604,16 +2804,11 @@ class GEBModel(GridModel):
         ----------
         path : str
             The path to the CSV file containing the farmer data.
-        irrigation_sources : dict, optional
-            A dictionary mapping irrigation source names to IDs.
-        n_seasons : int, optional
-            The number of seasons to simulate.
 
         Notes
         -----
         This method sets up the farmers data for GEB from a CSV file. It first reads the farmer data from
-        the CSV file using the `pandas.read_csv` method. The resulting DataFrame is passed to the `setup_farmers` method
-        along with the optional `irrigation_sources` and `n_seasons` parameters.
+        the CSV file using the `pandas.read_csv` method.
 
         See the `setup_farmers` method for more information on how the farmer data is set up in the model.
         """
@@ -2626,20 +2821,15 @@ class GEBModel(GridModel):
                 / "farmers.csv"
             )
         farmers = pd.read_csv(path, index_col=0)
-        self.setup_farmers(farmers, irrigation_sources, n_seasons)
+        self.setup_farmers(farmers)
 
-    def setup_farmers_simple(
+    def setup_create_farms_simple(
         self,
-        irrigation_sources,
-        irrigation_choice,
-        crop_choices,
-        region_id_column="UID",
+        region_id_column="region_id",
         country_iso3_column="ISO3",
-        risk_aversion_mean=1.5,
-        risk_aversion_standard_deviation=0.5,
         farm_size_donor_countries=None,
-        interest_rate=0.05,
-        discount_rate=0.1,
+        data_source="lowder",
+        size_class_boundaries=None,
     ):
         """
         Sets up the farmers for GEB.
@@ -2666,19 +2856,25 @@ class GEBModel(GridModel):
 
         A paper that reports risk aversion values for 75 countries is this one: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2646134
         """
-        SIZE_CLASSES_BOUNDARIES = {
-            "< 1 Ha": (0, 10000),
-            "1 - 2 Ha": (10000, 20000),
-            "2 - 5 Ha": (20000, 50000),
-            "5 - 10 Ha": (50000, 100000),
-            "10 - 20 Ha": (100000, 200000),
-            "20 - 50 Ha": (200000, 500000),
-            "50 - 100 Ha": (500000, 1000000),
-            "100 - 200 Ha": (1000000, 2000000),
-            "200 - 500 Ha": (2000000, 5000000),
-            "500 - 1000 Ha": (5000000, 10000000),
-            "> 1000 Ha": (10000000, np.inf),
-        }
+        if data_source == "lowder":
+            size_class_boundaries = {
+                "< 1 Ha": (0, 10000),
+                "1 - 2 Ha": (10000, 20000),
+                "2 - 5 Ha": (20000, 50000),
+                "5 - 10 Ha": (50000, 100000),
+                "10 - 20 Ha": (100000, 200000),
+                "20 - 50 Ha": (200000, 500000),
+                "50 - 100 Ha": (500000, 1000000),
+                "100 - 200 Ha": (1000000, 2000000),
+                "200 - 500 Ha": (2000000, 5000000),
+                "500 - 1000 Ha": (5000000, 10000000),
+                "> 1000 Ha": (10000000, np.inf),
+            }
+        else:
+            assert size_class_boundaries is not None
+            assert (
+                farm_size_donor_countries is None
+            ), "farm_size_donor_countries is only used for lowder data"
 
         cultivated_land = self.region_subgrid[
             "landsurface/full_region_cultivated_land"
@@ -2687,154 +2883,173 @@ class GEBModel(GridModel):
         cell_area = self.region_subgrid["areamaps/region_cell_area_subgrid"].compute()
 
         regions_shapes = self.geoms["areamaps/regions"]
-        assert (
-            country_iso3_column in regions_shapes.columns
-        ), f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
+        if data_source == "lowder":
+            assert (
+                country_iso3_column in regions_shapes.columns
+            ), f"Region database must contain {country_iso3_column} column ({self.data_catalog['gadm_level1'].path})"
 
-        farm_sizes_per_country = (
-            self.data_catalog.get_dataframe("lowder_farm_sizes")
-            .dropna(subset=["Total"], axis=0)
-            .drop(["empty", "income class"], axis=1)
-        )
-        farm_sizes_per_country["Country"] = farm_sizes_per_country["Country"].ffill()
-        # Remove preceding and trailing white space from country names
-        farm_sizes_per_country["Country"] = farm_sizes_per_country[
-            "Country"
-        ].str.strip()
-        farm_sizes_per_country["Census Year"] = farm_sizes_per_country[
-            "Country"
-        ].ffill()
+            farm_sizes_per_region = (
+                self.data_catalog.get_dataframe("lowder_farm_sizes")
+                .dropna(subset=["Total"], axis=0)
+                .drop(["empty", "income class"], axis=1)
+            )
+            farm_sizes_per_region["Country"] = farm_sizes_per_region["Country"].ffill()
+            # Remove preceding and trailing white space from country names
+            farm_sizes_per_region["Country"] = farm_sizes_per_region[
+                "Country"
+            ].str.strip()
+            farm_sizes_per_region["Census Year"] = farm_sizes_per_region[
+                "Country"
+            ].ffill()
 
-        # convert country names to ISO3 codes
-        iso3_codes = {
-            "Albania": "ALB",
-            "Algeria": "DZA",
-            "American Samoa": "ASM",
-            "Argentina": "ARG",
-            "Austria": "AUT",
-            "Bahamas": "BHS",
-            "Barbados": "BRB",
-            "Belgium": "BEL",
-            "Brazil": "BRA",
-            "Bulgaria": "BGR",
-            "Burkina Faso": "BFA",
-            "Chile": "CHL",
-            "Colombia": "COL",
-            "Côte d'Ivoire": "CIV",
-            "Croatia": "HRV",
-            "Cyprus": "CYP",
-            "Czech Republic": "CZE",
-            "Democratic Republic of the Congo": "COD",
-            "Denmark": "DNK",
-            "Dominica": "DMA",
-            "Ecuador": "ECU",
-            "Egypt": "EGY",
-            "Estonia": "EST",
-            "Ethiopia": "ETH",
-            "Fiji": "FJI",
-            "Finland": "FIN",
-            "France": "FRA",
-            "French Polynesia": "PYF",
-            "Georgia": "GEO",
-            "Germany": "DEU",
-            "Greece": "GRC",
-            "Grenada": "GRD",
-            "Guam": "GUM",
-            "Guatemala": "GTM",
-            "Guinea": "GIN",
-            "Honduras": "HND",
-            "India": "IND",
-            "Indonesia": "IDN",
-            "Iran (Islamic Republic of)": "IRN",
-            "Ireland": "IRL",
-            "Italy": "ITA",
-            "Japan": "JPN",
-            "Jamaica": "JAM",
-            "Jordan": "JOR",
-            "Korea, Rep. of": "KOR",
-            "Kyrgyzstan": "KGZ",
-            "Lao People's Democratic Republic": "LAO",
-            "Latvia": "LVA",
-            "Lebanon": "LBN",
-            "Lithuania": "LTU",
-            "Luxembourg": "LUX",
-            "Malta": "MLT",
-            "Morocco": "MAR",
-            "Myanmar": "MMR",
-            "Namibia": "NAM",
-            "Nepal": "NPL",
-            "Netherlands": "NLD",
-            "Nicaragua": "NIC",
-            "Northern Mariana Islands": "MNP",
-            "Norway": "NOR",
-            "Pakistan": "PAK",
-            "Panama": "PAN",
-            "Paraguay": "PRY",
-            "Peru": "PER",
-            "Philippines": "PHL",
-            "Poland": "POL",
-            "Portugal": "PRT",
-            "Puerto Rico": "PRI",
-            "Qatar": "QAT",
-            "Romania": "ROU",
-            "Saint Lucia": "LCA",
-            "Saint Vincent and the Grenadines": "VCT",
-            "Samoa": "WSM",
-            "Senegal": "SEN",
-            "Serbia": "SRB",
-            "Sweden": "SWE",
-            "Switzerland": "CHE",
-            "Thailand": "THA",
-            "Trinidad and Tobago": "TTO",
-            "Turkey": "TUR",
-            "Uganda": "UGA",
-            "United Kingdom": "GBR",
-            "United States of America": "USA",
-            "Uruguay": "URY",
-            "Venezuela (Bolivarian Republic of)": "VEN",
-            "Virgin Islands, United States": "VIR",
-            "Yemen": "YEM",
-            "Cook Islands": "COK",
-            "French Guiana": "GUF",
-            "Guadeloupe": "GLP",
-            "Martinique": "MTQ",
-            "Réunion": "REU",
-            "Canada": "CAN",
-            "China": "CHN",
-            "Guinea Bissau": "GNB",
-            "Hungary": "HUN",
-            "Lesotho": "LSO",
-            "Libya": "LBY",
-            "Malawi": "MWI",
-            "Mozambique": "MOZ",
-            "New Zealand": "NZL",
-            "Slovakia": "SVK",
-            "Slovenia": "SVN",
-            "Spain": "ESP",
-            "St. Kitts & Nevis": "KNA",
-            "Viet Nam": "VNM",
-            "Australia": "AUS",
-            "Djibouti": "DJI",
-            "Mali": "MLI",
-            "Togo": "TGO",
-            "Zambia": "ZMB",
-        }
-        farm_sizes_per_country["ISO3"] = farm_sizes_per_country["Country"].map(
-            iso3_codes
-        )
-        assert (
-            not farm_sizes_per_country["ISO3"].isna().any()
-        ), f"Found {farm_sizes_per_country['ISO3'].isna().sum()} countries without ISO3 code"
+            # convert country names to ISO3 codes
+            iso3_codes = {
+                "Albania": "ALB",
+                "Algeria": "DZA",
+                "American Samoa": "ASM",
+                "Argentina": "ARG",
+                "Austria": "AUT",
+                "Bahamas": "BHS",
+                "Barbados": "BRB",
+                "Belgium": "BEL",
+                "Brazil": "BRA",
+                "Bulgaria": "BGR",
+                "Burkina Faso": "BFA",
+                "Chile": "CHL",
+                "Colombia": "COL",
+                "Côte d'Ivoire": "CIV",
+                "Croatia": "HRV",
+                "Cyprus": "CYP",
+                "Czech Republic": "CZE",
+                "Democratic Republic of the Congo": "COD",
+                "Denmark": "DNK",
+                "Dominica": "DMA",
+                "Ecuador": "ECU",
+                "Egypt": "EGY",
+                "Estonia": "EST",
+                "Ethiopia": "ETH",
+                "Fiji": "FJI",
+                "Finland": "FIN",
+                "France": "FRA",
+                "French Polynesia": "PYF",
+                "Georgia": "GEO",
+                "Germany": "DEU",
+                "Greece": "GRC",
+                "Grenada": "GRD",
+                "Guam": "GUM",
+                "Guatemala": "GTM",
+                "Guinea": "GIN",
+                "Honduras": "HND",
+                "India": "IND",
+                "Indonesia": "IDN",
+                "Iran (Islamic Republic of)": "IRN",
+                "Ireland": "IRL",
+                "Italy": "ITA",
+                "Japan": "JPN",
+                "Jamaica": "JAM",
+                "Jordan": "JOR",
+                "Korea, Rep. of": "KOR",
+                "Kyrgyzstan": "KGZ",
+                "Lao People's Democratic Republic": "LAO",
+                "Latvia": "LVA",
+                "Lebanon": "LBN",
+                "Lithuania": "LTU",
+                "Luxembourg": "LUX",
+                "Malta": "MLT",
+                "Morocco": "MAR",
+                "Myanmar": "MMR",
+                "Namibia": "NAM",
+                "Nepal": "NPL",
+                "Netherlands": "NLD",
+                "Nicaragua": "NIC",
+                "Northern Mariana Islands": "MNP",
+                "Norway": "NOR",
+                "Pakistan": "PAK",
+                "Panama": "PAN",
+                "Paraguay": "PRY",
+                "Peru": "PER",
+                "Philippines": "PHL",
+                "Poland": "POL",
+                "Portugal": "PRT",
+                "Puerto Rico": "PRI",
+                "Qatar": "QAT",
+                "Romania": "ROU",
+                "Saint Lucia": "LCA",
+                "Saint Vincent and the Grenadines": "VCT",
+                "Samoa": "WSM",
+                "Senegal": "SEN",
+                "Serbia": "SRB",
+                "Sweden": "SWE",
+                "Switzerland": "CHE",
+                "Thailand": "THA",
+                "Trinidad and Tobago": "TTO",
+                "Turkey": "TUR",
+                "Uganda": "UGA",
+                "United Kingdom": "GBR",
+                "United States of America": "USA",
+                "Uruguay": "URY",
+                "Venezuela (Bolivarian Republic of)": "VEN",
+                "Virgin Islands, United States": "VIR",
+                "Yemen": "YEM",
+                "Cook Islands": "COK",
+                "French Guiana": "GUF",
+                "Guadeloupe": "GLP",
+                "Martinique": "MTQ",
+                "Réunion": "REU",
+                "Canada": "CAN",
+                "China": "CHN",
+                "Guinea Bissau": "GNB",
+                "Hungary": "HUN",
+                "Lesotho": "LSO",
+                "Libya": "LBY",
+                "Malawi": "MWI",
+                "Mozambique": "MOZ",
+                "New Zealand": "NZL",
+                "Slovakia": "SVK",
+                "Slovenia": "SVN",
+                "Spain": "ESP",
+                "St. Kitts & Nevis": "KNA",
+                "Viet Nam": "VNM",
+                "Australia": "AUS",
+                "Djibouti": "DJI",
+                "Mali": "MLI",
+                "Togo": "TGO",
+                "Zambia": "ZMB",
+            }
+            farm_sizes_per_region["ISO3"] = farm_sizes_per_region["Country"].map(
+                iso3_codes
+            )
+            assert (
+                not farm_sizes_per_region["ISO3"].isna().any()
+            ), f"Found {farm_sizes_per_region['ISO3'].isna().sum()} countries without ISO3 code"
+        else:
+            # load data source
+            farm_sizes_per_region = pd.read_excel(
+                data_source["farm_size"], index_col=(0, 1, 2)
+            )
+            n_farms_per_region = pd.read_excel(
+                data_source["n_farms"],
+                index_col=(0, 1, 2),
+            )
 
         all_agents = []
         self.logger.debug(f"Starting processing of {len(regions_shapes)} regions")
         for _, region in regions_shapes.iterrows():
             UID = region[region_id_column]
-            country_ISO3 = region[country_iso3_column]
-            if farm_size_donor_countries:
-                country_ISO3 = farm_size_donor_countries.get(country_ISO3, country_ISO3)
+            if data_source == "lowder":
+                country_ISO3 = region[country_iso3_column]
+                if farm_size_donor_countries:
+                    country_ISO3 = farm_size_donor_countries.get(
+                        country_ISO3, country_ISO3
+                    )
+            else:
+                state, district, tehsil = (
+                    region["state_name"],
+                    region["district_n"],
+                    region["sub_dist_1"],
+                )
 
-            self.logger.debug(f"Processing region {UID} in {country_ISO3}")
+            self.logger.debug(f"Processing region {UID}")
 
             cultivated_land_region_total_cells = (
                 ((regions_grid == UID) & (cultivated_land == True)).sum().compute()
@@ -2855,47 +3070,54 @@ class GEBModel(GridModel):
                 .compute()
             )
 
-            country_farm_sizes = farm_sizes_per_country.loc[
-                (farm_sizes_per_country["ISO3"] == country_ISO3)
-            ].drop(["Country", "Census Year", "Total"], axis=1)
-            assert (
-                len(country_farm_sizes) == 2
-            ), f"Found {len(country_farm_sizes) / 2} country_farm_sizes for {country_ISO3}"
+            if data_source == "lowder":
+                region_farm_sizes = farm_sizes_per_region.loc[
+                    (farm_sizes_per_region["ISO3"] == country_ISO3)
+                ].drop(["Country", "Census Year", "Total"], axis=1)
+                assert (
+                    len(region_farm_sizes) == 2
+                ), f"Found {len(region_farm_sizes) / 2} region_farm_sizes for {country_ISO3}"
 
-            n_holdings = (
-                country_farm_sizes.loc[
-                    country_farm_sizes["Holdings/ agricultural area"] == "Holdings"
-                ]
-                .iloc[0]
-                .drop(["Holdings/ agricultural area", "ISO3"])
-                .replace("..", "0")
-                .astype(np.int64)
-            )
-            agricultural_area_db_ha = (
-                country_farm_sizes.loc[
-                    country_farm_sizes["Holdings/ agricultural area"]
-                    == "Agricultural area (Ha) "
-                ]
-                .iloc[0]
-                .drop(["Holdings/ agricultural area", "ISO3"])
-                .replace("..", "0")
-                .astype(np.int64)
-            )
-            agricultural_area_db = agricultural_area_db_ha * 10000
-            avg_size_class = agricultural_area_db / n_holdings
+                region_n_holdings = (
+                    region_farm_sizes.loc[
+                        region_farm_sizes["Holdings/ agricultural area"] == "Holdings"
+                    ]
+                    .iloc[0]
+                    .drop(["Holdings/ agricultural area", "ISO3"])
+                    .replace("..", "0")
+                    .astype(np.int64)
+                )
+                agricultural_area_db_ha = (
+                    region_farm_sizes.loc[
+                        region_farm_sizes["Holdings/ agricultural area"]
+                        == "Agricultural area (Ha) "
+                    ]
+                    .iloc[0]
+                    .drop(["Holdings/ agricultural area", "ISO3"])
+                    .replace("..", "0")
+                    .astype(np.int64)
+                )
+                agricultural_area_db = agricultural_area_db_ha * 10000
+                region_farm_sizes = agricultural_area_db / region_n_holdings
+            else:
+                region_farm_sizes = farm_sizes_per_region.loc[(state, district, tehsil)]
+                region_n_holdings = n_farms_per_region.loc[(state, district, tehsil)]
+                agricultural_area_db = region_farm_sizes * region_n_holdings
 
             total_cultivated_land_area_db = agricultural_area_db.sum()
 
-            n_cells_per_size_class = pd.Series(0, index=n_holdings.index)
+            n_cells_per_size_class = pd.Series(0, index=region_n_holdings.index)
 
             for size_class in agricultural_area_db.index:
-                if n_holdings[size_class] > 0:  # if no holdings, no need to calculate
-                    n_holdings[size_class] = n_holdings[size_class] * (
+                if (
+                    region_n_holdings[size_class] > 0
+                ):  # if no holdings, no need to calculate
+                    region_n_holdings[size_class] = region_n_holdings[size_class] * (
                         total_cultivated_land_area_lu / total_cultivated_land_area_db
                     )
                     n_cells_per_size_class.loc[size_class] = (
-                        n_holdings[size_class]
-                        * avg_size_class[size_class]
+                        region_n_holdings[size_class]
+                        * region_farm_sizes[size_class]
                         / average_cell_area_region
                     )
                     assert not np.isnan(n_cells_per_size_class.loc[size_class])
@@ -2928,7 +3150,7 @@ class GEBModel(GridModel):
                     continue
 
                 number_of_agents_size_class = round(
-                    n_holdings[size_class].compute().item()
+                    region_n_holdings[size_class].compute().item()
                 )
                 # if there is agricultural land, but there are no agents rounded down, we assume there is one agent
                 if (
@@ -2937,9 +3159,9 @@ class GEBModel(GridModel):
                 ):
                     number_of_agents_size_class = 1
 
-                min_size_m2, max_size_m2 = SIZE_CLASSES_BOUNDARIES[size_class]
-                if max_size_m2 == np.inf:
-                    max_size_m2 = avg_size_class[size_class] * 2
+                min_size_m2, max_size_m2 = size_class_boundaries[size_class]
+                if max_size_m2 in (np.inf, "inf", "infinity", "Infinity"):
+                    max_size_m2 = region_farm_sizes[size_class] * 2
 
                 min_size_cells = int(min_size_m2 / average_cell_area_region)
                 min_size_cells = max(
@@ -2949,7 +3171,7 @@ class GEBModel(GridModel):
                     int(max_size_m2 / average_cell_area_region) - 1
                 )  # otherwise they overlap with next size class
                 mean_cells_per_agent = int(
-                    avg_size_class[size_class] / average_cell_area_region
+                    region_farm_sizes[size_class] / average_cell_area_region
                 )
 
                 if (
@@ -3008,45 +3230,142 @@ class GEBModel(GridModel):
             all_agents.append(region_agents)
 
         farmers = pd.concat(all_agents, ignore_index=True)
-        # randomly sample from crops
-        for season in (1, 2, 3):
-            if crop_choices[f"season_#{season}"] == "random":
-                farmers[f"season_#{season}_crop"] = random.choices(
-                    list(self.dict["crops/crop_ids"].values()), k=len(farmers)
-                )
+        self.setup_farmers(farmers)
+
+    def setup_farmer_characteristics_simple(
+        self,
+        irrigation_sources=None,
+        irrigation_choice=0,
+        crop_choices=None,
+        risk_aversion_mean=1.5,
+        risk_aversion_standard_deviation=0.5,
+        interest_rate=0.05,
+        discount_rate=0.1,
+        n_seasons=3,
+    ):
+        n_farmers = self.binary["agents/farmers/id"].size
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
+            if crop_choices[season - 1] == "random":
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
             else:
-                farmers[f"season_#{season}_crop"] = np.full(
-                    len(farmers), crop_choices[f"season_#{season}"], dtype=np.int32
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
                 )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
-            farmers["irrigation_source"] = random.choices(
-                list(irrigation_sources.keys()), k=len(farmers)
+            irrigation_source = random.choices(
+                list(irrigation_sources.values()), k=n_farmers
             )
         else:
-            farmers["irrigation_source"] = irrigation_choice
+            irrigation_source = np.full(n_farmers, irrigation_choice, dtype=np.int32)
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
-        farmers["household_size"] = random.choices(
-            [1, 2, 3, 4, 5, 6, 7], k=len(farmers)
+        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        self.set_binary(household_size, name="agents/farmers/household_size")
+
+        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_non_farm_income_family,
+            name="agents/farmers/daily_non_farm_income_family",
         )
 
-        farmers["daily_non_farm_income_family"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
+        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_consumption_per_capita,
+            name="agents/farmers/daily_consumption_per_capita",
         )
-        farmers["daily_consumption_per_capita"] = random.choices(
-            [50, 100, 200, 500], k=len(farmers)
-        )
-        farmers["risk_aversion"] = np.random.normal(
+
+        risk_aversion = np.random.normal(
             loc=risk_aversion_mean,
             scale=risk_aversion_standard_deviation,
-            size=len(farmers),
+            size=n_farmers,
+        )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
+
+        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
+
+    def setup_farmer_characteristics_india(
+        self,
+        n_seasons,
+        crop_choices,
+        risk_aversion_mean,
+        risk_aversion_standard_deviation,
+        discount_rate,
+        interest_rate,
+        well_irrigated_ratio,
+    ):
+        n_farmers = self.binary["agents/farmers/id"].size
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
+            if crop_choices[season - 1] == "random":
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
+            else:
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
+                )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
+
+        irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
+
+        irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
+
+        farms = self.subgrid["agents/farmers/farms"]
+        if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
+            command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
+            canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
+            canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
+            irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
+
+        well_irrigated_farms = np.random.choice(
+            [0, 1],
+            size=n_farmers,
+            replace=True,
+            p=[1 - well_irrigated_ratio, well_irrigated_ratio],
+        ).astype(bool)
+        irrigation_source[
+            (well_irrigated_farms) & (irrigation_source == irrigation_sources["no"])
+        ] = irrigation_sources["well"]
+
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
+
+        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        self.set_binary(household_size, name="agents/farmers/household_size")
+
+        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_non_farm_income_family,
+            name="agents/farmers/daily_non_farm_income_family",
         )
 
-        farmers["interest_rate"] = interest_rate
-        farmers["discount_rate"] = discount_rate
+        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
+        self.set_binary(
+            daily_consumption_per_capita,
+            name="agents/farmers/daily_consumption_per_capita",
+        )
 
-        self.setup_farmers(farmers, irrigation_sources=irrigation_sources, n_seasons=3)
+        risk_aversion = np.random.normal(
+            loc=risk_aversion_mean,
+            scale=risk_aversion_standard_deviation,
+            size=n_farmers,
+        )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
+
+        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
     def setup_population(self):
         populaton_map = self.data_catalog.get_rasterdataset(
@@ -3081,6 +3400,60 @@ class GEBModel(GridModel):
         self.set_binary(locations, name="agents/households/locations")
 
         return None
+
+    def setup_assets(self, feature_types):
+        import osm_flex.download
+        import osm_flex.extract
+
+        if isinstance(feature_types, str):
+            feature_types = [feature_types]
+
+        OSM_data_dir = Path(self.root).parent / "preprocessing" / "osm"
+        OSM_data_dir.mkdir(exist_ok=True, parents=True)
+
+        index_file = OSM_data_dir / "geofabrik_region_index.geojson"
+        fetch_and_save(
+            "https://download.geofabrik.de/index-v1.json", index_file, overwrite=False
+        )
+
+        index = gpd.read_file(index_file)
+        # remove Dach region as all individual regions within dach countries are also in the index
+        index = index[index["id"] != "dach"]
+
+        # find all regions that intersect with the bbox
+        intersecting_regions = index[index.intersects(self.region.geometry[0])]
+
+        def filter_regions(ID, parents):
+            return ID not in parents
+
+        intersecting_regions = intersecting_regions[
+            intersecting_regions["id"].apply(
+                lambda x: filter_regions(x, intersecting_regions["parent"].tolist())
+            )
+        ]
+
+        # download all regions
+        all_features = {}
+        for _, row in tqdm(intersecting_regions.iterrows()):
+            url = json.loads(row["urls"])["pbf"]
+            filepath = OSM_data_dir / url.split("/")[-1]
+            fetch_and_save(url, filepath, overwrite=False)
+            for feature_type in feature_types:
+                if feature_type not in all_features:
+                    all_features[feature_type] = []
+                features = osm_flex.extract.extract_cis(filepath, feature_type)
+                # features = features.clip(self.geoms["areamaps/region"])
+                features = gpd.sjoin(
+                    features,
+                    self.geoms["areamaps/region"],
+                    how="inner",
+                    op="intersects",
+                )
+                all_features[feature_type].append(features)
+
+        for feature_type in feature_types:
+            features = pd.concat(all_features[feature_type], ignore_index=True)
+            self.set_geoms(features, name=f"assets/{feature_type}")
 
     def interpolate(self, ds, interpolation_method, ydim="y", xdim="x"):
         out_ds = ds.interp(
@@ -3387,7 +3760,7 @@ class GEBModel(GridModel):
                 self.is_updated["grid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
-                grid.rio.to_raster(fp)
+                grid.rio.to_raster(fp, compress="LZW")
 
     def write_subgrid(self):
         self._assert_write_mode
@@ -3533,8 +3906,8 @@ class GEBModel(GridModel):
                     with open(output_path, "w") as f:
                         json.dump(data, f, default=convert_timestamp_to_string)
 
-    def write_geoms(self, fn: str = "{name}.geojson", **kwargs) -> None:
-        """Write model geometries to a vector file (by default GeoJSON) at <root>/<fn>
+    def write_geoms(self, fn: str = "{name}.gpkg", **kwargs) -> None:
+        """Write model geometries to a vector file (by default gpkg) at <root>/<fn>
 
         key-word arguments are passed to :py:meth:`geopandas.GeoDataFrame.to_file`
 
@@ -3542,7 +3915,7 @@ class GEBModel(GridModel):
         ----------
         fn : str, optional
             filename relative to model root and should contain a {name} placeholder,
-            by default 'geoms/{name}.geojson'
+            by default 'geoms/{name}.gpkg'
         """
         if len(self._geoms) == 0:
             self.logger.debug("No geoms data found, skip writing.")
@@ -3550,7 +3923,7 @@ class GEBModel(GridModel):
         else:
             self._assert_write_mode
             if "driver" not in kwargs:
-                kwargs.update(driver="GeoJSON")
+                kwargs.update(driver="GPKG")
             for name, gdf in self._geoms.items():
                 if self.is_updated["geoms"][name]["updated"]:
                     self.logger.debug(f"Writing file {fn.format(name=name)}")

@@ -11,13 +11,13 @@ authors = [
 dependencies = [
     "s3fs>=2023.6.0",
     "xesmf==0.7.1",
-    "hydromt>=0.9.2",
+    "hydromt==0.9.3",
     "tqdm>=4.66.1",
     "openpyxl>=3.1.2",
     "isimip-client>=1.0.1",
     "xclim>=0.44.0",
     "pyogrio>=0.7",
-    "xesmf"
+    "osm-flex>=1.1.1"
 ]
 requires-python = ">=3.8"
 readme = "README.md"
