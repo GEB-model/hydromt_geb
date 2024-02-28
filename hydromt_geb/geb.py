@@ -3339,7 +3339,49 @@ class GEBModel(GridModel):
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
-        household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
+        GDL_regions = self.data_catalog.get_geodataframe(
+            "GDL_regions_v4", geom=self.geoms["areamaps/region"]
+        )
+        assert (
+            len(GDL_regions) == 1
+        ), "Only one region should be present for now. Will work on next version with multiple regions supported"
+        GLOPOP_S = self.data_catalog.get_source("GLOPOP-S")
+        GLOPOP_S = np.fromfile(GLOPOP_S.path.format(region=GDL_regions.iloc[0]['GDLcode']), dtype=np.int32)
+        attribute_names = [
+            "economic_class",
+            "settlement_type_rural",
+            "farmer",
+            "age",
+            "gender",
+            "education_level",
+            "household_type",
+            "household_ID",
+            "relation_to_household_head",
+            "household_size_category",
+        ]
+
+        n_people = GLOPOP_S.size // len(attribute_names)
+        GLOPOP_S = pd.DataFrame(
+            np.reshape(GLOPOP_S, (len(attribute_names), n_people)).transpose(),
+            columns=attribute_names,
+        ).drop(
+            ["economic_class", "settlement_type_rural", "household_size_category"],
+            axis=1,
+        )
+        # select farmers only
+        GLOPOP_S = GLOPOP_S[GLOPOP_S["farmer"] == 1].drop("farmer", axis=1)
+        household_IDs = GLOPOP_S["household_ID"].unique()
+        if household_IDs.size > n_farmers:
+            household_IDs = np.random.choice(
+                household_IDs, size=n_farmers, replace=False
+            )
+        else:
+            raise NotImplementedError
+
+        GLOPOP_S = GLOPOP_S[GLOPOP_S["household_ID"].isin(household_IDs)]
+        households = GLOPOP_S.groupby("household_ID")
+        household_size = households.size().values.astype(np.int32)
+
         self.set_binary(household_size, name="agents/farmers/household_size")
 
         daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
