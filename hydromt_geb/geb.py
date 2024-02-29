@@ -3349,6 +3349,7 @@ class GEBModel(GridModel):
         discount_rate,
         interest_rate,
         well_irrigated_ratio,
+        maximum_age=85,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3429,7 +3430,7 @@ class GEBModel(GridModel):
             "economic_class",
             "settlement_type_rural",
             "farmer",
-            "age",
+            "age_class",
             "gender",
             "education_level",
             "household_type",
@@ -3439,6 +3440,12 @@ class GEBModel(GridModel):
         ]
         # Get list of unique GDL codes from farmer dataframe
         GDL_region_per_farmer["household_size"] = np.full(
+            len(GDL_region_per_farmer), -1, dtype=np.int32
+        )
+        GDL_region_per_farmer["age_household_head"] = np.full(
+            len(GDL_region_per_farmer), -1, dtype=np.int32
+        )
+        GDL_region_per_farmer["education_level"] = np.full(
             len(GDL_region_per_farmer), -1, dtype=np.int32
         )
         for GDL_region, farmers_GDL_region in GDL_region_per_farmer.groupby("GDLcode"):
@@ -3476,13 +3483,44 @@ class GEBModel(GridModel):
                 raise NotImplementedError
 
             households_region = GLOPOP_S_region.groupby("household_ID")
+            # select only household heads
+            household_heads = households_region.apply(
+                lambda x: x[x["relation_to_household_head"] == 1]
+            )
+            assert len(household_heads) == len(farmers_GDL_region)
+            household_heads["age"] = np.full(len(household_heads), -1, dtype=np.int32)
+            age_class_to_age = {
+                1: (0, 16),
+                2: (16, 26),
+                3: (26, 36),
+                4: (36, 46),
+                5: (46, 56),
+                6: (56, 66),
+                7: (66, maximum_age + 1),
+            }  # exclusive
+            for age_class, age_range in age_class_to_age.items():
+                household_heads_age_class = household_heads[
+                    household_heads["age_class"] == age_class
+                ]
+                household_heads.loc[household_heads_age_class.index, "age"] = (
+                    np.random.randint(
+                        age_range[0],
+                        age_range[1],
+                        size=len(household_heads_age_class),
+                        dtype=GDL_region_per_farmer["age_household_head"].dtype,
+                    )
+                )
             household_sizes_region = households_region.size().values.astype(np.int32)
             GDL_region_per_farmer.loc[farmers_GDL_region.index, "household_size"] = (
                 household_sizes_region
             )
+            GDL_region_per_farmer.loc[
+                farmers_GDL_region.index, "age_household_head"
+            ] = household_heads["age"].values
 
-        # assert non of the household sizes are placeholder value -1
+        # assert none of the household sizes are placeholder value -1
         assert (GDL_region_per_farmer["household_size"] != -1).all()
+        assert (GDL_region_per_farmer["age_household_head"] != -1).all()
 
         self.set_binary(
             GDL_region_per_farmer["household_size"].values,
