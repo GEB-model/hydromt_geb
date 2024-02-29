@@ -8,7 +8,7 @@ from pyproj import Transformer
 
 
 def get_modflow_transform_and_shape(
-    mask, hydro_crs, modflow_crs, modflow_resolution
+    reference, hydro_crs, modflow_crs, modflow_resolution
 ) -> tuple[Affine, tuple[int, int]]:
     """
     Calculate modflow geotransformation and size of grid.
@@ -19,9 +19,9 @@ def get_modflow_transform_and_shape(
         nrows: number of rows in the MODFLOW grid.
     """
 
-    hydro_transform = mask.raster.transform
-    width = mask.raster.width
-    height = mask.raster.height
+    hydro_transform = reference.raster.transform
+    width = reference.raster.width
+    height = reference.raster.height
 
     hydro_lon = [hydro_transform.c + hydro_transform.a * i for i in range(width)]
     hydro_lat = [hydro_transform.f + hydro_transform.e * i for i in range(height)]
