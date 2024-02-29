@@ -3488,6 +3488,8 @@ class GEBModel(GridModel):
                 lambda x: x[x["relation_to_household_head"] == 1]
             )
             assert len(household_heads) == len(farmers_GDL_region)
+
+            # age
             household_heads["age"] = np.full(len(household_heads), -1, dtype=np.int32)
             age_class_to_age = {
                 1: (0, 16),
@@ -3510,17 +3512,25 @@ class GEBModel(GridModel):
                         dtype=GDL_region_per_farmer["age_household_head"].dtype,
                     )
                 )
-            household_sizes_region = households_region.size().values.astype(np.int32)
-            GDL_region_per_farmer.loc[farmers_GDL_region.index, "household_size"] = (
-                household_sizes_region
-            )
             GDL_region_per_farmer.loc[
                 farmers_GDL_region.index, "age_household_head"
             ] = household_heads["age"].values
 
+            # education level
+            GDL_region_per_farmer.loc[farmers_GDL_region.index, "education_level"] = (
+                household_heads["education_level"].values
+            )
+
+            # household size
+            household_sizes_region = households_region.size().values.astype(np.int32)
+            GDL_region_per_farmer.loc[farmers_GDL_region.index, "household_size"] = (
+                household_sizes_region
+            )
+
         # assert none of the household sizes are placeholder value -1
         assert (GDL_region_per_farmer["household_size"] != -1).all()
         assert (GDL_region_per_farmer["age_household_head"] != -1).all()
+        assert (GDL_region_per_farmer["education_level"] != -1).all()
 
         self.set_binary(
             GDL_region_per_farmer["household_size"].values,
