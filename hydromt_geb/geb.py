@@ -3406,18 +3406,26 @@ class GEBModel(GridModel):
         ).astype(int)
 
         locations = pixels_to_coords(pixels + 0.5, farms.raster.transform.to_gdal())
+        locations = gpd.GeoDataFrame(
+            geometry=gpd.points_from_xy(locations[:, 0], locations[:, 1]),
+            crs="EPSG:4326",
+        )  # convert locations to geodataframe
 
+        # GLOPOP-S uses the GDL regions. So we need to get the GDL region for each farmer using their location
         GDL_regions = self.data_catalog.get_geodataframe(
-            "GDL_regions_v4", geom=self.geoms["areamaps/region"]
+            "GDL_regions_v4", geom=self.geoms["areamaps/region"], variables=["GDLcode"]
         )
-        assert (
-            len(GDL_regions) == 1
-        ), "Only one region should be present for now. Will work on next version with multiple regions supported"
+        GDL_region_per_farmer = gpd.sjoin(
+            locations, GDL_regions, how="left", op="within"
+        )
+
+        # ensure that each farmer has a region
+        assert GDL_region_per_farmer["GDLcode"].notna().all()
+
+        # Load GLOPOP-S data. This is a binary file and has no proper loading in hydromt. So we use the data catalog to get the path and format the path with the regions and load it with NumPy
         GLOPOP_S = self.data_catalog.get_source("GLOPOP-S")
-        GLOPOP_S = np.fromfile(
-            GLOPOP_S.path.format(region=GDL_regions.iloc[0]["GDLcode"]), dtype=np.int32
-        )
-        attribute_names = [
+
+        GLOPOP_S_attribute_names = [
             "economic_class",
             "settlement_type_rural",
             "farmer",
@@ -3429,30 +3437,57 @@ class GEBModel(GridModel):
             "relation_to_household_head",
             "household_size_category",
         ]
-
-        n_people = GLOPOP_S.size // len(attribute_names)
-        GLOPOP_S = pd.DataFrame(
-            np.reshape(GLOPOP_S, (len(attribute_names), n_people)).transpose(),
-            columns=attribute_names,
-        ).drop(
-            ["economic_class", "settlement_type_rural", "household_size_category"],
-            axis=1,
+        # Get list of unique GDL codes from farmer dataframe
+        GDL_region_per_farmer["household_size"] = np.full(
+            len(GDL_region_per_farmer), -1, dtype=np.int32
         )
-        # select farmers only
-        GLOPOP_S = GLOPOP_S[GLOPOP_S["farmer"] == 1].drop("farmer", axis=1)
-        household_IDs = GLOPOP_S["household_ID"].unique()
-        if household_IDs.size > n_farmers:
-            household_IDs = np.random.choice(
-                household_IDs, size=n_farmers, replace=False
+        for GDL_region, farmers_GDL_region in GDL_region_per_farmer.groupby("GDLcode"):
+            GLOPOP_S_region = np.fromfile(
+                GLOPOP_S.path.format(region=GDL_region),
+                dtype=np.int32,
             )
-        else:
-            raise NotImplementedError
 
-        GLOPOP_S = GLOPOP_S[GLOPOP_S["household_ID"].isin(household_IDs)]
-        households = GLOPOP_S.groupby("household_ID")
-        household_size = households.size().values.astype(np.int32)
+            n_people = GLOPOP_S_region.size // len(GLOPOP_S_attribute_names)
+            GLOPOP_S_region = pd.DataFrame(
+                np.reshape(
+                    GLOPOP_S_region, (len(GLOPOP_S_attribute_names), n_people)
+                ).transpose(),
+                columns=GLOPOP_S_attribute_names,
+            ).drop(
+                ["economic_class", "settlement_type_rural", "household_size_category"],
+                axis=1,
+            )
+            # select farmers only
+            GLOPOP_S_region = GLOPOP_S_region[GLOPOP_S_region["farmer"] == 1].drop(
+                "farmer", axis=1
+            )
 
-        self.set_binary(household_size, name="agents/farmers/household_size")
+            # Select a random sample of farmers from the database
+            GLOPOP_S_household_IDs = GLOPOP_S_region["household_ID"].unique()
+            if GLOPOP_S_household_IDs.size > len(farmers_GDL_region):
+                GLOPOP_S_household_IDs = np.random.choice(
+                    GLOPOP_S_household_IDs, size=len(farmers_GDL_region), replace=False
+                )
+                GLOPOP_S_region = GLOPOP_S_region[
+                    GLOPOP_S_region["household_ID"].isin(GLOPOP_S_household_IDs)
+                ]
+            else:
+                # TODO: Implement upsampling of GLOPOP_S data
+                raise NotImplementedError
+
+            households_region = GLOPOP_S_region.groupby("household_ID")
+            household_sizes_region = households_region.size().values.astype(np.int32)
+            GDL_region_per_farmer.loc[farmers_GDL_region.index, "household_size"] = (
+                household_sizes_region
+            )
+
+        # assert non of the household sizes are placeholder value -1
+        assert (GDL_region_per_farmer["household_size"] != -1).all()
+
+        self.set_binary(
+            GDL_region_per_farmer["household_size"].values,
+            name="agents/farmers/household_size",
+        )
 
         daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
         self.set_binary(
