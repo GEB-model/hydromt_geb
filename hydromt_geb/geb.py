@@ -3469,20 +3469,60 @@ class GEBModel(GridModel):
                 "farmer", axis=1
             )
 
-            # Select a random sample of farmers from the database
+            # shuffle GLOPOP-S data to avoid biases in that regard
             GLOPOP_S_household_IDs = GLOPOP_S_region["household_ID"].unique()
-            if GLOPOP_S_household_IDs.size > len(farmers_GDL_region):
-                GLOPOP_S_household_IDs = np.random.choice(
-                    GLOPOP_S_household_IDs, size=len(farmers_GDL_region), replace=False
+            np.random.shuffle(GLOPOP_S_household_IDs)  # shuffle array in-place
+            GLOPOP_S_region = (
+                GLOPOP_S_region.set_index("household_ID")
+                .loc[GLOPOP_S_household_IDs]
+                .reset_index()
+            )
+
+            # Select a sample of farmers from the database. Because the households were
+            # shuflled there is no need to pick random households, we can just take the first n_farmers.
+            # If there are not enough farmers in the region, we need to upsample the data. In this case
+            # we will just take the same farmers multiple times starting from the top.
+            GLOPOP_S_household_IDs = GLOPOP_S_region["household_ID"].values
+
+            # first we mask out all consecutive duplicates
+            mask = np.concatenate(
+                ([True], GLOPOP_S_household_IDs[1:] != GLOPOP_S_household_IDs[:-1])
+            )
+            GLOPOP_S_household_IDs = GLOPOP_S_household_IDs[mask]
+
+            GLOPOP_S_region_sampled = []
+            if GLOPOP_S_household_IDs.size < len(farmers_GDL_region):
+                n_repetitions = len(farmers_GDL_region) // GLOPOP_S_household_IDs.size
+                max_household_ID = GLOPOP_S_household_IDs.max()
+                for i in range(n_repetitions):
+                    GLOPOP_S_region_copy = GLOPOP_S_region.copy()
+                    # increase the household ID to avoid duplicate household IDs. Using (i + 1) so that the original household IDs are not changed
+                    # so that they can be used in the final "topping up" below.
+                    GLOPOP_S_region_copy["household_ID"] = GLOPOP_S_region_copy[
+                        "household_ID"
+                    ] + ((i + 1) * max_household_ID)
+                    GLOPOP_S_region_sampled.append(GLOPOP_S_region_copy)
+                requested_farmers = (
+                    len(farmers_GDL_region) % GLOPOP_S_household_IDs.size
                 )
-                GLOPOP_S_region = GLOPOP_S_region[
+            else:
+                requested_farmers = len(farmers_GDL_region)
+
+            GLOPOP_S_household_IDs = GLOPOP_S_household_IDs[:requested_farmers]
+            GLOPOP_S_region_sampled.append(
+                GLOPOP_S_region[
                     GLOPOP_S_region["household_ID"].isin(GLOPOP_S_household_IDs)
                 ]
-            else:
-                # TODO: Implement upsampling of GLOPOP_S data
-                raise NotImplementedError
+            )
 
-            households_region = GLOPOP_S_region.groupby("household_ID")
+            GLOPOP_S_region_sampled = pd.concat(
+                GLOPOP_S_region_sampled, ignore_index=True
+            )
+            assert GLOPOP_S_region_sampled["household_ID"].unique().size == len(
+                farmers_GDL_region
+            )
+
+            households_region = GLOPOP_S_region_sampled.groupby("household_ID")
             # select only household heads
             household_heads = households_region.apply(
                 lambda x: x[x["relation_to_household_head"] == 1]
