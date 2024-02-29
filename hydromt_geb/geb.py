@@ -15,6 +15,7 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
+from honeybees.library.raster import pixels_to_coords
 
 import numpy as np
 import pandas as pd
@@ -1301,7 +1302,10 @@ class GEBModel(GridModel):
             with multiprocessing.Pool() as pool:
                 results = pool.starmap(
                     self.download_ERA,
-                    [(variable, starttime, endtime, None, True) for variable in variables],
+                    [
+                        (variable, starttime, endtime, None, True)
+                        for variable in variables
+                    ],
                 )
 
             pr_hourly = self.download_ERA(
@@ -3381,6 +3385,27 @@ class GEBModel(GridModel):
         ] = irrigation_sources["well"]
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
+
+        # get farmer locations
+        vertical_index = (
+            np.arange(farms.shape[0])
+            .repeat(farms.shape[1])
+            .reshape(farms.shape)[farms != -1]
+        )
+        horizontal_index = np.tile(np.arange(farms.shape[1]), farms.shape[0]).reshape(
+            farms.shape
+        )[farms != -1]
+        farms_flattened = farms.values[farms.values != -1]
+        pixels = np.zeros((n_farmers, 2), dtype=np.int32)
+        pixels[:, 0] = np.round(
+            np.bincount(farms_flattened, horizontal_index)
+            / np.bincount(farms_flattened)
+        ).astype(int)
+        pixels[:, 1] = np.round(
+            np.bincount(farms_flattened, vertical_index) / np.bincount(farms_flattened)
+        ).astype(int)
+
+        locations = pixels_to_coords(pixels + 0.5, farms.raster.transform.to_gdal())
 
         GDL_regions = self.data_catalog.get_geodataframe(
             "GDL_regions_v4", geom=self.geoms["areamaps/region"]
