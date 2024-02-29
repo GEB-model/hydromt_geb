@@ -1132,7 +1132,7 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up MODFLOW")
         modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid.mask, 4326, epsg, resolution
+            self.grid["landsurface/topo/elevation"], 4326, epsg, resolution
         )
         modflow_mask = hydromt.raster.full_from_transform(
             modflow_affine,
@@ -1145,8 +1145,8 @@ class GEBModel(GridModel):
         )
 
         intersection = create_indices(
-            self.grid.mask.raster.transform,
-            self.grid.mask.raster.shape,
+            self.grid["landsurface/topo/elevation"].raster.transform,
+            self.grid["landsurface/topo/elevation"].raster.shape,
             4326,
             modflow_affine,
             MODFLOW_shape,
@@ -1164,7 +1164,7 @@ class GEBModel(GridModel):
         self.set_binary(intersection["area"], name=f"groundwater/modflow/area")
 
         modflow_mask.data = create_modflow_basin(
-            self.grid.mask, intersection, MODFLOW_shape
+            self.grid["landsurface/topo/elevation"], intersection, MODFLOW_shape
         )
         self.set_MODFLOW_grid(modflow_mask, name=f"groundwater/modflow/modflow_mask")
 
@@ -1266,13 +1266,45 @@ class GEBModel(GridModel):
         elif data_source == "era5":
             # # Create a thread pool and map the set_forcing function to the variables
             # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = [executor.submit(self.setup_ERA, variable, starttime, endtime) for variable in variables]
+            #     futures = [executor.submit(self.download_ERA, variable, starttime, endtime) for variable in variables]
 
             # # Wait for all threads to complete
             # concurrent.futures.wait(futures)
             DEM = self.grid["landsurface/topo/elevation"]
 
-            pr_hourly = self.setup_ERA(
+            # ERA5_elevation = (
+            #     (
+            #         self.data_catalog.get_rasterdataset(
+            #             "ERA5_geopotential", bbox=self.bounds, buffer=1
+            #         )
+            #         / 9.80665
+            #     )
+            #     .isel(time=0)
+            #     .rename({"longitude": "x", "latitude": "y"})
+            # )  # convert from m2/s2 to m (see: https://codes.ecmwf.int/grib/param-db/129)
+            # # LAPSE_RATE = -0.0065
+
+            import concurrent.futures
+
+            variables = [
+                "total_precipitation",
+                "surface_solar_radiation_downwards",
+                "2m_temperature",
+                "2m_dewpoint_temperature",
+                "10m_u_component_of_wind",
+                "10m_v_component_of_wind",
+                "surface_pressure",
+                "surface_thermal_radiation_downwards",
+            ]
+            import multiprocessing
+
+            with multiprocessing.Pool() as pool:
+                results = pool.starmap(
+                    self.download_ERA,
+                    [(variable, starttime, endtime, None, True) for variable in variables],
+                )
+
+            pr_hourly = self.download_ERA(
                 "total_precipitation", starttime, endtime, method="accumulation"
             )
             pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
@@ -1285,7 +1317,7 @@ class GEBModel(GridModel):
             pr.name = "pr"
             self.set_forcing(pr, name="climate/pr")
 
-            hourly_rsds = self.setup_ERA(
+            hourly_rsds = self.download_ERA(
                 "surface_solar_radiation_downwards",
                 starttime,
                 endtime,
@@ -1298,7 +1330,7 @@ class GEBModel(GridModel):
             rsds.name = "rsds"
             self.set_forcing(rsds, name="climate/rsds")
 
-            hourly_rlds = self.setup_ERA(
+            hourly_rlds = self.download_ERA(
                 "surface_thermal_radiation_downwards",
                 starttime,
                 endtime,
@@ -1309,10 +1341,11 @@ class GEBModel(GridModel):
             rlds.name = "rlds"
             self.set_forcing(rlds, name="climate/rlds")
 
-            hourly_tas = self.setup_ERA(
+            hourly_tas = self.download_ERA(
                 "2m_temperature", starttime, endtime, method="raw"
             )
             tas = hourly_tas.resample(time="D").mean()
+            # tas_sea_level = tas - (ERA5_elevation * LAPSE_RATE)
             tas_reprojected = tas.raster.reproject_like(DEM, method="average")
             tas_reprojected.name = "tas"
             self.set_forcing(tas_reprojected, name="climate/tas")
@@ -1328,7 +1361,7 @@ class GEBModel(GridModel):
             self.set_forcing(tasmin, name="climate/tasmin")
 
             dew_point_tas_C = (
-                self.setup_ERA(
+                self.download_ERA(
                     "2m_dewpoint_temperature", starttime, endtime, method="raw"
                 )
                 - 273.15
@@ -1351,7 +1384,7 @@ class GEBModel(GridModel):
             relative_humidity.name = "hurs"
             self.set_forcing(relative_humidity, name="climate/hurs")
 
-            pressure = self.setup_ERA(
+            pressure = self.download_ERA(
                 "surface_pressure", starttime, endtime, method="raw"
             )
             pressure = pressure.resample(time="D").mean()
@@ -1359,12 +1392,12 @@ class GEBModel(GridModel):
             pressure.name = "ps"
             self.set_forcing(pressure, name="climate/ps")
 
-            u_wind = self.setup_ERA(
+            u_wind = self.download_ERA(
                 "10m_u_component_of_wind", starttime, endtime, method="raw"
             )
             u_wind = u_wind.resample(time="D").mean()
 
-            v_wind = self.setup_ERA(
+            v_wind = self.download_ERA(
                 "10m_v_component_of_wind", starttime, endtime, method="raw"
             )
             v_wind = v_wind.resample(time="D").mean()
@@ -1383,7 +1416,9 @@ class GEBModel(GridModel):
         if calculate_GEV:
             self.setup_GEV()
 
-    def setup_ERA(self, variable, starttime: date, endtime: date, method: str):
+    def download_ERA(
+        self, variable, starttime: date, endtime: date, method: str, download_only=False
+    ):
         # https://cds.climate.copernicus.eu/cdsapp#!/software/app-c3s-daily-era5-statistics?tab=appcode
         # https://earthscience.stackexchange.com/questions/24156/era5-single-level-calculate-relative-humidity
         import cdsapi
@@ -1400,61 +1435,69 @@ class GEBModel(GridModel):
         download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
         download_path.mkdir(parents=True, exist_ok=True)
 
-        output_fn = download_path / f"{variable}_{starttime}_{endtime}.nc"
+        def download(year):
 
-        if output_fn.exists():
-            self.logger.info(f"ERA5 data already downloaded to {output_fn}")
-        else:
+            output_fn = download_path / f"{variable}_{year}.nc"
+            if output_fn.exists():
+                self.logger.info(f"ERA5 data already downloaded to {output_fn}")
+            else:
+                (xmin, ymin, xmax, ymax) = self.bounds
 
-            (xmin, ymin, xmax, ymax) = self.bounds
+                # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
+                xmin -= 0.1
+                ymin -= 0.1
+                xmax += 0.1
+                ymax += 0.1
 
-            # add buffer to bounding box. Resolution is 0.1 degrees, so add 0.1 degrees to each side
-            xmin -= 0.1
-            ymin -= 0.1
-            xmax += 0.1
-            ymax += 0.1
+                c = cdsapi.Client()
 
-            c = cdsapi.Client()
+                c.retrieve(
+                    "reanalysis-era5-land",
+                    {
+                        "product_type": "reanalysis",
+                        "format": "netcdf",
+                        "variable": [
+                            variable,
+                        ],
+                        "date": f"{year}-01-01/{year}-12-31",
+                        "time": [
+                            "00:00",
+                            "01:00",
+                            "02:00",
+                            "03:00",
+                            "04:00",
+                            "05:00",
+                            "06:00",
+                            "07:00",
+                            "08:00",
+                            "09:00",
+                            "10:00",
+                            "11:00",
+                            "12:00",
+                            "13:00",
+                            "14:00",
+                            "15:00",
+                            "16:00",
+                            "17:00",
+                            "18:00",
+                            "19:00",
+                            "20:00",
+                            "21:00",
+                            "22:00",
+                            "23:00",
+                        ],
+                        "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
+                    },
+                    output_fn,
+                )
+            return output_fn
 
-            c.retrieve(
-                "reanalysis-era5-land",
-                {
-                    "product_type": "reanalysis",
-                    "format": "netcdf",
-                    "variable": [
-                        variable,
-                    ],
-                    "date": f"{starttime}/{endtime}",
-                    "time": [
-                        "00:00",
-                        "01:00",
-                        "02:00",
-                        "03:00",
-                        "04:00",
-                        "05:00",
-                        "06:00",
-                        "07:00",
-                        "08:00",
-                        "09:00",
-                        "10:00",
-                        "11:00",
-                        "12:00",
-                        "13:00",
-                        "14:00",
-                        "15:00",
-                        "16:00",
-                        "17:00",
-                        "18:00",
-                        "19:00",
-                        "20:00",
-                        "21:00",
-                        "22:00",
-                        "23:00",
-                    ],
-                    "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
-                },
-                output_fn,
-            )
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            years = range(starttime.year, endtime.year + 1)
+            files = executor.map(download, years)
+
+        if download_only:
+            return
 
         ds = xr.open_dataset(output_fn)
         ds.raster.set_crs(4326)
@@ -3346,7 +3389,9 @@ class GEBModel(GridModel):
             len(GDL_regions) == 1
         ), "Only one region should be present for now. Will work on next version with multiple regions supported"
         GLOPOP_S = self.data_catalog.get_source("GLOPOP-S")
-        GLOPOP_S = np.fromfile(GLOPOP_S.path.format(region=GDL_regions.iloc[0]['GDLcode']), dtype=np.int32)
+        GLOPOP_S = np.fromfile(
+            GLOPOP_S.path.format(region=GDL_regions.iloc[0]["GDLcode"]), dtype=np.int32
+        )
         attribute_names = [
             "economic_class",
             "settlement_type_rural",
