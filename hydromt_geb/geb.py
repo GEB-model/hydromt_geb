@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Union, Any, Dict
 import logging
 import os
+import gzip
 import math
 import requests
 import time
@@ -3449,10 +3450,8 @@ class GEBModel(GridModel):
             len(GDL_region_per_farmer), -1, dtype=np.int32
         )
         for GDL_region, farmers_GDL_region in GDL_region_per_farmer.groupby("GDLcode"):
-            GLOPOP_S_region = np.fromfile(
-                GLOPOP_S.path.format(region=GDL_region),
-                dtype=np.int32,
-            )
+            with gzip.open(GLOPOP_S.path.format(region=GDL_region), "rb") as f:
+                GLOPOP_S_region = np.frombuffer(f.read(), dtype=np.int32)
 
             n_people = GLOPOP_S_region.size // len(GLOPOP_S_attribute_names)
             GLOPOP_S_region = pd.DataFrame(
