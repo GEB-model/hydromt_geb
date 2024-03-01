@@ -12,52 +12,12 @@ class fairSTREAMModel(GEBModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def setup_farmer_characteristics_india(
+    def setup_census_characteristics(
         self,
-        n_seasons,
-        crop_choices,
-        risk_aversion_mean,
-        risk_aversion_standard_deviation,
-        discount_rate,
-        interest_rate,
-        well_irrigated_ratio,
         maximum_age=85,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
-
-        for season in range(1, n_seasons + 1):
-            # randomly sample from crops
-            if crop_choices[season - 1] == "random":
-                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
-                farmer_crops = random.choices(crop_ids, k=n_farmers)
-            else:
-                farmer_crops = np.full(
-                    n_farmers, crop_choices[season - 1], dtype=np.int32
-                )
-            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
-
-        irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
-
-        irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
-
         farms = self.subgrid["agents/farmers/farms"]
-        if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
-            command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
-            canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
-            canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
-            irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
-
-        well_irrigated_farms = np.random.choice(
-            [0, 1],
-            size=n_farmers,
-            replace=True,
-            p=[1 - well_irrigated_ratio, well_irrigated_ratio],
-        ).astype(bool)
-        irrigation_source[
-            (well_irrigated_farms) & (irrigation_source == irrigation_sources["no"])
-        ] = irrigation_sources["well"]
-
-        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
         # get farmer locations
         vertical_index = (
@@ -246,6 +206,60 @@ class fairSTREAMModel(GEBModel):
             GDL_region_per_farmer["household_size"].values,
             name="agents/farmers/household_size",
         )
+        self.set_binary(
+            GDL_region_per_farmer["age_household_head"].values,
+            name="agents/farmers/age_household_head",
+        )
+        self.set_binary(
+            GDL_region_per_farmer["education_level"].values,
+            name="agents/farmers/education_level",
+        )
+
+    def setup_farmer_characteristics(
+        self,
+        n_seasons,
+        crop_choices,
+        risk_aversion_mean,
+        risk_aversion_standard_deviation,
+        discount_rate,
+        interest_rate,
+        well_irrigated_ratio,
+    ):
+        n_farmers = self.binary["agents/farmers/id"].size
+        farms = self.subgrid["agents/farmers/farms"]
+
+        for season in range(1, n_seasons + 1):
+            # randomly sample from crops
+            if crop_choices[season - 1] == "random":
+                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
+                farmer_crops = random.choices(crop_ids, k=n_farmers)
+            else:
+                farmer_crops = np.full(
+                    n_farmers, crop_choices[season - 1], dtype=np.int32
+                )
+            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
+
+        irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
+
+        irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
+
+        if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
+            command_areas = self.subgrid["routing/lakesreservoirs/subcommand_areas"]
+            canal_irrigated_farms = np.unique(farms.where(command_areas != -1, -1))
+            canal_irrigated_farms = canal_irrigated_farms[canal_irrigated_farms != -1]
+            irrigation_source[canal_irrigated_farms] = irrigation_sources["canal"]
+
+        well_irrigated_farms = np.random.choice(
+            [0, 1],
+            size=n_farmers,
+            replace=True,
+            p=[1 - well_irrigated_ratio, well_irrigated_ratio],
+        ).astype(bool)
+        irrigation_source[
+            (well_irrigated_farms) & (irrigation_source == irrigation_sources["no"])
+        ] = irrigation_sources["well"]
+
+        self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
         daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
         self.set_binary(
