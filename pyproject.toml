@@ -17,7 +17,7 @@ dependencies = [
     "isimip-client>=1.0.1",
     "xclim>=0.44.0",
     "pyogrio>=0.7",
-    "osm-flex>=1.1.1"
+    "osm-flex>=1.1.1",
 ]
 requires-python = ">=3.8"
 readme = "README.md"
@@ -39,6 +39,10 @@ tests = [
 doc = [
 ]
 full = [
+]
+fairstream = [
+    "pgmpy>=0.1.24",
+    "daft>=0.1.2",
 ]
 
 [project.entry-points."hydromt.models"]
