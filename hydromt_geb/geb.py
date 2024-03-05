@@ -1284,29 +1284,6 @@ class GEBModel(GridModel):
             # )  # convert from m2/s2 to m (see: https://codes.ecmwf.int/grib/param-db/129)
             # # LAPSE_RATE = -0.0065
 
-            import concurrent.futures
-
-            variables = [
-                "total_precipitation",
-                "surface_solar_radiation_downwards",
-                "2m_temperature",
-                "2m_dewpoint_temperature",
-                "10m_u_component_of_wind",
-                "10m_v_component_of_wind",
-                "surface_pressure",
-                "surface_thermal_radiation_downwards",
-            ]
-            import multiprocessing
-
-            with multiprocessing.Pool() as pool:
-                results = pool.starmap(
-                    self.download_ERA,
-                    [
-                        (variable, starttime, endtime, None, True)
-                        for variable in variables
-                    ],
-                )
-
             pr_hourly = self.download_ERA(
                 "total_precipitation", starttime, endtime, method="accumulation"
             )
@@ -1497,13 +1474,27 @@ class GEBModel(GridModel):
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             years = range(starttime.year, endtime.year + 1)
-            files = executor.map(download, years)
+            files = list(executor.map(download, years))
 
         if download_only:
             return
 
-        ds = xr.open_dataset(output_fn)
+        ds = xr.open_mfdataset(
+            files,
+            chunks={"time": 24, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
+            compat="equals",  # all values and dimensions must be the same,
+            combine_attrs="drop_conflicts",  # drop conflicting attributes
+        )
+        # assert that time is monotonically increasing with a constant step size
+        assert (
+            ds.time.diff("time").astype(np.int64)
+            == (ds.time[1] - ds.time[0]).astype(np.int64)
+        ).all()
         ds.raster.set_crs(4326)
+        # the last few months of data may come from ERA5T (expver 5) instead of ERA5 (expver 1)
+        # if so, combine that dimension
+        if "expver" in ds.dims:
+            ds = ds.sel(expver=1).combine_first(ds.sel(expver=5))
 
         # assert there is only one data variable
         assert len(ds.data_vars) == 1
@@ -1653,7 +1644,9 @@ class GEBModel(GridModel):
                     )
                 )
 
-            var = xr.concat(var, dim="time")
+            var = xr.concat(
+                var, dim="time", combine_attrs="drop_conflicts", compat="equals"
+            )  # all values and dimensions must be the same
             # assert that time is monotonically increasing with a constant step size
             assert (
                 ds.time.diff("time").astype(np.int64)
