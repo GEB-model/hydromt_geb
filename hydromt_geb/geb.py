@@ -1481,9 +1481,30 @@ class GEBModel(GridModel):
 
         ds = xr.open_mfdataset(
             files,
-            chunks={"time": 24, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
+            chunks={"time": 1, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
             compat="equals",  # all values and dimensions must be the same,
             combine_attrs="drop_conflicts",  # drop conflicting attributes
+        )
+        # remove first time step.
+        # This is an accumulation from the previous day and thus cannot be calculated
+        ds = ds.isel(time=slice(1, None))
+        ds = ds.chunk({"time": 24, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE})
+        # the ERA5 grid is sometimes not exactly regular. The offset is very minor
+        # therefore we snap the grid to a regular grid, to save huge computational time
+        # for a infenitesimal loss in accuracy
+        ds = ds.assign_coords(
+            latitude=np.linspace(
+                ds["latitude"][0],
+                ds["latitude"][-1],
+                ds["latitude"].size,
+                endpoint=True,
+            ),
+            longitude=np.linspace(
+                ds["longitude"][0],
+                ds["longitude"][-1],
+                ds["longitude"].size,
+                endpoint=True,
+            ),
         )
         # assert that time is monotonically increasing with a constant step size
         assert (
@@ -1503,17 +1524,39 @@ class GEBModel(GridModel):
         ds = ds[list(ds.data_vars)[0]].rename({"longitude": "x", "latitude": "y"})
 
         if method == "accumulation":
+
+            def xr_ERA5_accumulation_to_hourly(ds, dim):
+                # Identify the axis number for the given dimension
+                assert ds.time.dt.hour[0] == 1, "First time step must be at 1 UTC"
+                # All chunksizes must be divisible by 24, except the last one
+                assert all(
+                    chunksize % 24 == 0 for chunksize in ds.chunksizes["time"][:-1]
+                )
+
+                def diff_with_prepend(data, dim):
+                    # Assert dimension is a multiple of 24
+                    # As the first hour is an accumulation from the first hour of the day, prepend a 0
+                    # to the data array before taking the diff. In this way, the output is also 24 hours
+                    return np.diff(data, prepend=0, axis=dim)
+
+                # Apply the custom diff function using apply_ufunc
+                return xr.apply_ufunc(
+                    diff_with_prepend,  # The function to apply
+                    ds,  # The DataArray or Dataset to which the function will be applied
+                    kwargs={
+                        "dim": ds.get_axis_num(dim)
+                    },  # Additional arguments for the function
+                    dask="parallelized",  # Enable parallelized computation
+                    output_dtypes=[ds.dtype],  # Specify the output data type
+                )
+
             # The accumulations in the short forecasts of ERA5-Land (with hourly steps from 01 to 24) are treated
             # the same as those in ERA-Interim or ERA-Interim/Land, i.e., they are accumulated from the beginning
             # of the forecast to the end of the forecast step. For example, runoff at day=D, step=12 will provide
             # runoff accumulated from day=D, time=0 to day=D, time=12. The maximum accumulation is over 24 hours,
             # i.e., from day=D, time=0 to day=D+1,time=0 (step=24).
             # forecasts are the difference between the current and previous time step
-            hourly = ds.diff("time")
-            # remove first from ds as well
-            ds = ds.isel(time=slice(1, None))
-            # except for UTC hour == 1, so assign the original data from ds to all values where the hour is 1
-            hourly = hourly.where(hourly.time.dt.hour != 1, ds)
+            hourly = xr_ERA5_accumulation_to_hourly(ds, "time")
         elif method == "raw":
             hourly = ds
         else:
