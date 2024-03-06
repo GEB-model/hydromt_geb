@@ -157,6 +157,17 @@ class Survey:
             values_.append(value_)
         return values_
 
+    def bin(self, data, question):
+        values = self.bins[question]
+        assert (
+            len(values["bins"]) == len(values["labels"]) + 1
+        ), "Bin bounds must be one longer than labels"
+        return pd.cut(
+            data,
+            bins=values["bins"],
+            labels=values["labels"],
+        )
+
     def sample(
         self,
         n,
@@ -308,13 +319,8 @@ class FarmerSurvey(Survey):
             ]
         ]
 
-        for question, values in self.bins.items():
-            assert (
-                len(values["bins"]) == len(values["labels"]) + 1
-            ), "Bin bounds must be one longer than labels"
-            self.samples[question] = pd.cut(
-                self.samples[question], bins=values["bins"], labels=values["labels"]
-            )
+        for question in self.bins.keys():
+            self.samples[question] = self.bin(self.samples[question], question)
 
         # remove where data is -1
         self.samples = self.samples[(self.samples != -1).all(1)]
@@ -410,13 +416,8 @@ class IHDSSurvey(Survey):
         ]  # too little very rich people to be representative. Need specific study to adequately say something about them
         # drop all samples where at least one value is negative
         self.samples = self.samples[(self.samples >= 0).all(1)]
-        for question, values in self.bins.items():
-            assert (
-                len(values["bins"]) == len(values["labels"]) + 1
-            ), "Bin bounds must be one longer than labels"
-            self.samples[question] = pd.cut(
-                self.samples[question], bins=values["bins"], labels=values["labels"]
-            )
+        for question in self.bins.keys():
+            self.samples[question] = self.bin(self.samples[question], question)
         self.samples = self.samples.rename(columns=self.renames)
         self.fix_naming()
         return self.samples
@@ -700,7 +701,7 @@ class fairSTREAMModel(GEBModel):
         discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
-    def estimate_bayesian_network(self):
+    def estimate_bayesian_network(self, risk_aversion_mean, risk_aversion_std):
         bayesian_net_folder = Path(self.root).parent / "preprocessing" / "bayesian_net"
         bayesian_net_folder.mkdir(exist_ok=True, parents=True)
 
@@ -720,4 +721,57 @@ class fairSTREAMModel(GEBModel):
         )
         farmer_survey.save(bayesian_net_folder / "farmer_survey.bif")
 
-        farmers = farmer_survey.sample(10)
+        farmer_survey.create_mapper(
+            "risk_aversion",
+            mean=risk_aversion_mean,
+            std=risk_aversion_std,
+            nan_value=-1,
+            left_bound=0.01,
+            right_bound=0.99,
+            plot=False,
+            invert=True,
+        )
+
+        household_head_age = self.binary["agents/farmers/age_household_head"]
+        farms = self.subgrid["agents/farmers/farms"]
+        farm_ids, farm_size_n_cells = np.unique(farms, return_counts=True)
+        farm_size_n_cells = farm_size_n_cells[farm_ids != -1]
+        farm_ids = farm_ids[farm_ids != -1]
+
+        mean_cell_size = self.subgrid["areamaps/sub_cell_area"].mean()
+        farm_size_m2 = farm_size_n_cells * mean_cell_size.item()
+        farm_size_bins = farmer_survey.bin(
+            farm_size_m2 / 10_000,
+            "How large is the area you grow crops on in hectares?",
+        )
+        groups, group_inverse, group_counts = np.unique(
+            farm_size_bins, return_inverse=True, return_counts=True
+        )
+
+        perceived_effectivity = np.full_like(farm_size_m2, -1, dtype=np.int32)
+        risk_aversion_raw = np.full_like(farm_size_m2, -1, dtype=np.int32)
+        for group_count, (group, group_size) in enumerate(zip(groups, group_counts)):
+            group_mask = group_inverse == group_count
+
+            samples = farmer_survey.sample(
+                n=group_size,
+                evidence=[group],
+                evidence_columns=["field_size"],
+                show_progress=False,
+            )
+
+            perceived_effectivity[group_mask] = samples[
+                "perceived_effectivity"
+            ].values.astype(
+                int
+            )  # use array to avoid mathing on index, convert to int to make sure it is an integer
+            risk_aversion_raw[group_mask] = samples["risk_aversion"].astype(int)
+
+        risk_aversion = farmer_survey.apply_mapper("risk_aversion", risk_aversion_raw)
+
+        self.set_binary(
+            perceived_effectivity, name="agents/farmers/perceived_effectivity"
+        )
+        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+
+        return None
