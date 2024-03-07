@@ -1290,6 +1290,11 @@ class GEBModel(GridModel):
                 "total_precipitation", starttime, endtime, method="accumulation"
             )
             pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
+            pr_hourly.attrs = {
+                "standard_name": "precipitation_flux",
+                "long_name": "Precipitation",
+                "units": "kg m-2 s-1",
+            }
             # ensure no negative values for precipitation, which may arise due to float precision
             pr_hourly = xr.where(pr_hourly > 0, pr_hourly, 0, keep_attrs=True)
             pr_hourly.name = "pr_hourly"
@@ -1308,6 +1313,12 @@ class GEBModel(GridModel):
             rsds = hourly_rsds.resample(time="D").sum() / (
                 24 * 3600
             )  # get daily sum and convert from J/m2 to W/m2
+            rsds.attrs = {
+                "standard_name": "surface_downwelling_shortwave_flux_in_air",
+                "long_name": "Surface Downwelling Shortwave Radiation",
+                "units": "W m-2",
+            }
+
             rsds = rsds.raster.reproject_like(DEM, method="average")
             rsds.name = "rsds"
             self.set_forcing(rsds, name="climate/rsds")
@@ -1319,6 +1330,11 @@ class GEBModel(GridModel):
                 method="accumulation",
             )
             rlds = hourly_rlds.resample(time="D").sum() / (24 * 3600)
+            rlds.attrs = {
+                "standard_name": "surface_downwelling_longwave_flux_in_air",
+                "long_name": "Surface Downwelling Longwave Radiation",
+                "units": "W m-2",
+            }
             rlds = rlds.raster.reproject_like(DEM, method="average")
             rlds.name = "rlds"
             self.set_forcing(rlds, name="climate/rlds")
@@ -1327,17 +1343,32 @@ class GEBModel(GridModel):
                 "2m_temperature", starttime, endtime, method="raw"
             )
             tas = hourly_tas.resample(time="D").mean()
+            tas.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Near-Surface Air Temperature",
+                "units": "K",
+            }
             # tas_sea_level = tas - (ERA5_elevation * LAPSE_RATE)
             tas_reprojected = tas.raster.reproject_like(DEM, method="average")
             tas_reprojected.name = "tas"
             self.set_forcing(tas_reprojected, name="climate/tas")
 
             tasmax = hourly_tas.resample(time="D").max()
+            tasmax.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Daily Maximum Near-Surface Air Temperature",
+                "units": "K",
+            }
             tasmax = tasmax.raster.reproject_like(DEM, method="average")
             tasmax.name = "tasmax"
             self.set_forcing(tasmax, name="climate/tasmax")
 
             tasmin = hourly_tas.resample(time="D").min()
+            tasmin.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Daily Minimum Near-Surface Air Temperature",
+                "units": "K",
+            }
             tasmin = tasmin.raster.reproject_like(DEM, method="average")
             tasmin.name = "tasmin"
             self.set_forcing(tasmin, name="climate/tasmin")
@@ -1359,6 +1390,11 @@ class GEBModel(GridModel):
             relative_humidity = (
                 water_vapour_pressure / saturation_vapour_pressure
             ) * 100
+            relative_humidity.attrs = {
+                "standard_name": "relative_humidity",
+                "long_name": "Near-Surface Relative Humidity",
+                "units": "%",
+            }
             relative_humidity = relative_humidity.resample(time="D").mean()
             relative_humidity = relative_humidity.raster.reproject_like(
                 DEM, method="average"
@@ -1369,6 +1405,11 @@ class GEBModel(GridModel):
             pressure = self.download_ERA(
                 "surface_pressure", starttime, endtime, method="raw"
             )
+            pressure.attrs = {
+                "standard_name": "surface_air_pressure",
+                "long_name": "Surface Air Pressure",
+                "units": "Pa",
+            }
             pressure = pressure.resample(time="D").mean()
             pressure = pressure.raster.reproject_like(DEM, method="average")
             pressure.name = "ps"
@@ -1384,6 +1425,11 @@ class GEBModel(GridModel):
             )
             v_wind = v_wind.resample(time="D").mean()
             wind_speed = np.sqrt(u_wind**2 + v_wind**2)
+            wind_speed.attrs = {
+                "standard_name": "wind_speed",
+                "long_name": "Near-Surface Wind Speed",
+                "units": "m s-1",
+            }
             wind_speed = wind_speed.raster.reproject_like(DEM, method="average")
             wind_speed.name = "sfcwind"
             self.set_forcing(wind_speed, name="climate/sfcwind")
@@ -3762,11 +3808,9 @@ class GEBModel(GridModel):
         return ds
 
     def setup_sfincs(self):
-        uparea = self.data_catalog.get_rasterdataset(
-            "merit_hydro_30sec", bbox=self.bounds, buffer=10, variables=["uparea"]
-        )
-        self.set_forcing(uparea, name="SFINCS/uparea")
+        sfincs_data_catalog = DataCatalog()
 
+        # hydrobasins
         hydrobasins = self.data_catalog.get_geodataframe(
             "hydrobasins_8",
             geom=self.geoms["areamaps/region"],
@@ -3774,26 +3818,50 @@ class GEBModel(GridModel):
         )
         self.set_geoms(hydrobasins, name="SFINCS/hydrobasins")
 
-        river_centerlines = self.data_catalog.get_geodataframe(
-            "river_centerlines_MERIT_Basins",
-            geom=self.geoms["areamaps/region"],
-            predicate="intersects",
-        )
-        self.set_geoms(river_centerlines, name="SFINCS/river_centerlines")
-
-        sfincs_data_catalog = DataCatalog()
-        sfincs_data_catalog.add_source(
-            "merit_hydro",
-            RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/uparea.nc")
-            ),  # hydromt likes absolute paths
-        )
         sfincs_data_catalog.add_source(
             "HydroBasins_Level_8",
             GeoDataFrameAdapter(
                 path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")
             ),  # hydromt likes absolute paths
         )
+
+        bounds = tuple(hydrobasins.total_bounds)
+
+        # merit hydro
+        merit_hydro = self.data_catalog.get_rasterdataset(
+            "merit_hydro_30sec", bbox=bounds, buffer=10, variables=["uparea", "flwdir"]
+        )
+        del merit_hydro["flwdir"].attrs["_FillValue"]
+        self.set_forcing(merit_hydro, name="SFINCS/merit_hydro", split_dataset=False)
+
+        sfincs_data_catalog.add_source(
+            "merit_hydro",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/merit_hydro.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # fabdem
+        fabdem = self.data_catalog.get_rasterdataset(
+            "fabdem", bbox=bounds, buffer=10, variables=["fabdem"]
+        )
+        self.set_forcing(fabdem, name="SFINCS/fabdem")
+
+        sfincs_data_catalog.add_source(
+            "fabdem",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/fabdem.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # river centerlines
+        river_centerlines = self.data_catalog.get_geodataframe(
+            "river_centerlines_MERIT_Basins",
+            bbox=bounds,
+            predicate="intersects",
+        )
+        self.set_geoms(river_centerlines, name="SFINCS/river_centerlines")
+
         sfincs_data_catalog.add_source(
             "River_Centerline_V2",
             GeoDataFrameAdapter(
@@ -3958,14 +4026,33 @@ class GEBModel(GridModel):
                     lock=False,
                 )[forcing.name]
         else:
+            if isinstance(forcing, xr.DataArray):
+                name = forcing.name
+                encoding = {forcing.name: {"zlib": True, "complevel": 9}}
+            elif isinstance(forcing, xr.Dataset):
+                assert (
+                    len(forcing.data_vars) > 1
+                ), "forcing must have more than one variable or name must be set"
+                encoding = {
+                    var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
+                }
+            else:
+                raise ValueError("forcing must be a DataArray or Dataset")
             forcing.to_netcdf(
                 fp,
                 mode="w",
-                engine="netcdf4",
-                format="NETCDF4",
-                encoding={forcing.name: {"zlib": True, "complevel": 9}},
+                encoding=encoding,
             )
-            return xr.open_dataset(fp, lock=False)[forcing.name]
+            ds = xr.open_dataset(
+                fp,
+                chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                lock=False,
+                engine="netcdf4",
+            )
+            if isinstance(forcing, xr.DataArray):
+                return ds[name]
+            else:
+                return ds
 
     def write_forcing(self) -> None:
         self._assert_write_mode
@@ -4168,9 +4255,12 @@ class GEBModel(GridModel):
                 Path(self.root) / fn,
                 chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
                 lock=False,
-            )[name.split("/")[-1]] as da:
-                assert "x" in da.dims and "y" in da.dims
-                self.set_forcing(da, name=name, update=False)
+            ) as ds:
+                assert "x" in ds.dims and "y" in ds.dims
+                if len(ds.data_vars) == 1:
+                    self.set_forcing(ds[name.split("/")[-1]], name=name, update=False)
+                else:
+                    self.set_forcing(ds, name=name, update=False, split_dataset=False)
 
     def read(self):
         self.read_model_structure()
