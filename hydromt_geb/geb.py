@@ -27,6 +27,8 @@ import xclim.indices as xci
 from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
+from hydromt.data_catalog import DataCatalog
+from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter
 
 XY_CHUNKSIZE = 350
 
@@ -3759,6 +3761,47 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
+    def setup_sfincs(self):
+        uparea = self.data_catalog.get_rasterdataset(
+            "merit_hydro_30sec", bbox=self.bounds, buffer=10, variables=["uparea"]
+        )
+        self.set_forcing(uparea, name="SFINCS/uparea")
+
+        hydrobasins = self.data_catalog.get_geodataframe(
+            "hydrobasins_8",
+            geom=self.geoms["areamaps/region"],
+            predicate="intersects",
+        )
+        self.set_geoms(hydrobasins, name="SFINCS/hydrobasins")
+
+        river_centerlines = self.data_catalog.get_geodataframe(
+            "river_centerlines_MERIT_Basins",
+            geom=self.geoms["areamaps/region"],
+            predicate="intersects",
+        )
+        self.set_geoms(river_centerlines, name="SFINCS/river_centerlines")
+
+        sfincs_data_catalog = DataCatalog()
+        sfincs_data_catalog.add_source(
+            "merit_hydro",
+            RasterDatasetAdapter(path=os.path.abspath("input/SFINCS/uparea.nc")),
+        )
+        sfincs_data_catalog.add_source(
+            "HydroBasins_Level_8",
+            GeoDataFrameAdapter(path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")),
+        )
+        sfincs_data_catalog.add_source(
+            "River_Centerline_V2",
+            GeoDataFrameAdapter(
+                path=os.path.abspath("input/SFINCS/river_centerlines.gpkg")
+            ),
+        )
+        sfincs_data_catalog.to_yml(
+            os.path.abspath(Path(self.root) / "SFINCS" / "sfincs_data_catalog.yml"),
+            # root=None
+        )
+        return None
+
     def write_grid(self):
         self._assert_write_mode
         for var, grid in self.grid.items():
@@ -3824,36 +3867,48 @@ class GEBModel(GridModel):
         if fp.exists():
             fp.unlink()
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-        forcing = forcing.chunk(
-            {
-                "time": 1,
-                "y": min(forcing.y.size, XY_CHUNKSIZE),
-                "x": min(forcing.x.size, XY_CHUNKSIZE),
-            }
-        )
-        with ProgressBar(dt=10):  # print progress bar every 10 seconds
-            assert (
-                forcing.dims[0] == "time"
-            ), "time dimension must be first, otherwise xarray will not chunk correctly"
+        if "time" in forcing.dims:
+            forcing = forcing.chunk(
+                {
+                    "time": 1,
+                    "y": min(forcing.y.size, XY_CHUNKSIZE),
+                    "x": min(forcing.x.size, XY_CHUNKSIZE),
+                }
+            )
+            with ProgressBar(dt=10):  # print progress bar every 10 seconds
+                assert (
+                    forcing.dims[0] == "time"
+                ), "time dimension must be first, otherwise xarray will not chunk correctly"
+                forcing.to_netcdf(
+                    fp,
+                    mode="w",
+                    engine="netcdf4",
+                    encoding={
+                        forcing.name: {
+                            "chunksizes": (
+                                1,
+                                min(forcing.y.size, XY_CHUNKSIZE),
+                                min(forcing.x.size, XY_CHUNKSIZE),
+                            ),
+                            "zlib": True,
+                            "complevel": 9,
+                        }
+                    },
+                )
+                return xr.open_dataset(
+                    fp,
+                    chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                    lock=False,
+                )[forcing.name]
+        else:
             forcing.to_netcdf(
                 fp,
                 mode="w",
                 engine="netcdf4",
-                encoding={
-                    forcing.name: {
-                        "chunksizes": (
-                            1,
-                            min(forcing.y.size, XY_CHUNKSIZE),
-                            min(forcing.x.size, XY_CHUNKSIZE),
-                        ),
-                        "zlib": True,
-                        "complevel": 9,
-                    }
-                },
+                format="NETCDF4",
+                encoding={forcing.name: {"zlib": True, "complevel": 9}},
             )
-            return xr.open_dataset(
-                fp, chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE}, lock=False
-            )[forcing.name]
+            return xr.open_dataset(fp, lock=False)[forcing.name]
 
     def write_forcing(self) -> None:
         self._assert_write_mode
