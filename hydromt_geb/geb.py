@@ -3784,21 +3784,78 @@ class GEBModel(GridModel):
         sfincs_data_catalog = DataCatalog()
         sfincs_data_catalog.add_source(
             "merit_hydro",
-            RasterDatasetAdapter(path=os.path.abspath("input/SFINCS/uparea.nc")),
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/uparea.nc")
+            ),  # hydromt likes absolute paths
         )
         sfincs_data_catalog.add_source(
             "HydroBasins_Level_8",
-            GeoDataFrameAdapter(path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")),
+            GeoDataFrameAdapter(
+                path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")
+            ),  # hydromt likes absolute paths
         )
         sfincs_data_catalog.add_source(
             "River_Centerline_V2",
             GeoDataFrameAdapter(
-                path=os.path.abspath("input/SFINCS/river_centerlines.gpkg")
+                path=os.path.abspath(
+                    "input/SFINCS/river_centerlines.gpkg"
+                )  # hydromt likes absolute paths
             ),
         )
+
+        # TEMPORARY HACK UNTIL HYDROMT IS FIXED
+        # SEE: https://github.com/Deltares/hydromt/issues/832
+        def to_yml(
+            self,
+            path: Union[str, Path],
+            root: str = "auto",
+            source_names: Optional[List] = None,
+            used_only: bool = False,
+            meta: Optional[Dict] = None,
+        ) -> None:
+            """Write data catalog to yaml format.
+
+            Parameters
+            ----------
+            path: str, Path
+                yaml output path.
+            root: str, Path, optional
+                Global root for all relative paths in yaml file.
+                If "auto" (default) the data source paths are relative to the yaml
+                output ``path``.
+            source_names: list, optional
+                List of source names to export, by default None in which case all sources
+                are exported. This argument is ignored if `used_only=True`.
+            used_only: bool, optional
+                If True, export only data entries kept in used_data list, by default False.
+            meta: dict, optional
+                key-value pairs to add to the data catalog meta section, such as 'version',
+                by default empty.
+            """
+            import yaml
+
+            meta = meta or []
+            yml_dir = os.path.dirname(os.path.abspath(path))
+            if root == "auto":
+                root = yml_dir
+            data_dict = self.to_dict(
+                root=root, source_names=source_names, meta=meta, used_only=used_only
+            )
+            if str(root) == yml_dir:
+                data_dict["meta"].pop(
+                    "root", None
+                )  # remove root if it equals the yml_dir
+            if data_dict:
+                with open(path, "w") as f:
+                    yaml.dump(data_dict, f, default_flow_style=False, sort_keys=False)
+            else:
+                self.logger.info("The data catalog is empty, no yml file is written.")
+
+        sfincs_data_catalog.to_yml = to_yml
+
         sfincs_data_catalog.to_yml(
-            os.path.abspath(Path(self.root) / "SFINCS" / "sfincs_data_catalog.yml"),
-            # root=None
+            sfincs_data_catalog,
+            Path(self.root) / "SFINCS" / "sfincs_data_catalog.yml",
         )
         return None
 
