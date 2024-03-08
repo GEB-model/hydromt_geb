@@ -1525,7 +1525,7 @@ class GEBModel(GridModel):
             chunks={"time": 1, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
             compat="equals",  # all values and dimensions must be the same,
             combine_attrs="drop_conflicts",  # drop conflicting attributes
-        )
+        ).rio.set_crs(4326)
         # remove first time step.
         # This is an accumulation from the previous day and thus cannot be calculated
         ds = ds.isel(time=slice(1, None))
