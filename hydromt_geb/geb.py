@@ -203,23 +203,29 @@ class GEBModel(GridModel):
         ), "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
         assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
 
+        hydrography = self.data_catalog.get_rasterdataset(hydrography_fn)
+        hydrography.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
+        hydrography.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
+
         self.logger.info(f"Preparing 2D grid.")
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
         if kind in ["basin", "subbasin"]:
-            # retrieve global hydrography data (lazy!)
-            ds_org = self.data_catalog.get_rasterdataset(hydrography_fn)
-            ds_org.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
-            ds_org.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
             if "bounds" not in region:
                 region.update(
                     basin_index=self.data_catalog.get_geodataframe(basin_index_fn)
                 )
             # get basin geometry
             geom, xy = hydromt.workflows.get_basin_geometry(
-                ds=ds_org, kind=kind, logger=self.logger, **region
+                ds=hydrography, kind=kind, logger=self.logger, **region
             )
             region.update(xy=xy)
-            ds_hydro = ds_org.raster.clip_geom(geom, mask=True)
+        elif "geom" in region:
+            geom = region["geom"]
+            if geom.crs is None:
+                raise ValueError('Model region "geom" has no CRS')
+            # merge regions when more than one geom is given
+            if isinstance(geom, gpd.GeoDataFrame):
+                geom = gpd.GeoDataFrame(geometry=[geom.unary_union], crs=geom.crs)
         else:
             raise ValueError(
                 f"Region for grid must of kind [basin, subbasin], kind {kind} not understood."
@@ -228,7 +234,9 @@ class GEBModel(GridModel):
         # Add region and grid to model
         self.set_geoms(geom, name="areamaps/region")
 
-        ldd = ds_hydro["flwdir"].raster.reclassify(
+        hydrography = hydrography.raster.clip_geom(geom, mask=True)
+
+        ldd = hydrography["flwdir"].raster.reclassify(
             reclass_table=pd.DataFrame(
                 index=[
                     0,
@@ -240,7 +248,7 @@ class GEBModel(GridModel):
                     32,
                     64,
                     128,
-                    ds_hydro["flwdir"].raster.nodata,
+                    hydrography["flwdir"].raster.nodata,
                 ],
                 data={"ldd": [5, 6, 3, 2, 1, 4, 7, 8, 9, 0]},
             ),
@@ -248,21 +256,21 @@ class GEBModel(GridModel):
         )["ldd"]
 
         self.set_grid(ldd, name="routing/kinematic/ldd")
-        self.set_grid(ds_hydro["uparea"], name="routing/kinematic/upstream_area")
-        self.set_grid(ds_hydro["elevtn"], name="landsurface/topo/elevation")
+        self.set_grid(hydrography["uparea"], name="routing/kinematic/upstream_area")
+        self.set_grid(hydrography["elevtn"], name="landsurface/topo/elevation")
         self.set_grid(
             xr.where(
-                ds_hydro["rivlen_ds"] != -9999,
-                ds_hydro["rivlen_ds"],
+                hydrography["rivlen_ds"] != -9999,
+                hydrography["rivlen_ds"],
                 np.nan,
                 keep_attrs=True,
             ),
             name="routing/kinematic/channel_length",
         )
-        self.set_grid(ds_hydro["rivslp"], name="routing/kinematic/channel_slope")
+        self.set_grid(hydrography["rivslp"], name="routing/kinematic/channel_slope")
 
-        # ds_hydro['mask'].raster.set_nodata(-1)
-        self.set_grid((~ds_hydro["mask"]).astype(np.int8), name="areamaps/grid_mask")
+        # hydrography['mask'].raster.set_nodata(-1)
+        self.set_grid((~hydrography["mask"]).astype(np.int8), name="areamaps/grid_mask")
 
         mask = self.grid["areamaps/grid_mask"]
 
@@ -373,11 +381,11 @@ class GEBModel(GridModel):
                 inclusive="right",
             )
             df = df.reindex(df.index.union(future_index))
-            for future_date in future_index:
+            for future_date in tqdm(future_index):
                 source_date = future_date - pd.DateOffset(years=1)  # source is year ago
                 inflation_index = inflation_rates["time"].index(str(future_date.year))
                 for region_id, _ in df.columns:
-                    region_inflation_rate = inflation_rates["data"][region_id][
+                    region_inflation_rate = inflation_rates["data"][str(region_id)][
                         inflation_index
                     ]
                     df.loc[future_date, region_id] = (
@@ -571,7 +579,8 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up channel depth")
         assert (
-            (self.grid["routing/kinematic/upstream_area"] > 0) | ~self.grid.mask
+            (self.grid["routing/kinematic/upstream_area"] > 0)
+            | ~self.grid["areamaps/grid_mask"]
         ).all()
         channel_depth_data = 0.27 * self.grid["routing/kinematic/upstream_area"] ** 0.26
         channel_depth = hydromt.raster.full(
@@ -612,7 +621,8 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up channel ratio")
         assert (
-            (self.grid["routing/kinematic/channel_length"] > 0) | ~self.grid.mask
+            (self.grid["routing/kinematic/channel_length"] > 0)
+            | ~self.grid["areamaps/grid_mask"]
         ).all()
         channel_area = (
             self.grid["routing/kinematic/channel_width"]
@@ -622,7 +632,7 @@ class GEBModel(GridModel):
         channel_ratio_data = xr.where(
             channel_ratio_data < 1, channel_ratio_data, 1, keep_attrs=True
         )
-        assert ((channel_ratio_data >= 0) | ~self.grid.mask).all()
+        assert ((channel_ratio_data >= 0) | ~self.grid["areamaps/grid_mask"]).all()
         channel_ratio = hydromt.raster.full(
             self.grid.raster.coords,
             nodata=np.nan,
@@ -2300,7 +2310,7 @@ class GEBModel(GridModel):
         self,
         region_database="gadm_level1",
         unique_region_id="UID",
-        ISO3_column="ISO3",
+        ISO3_column="GID_0",
         river_threshold=100,
     ):
         """
@@ -2350,15 +2360,25 @@ class GEBModel(GridModel):
         ), f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
         self.set_geoms(regions, name="areamaps/regions")
 
-        region_bounds = self.geoms["areamaps/regions"].total_bounds
+        regions_bounds = self.geoms["areamaps/regions"].total_bounds
+
+        region_bounds = (
+            self.geoms["areamaps/region"]
+            .to_crs(self.geoms["areamaps/regions"].crs)
+            .total_bounds
+        )
+        assert region_bounds[0] >= regions_bounds[0], "Region bounds do not match"
+        assert region_bounds[1] >= regions_bounds[1], "Region bounds do not match"
+        assert region_bounds[2] <= regions_bounds[2], "Region bounds do not match"
+        assert region_bounds[3] <= regions_bounds[3], "Region bounds do not match"
 
         resolution_x, resolution_y = self.subgrid[
             "areamaps/sub_grid_mask"
         ].rio.resolution()
-        pad_minx = region_bounds[0] - abs(resolution_x) / 2.0
-        pad_miny = region_bounds[1] - abs(resolution_y) / 2.0
-        pad_maxx = region_bounds[2] + abs(resolution_x) / 2.0
-        pad_maxy = region_bounds[3] + abs(resolution_y) / 2.0
+        pad_minx = regions_bounds[0] - abs(resolution_x) / 2.0
+        pad_miny = regions_bounds[1] - abs(resolution_y) / 2.0
+        pad_maxx = regions_bounds[2] + abs(resolution_x) / 2.0
+        pad_maxy = regions_bounds[3] + abs(resolution_y) / 2.0
 
         # TODO: Is there a better way to do this?
         padded_subgrid, region_subgrid_slice = pad_xy(
@@ -2380,16 +2400,16 @@ class GEBModel(GridModel):
         )
         reprojected_land_use = land_use.raster.reproject_like(
             padded_subgrid, method="nearest"
-        )
+        ).compute()
 
         region_raster = reprojected_land_use.raster.rasterize(
             self.geoms["areamaps/regions"],
             col_name="region_id",
             all_touched=True,
-        )
+        ).compute()
         self.set_region_subgrid(region_raster, name="areamaps/region_subgrid")
 
-        padded_cell_area = self.grid["areamaps/cell_area"].rio.pad_box(*region_bounds)
+        padded_cell_area = self.grid["areamaps/cell_area"].rio.pad_box(*regions_bounds)
         # calculate the cell area for the grid for the entire region
         region_cell_area = calculate_cell_area(
             padded_cell_area.raster.transform, padded_cell_area.shape
@@ -2406,7 +2426,7 @@ class GEBModel(GridModel):
             dtype=padded_cell_area.dtype,
             crs=padded_cell_area.raster.crs,
             name="areamaps/sub_grid_mask",
-            lazy=True,
+            lazy=False,
         )
 
         # calculate the cell area for the subgrid for the entire region
@@ -2421,13 +2441,13 @@ class GEBModel(GridModel):
             dtype=padded_cell_area.dtype,
             name="areamaps/sub_grid_mask",
             crs=region_raster.raster.crs,
-            lazy=True,
+            lazy=False,
         )
 
         # remove padding from region subgrid
         region_cell_area_subgrid_clipped_to_region.data = (
             region_cell_area_subgrid.raster.clip_bbox(
-                (pad_minx, pad_miny, pad_maxx, pad_maxy)
+                region_cell_area_subgrid_clipped_to_region.raster.bounds
             )
         )
 
@@ -2555,7 +2575,7 @@ class GEBModel(GridModel):
         inflation_rates_dict["time"] = years_inflation_rates
 
         for _, region in self.geoms["areamaps/regions"].iterrows():
-            region_id = region["region_id"]
+            region_id = str(region["region_id"]) # convert to string for json compatibility
             ISO3 = region["ISO3"]
 
             lending_rates_country = (
