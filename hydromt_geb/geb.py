@@ -27,6 +27,8 @@ import xclim.indices as xci
 from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
+from hydromt.data_catalog import DataCatalog
+from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter
 
 XY_CHUNKSIZE = 350
 
@@ -1195,8 +1197,6 @@ class GEBModel(GridModel):
         resolution_arcsec: int = 30,
         forcing: str = "chelsa-w5e5v1.0",
         ssp=None,
-        calculate_SPEI: bool = True,
-        calculate_GEV: bool = True,
     ):
         """
         Sets up the forcing data for GEB.
@@ -1288,6 +1288,11 @@ class GEBModel(GridModel):
                 "total_precipitation", starttime, endtime, method="accumulation"
             )
             pr_hourly = pr_hourly * (1000 / 3600)  # convert from m/hr to kg/m2/s
+            pr_hourly.attrs = {
+                "standard_name": "precipitation_flux",
+                "long_name": "Precipitation",
+                "units": "kg m-2 s-1",
+            }
             # ensure no negative values for precipitation, which may arise due to float precision
             pr_hourly = xr.where(pr_hourly > 0, pr_hourly, 0, keep_attrs=True)
             pr_hourly.name = "pr_hourly"
@@ -1306,6 +1311,12 @@ class GEBModel(GridModel):
             rsds = hourly_rsds.resample(time="D").sum() / (
                 24 * 3600
             )  # get daily sum and convert from J/m2 to W/m2
+            rsds.attrs = {
+                "standard_name": "surface_downwelling_shortwave_flux_in_air",
+                "long_name": "Surface Downwelling Shortwave Radiation",
+                "units": "W m-2",
+            }
+
             rsds = rsds.raster.reproject_like(DEM, method="average")
             rsds.name = "rsds"
             self.set_forcing(rsds, name="climate/rsds")
@@ -1317,6 +1328,11 @@ class GEBModel(GridModel):
                 method="accumulation",
             )
             rlds = hourly_rlds.resample(time="D").sum() / (24 * 3600)
+            rlds.attrs = {
+                "standard_name": "surface_downwelling_longwave_flux_in_air",
+                "long_name": "Surface Downwelling Longwave Radiation",
+                "units": "W m-2",
+            }
             rlds = rlds.raster.reproject_like(DEM, method="average")
             rlds.name = "rlds"
             self.set_forcing(rlds, name="climate/rlds")
@@ -1325,17 +1341,32 @@ class GEBModel(GridModel):
                 "2m_temperature", starttime, endtime, method="raw"
             )
             tas = hourly_tas.resample(time="D").mean()
+            tas.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Near-Surface Air Temperature",
+                "units": "K",
+            }
             # tas_sea_level = tas - (ERA5_elevation * LAPSE_RATE)
             tas_reprojected = tas.raster.reproject_like(DEM, method="average")
             tas_reprojected.name = "tas"
             self.set_forcing(tas_reprojected, name="climate/tas")
 
             tasmax = hourly_tas.resample(time="D").max()
+            tasmax.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Daily Maximum Near-Surface Air Temperature",
+                "units": "K",
+            }
             tasmax = tasmax.raster.reproject_like(DEM, method="average")
             tasmax.name = "tasmax"
             self.set_forcing(tasmax, name="climate/tasmax")
 
             tasmin = hourly_tas.resample(time="D").min()
+            tasmin.attrs = {
+                "standard_name": "air_temperature",
+                "long_name": "Daily Minimum Near-Surface Air Temperature",
+                "units": "K",
+            }
             tasmin = tasmin.raster.reproject_like(DEM, method="average")
             tasmin.name = "tasmin"
             self.set_forcing(tasmin, name="climate/tasmin")
@@ -1357,6 +1388,11 @@ class GEBModel(GridModel):
             relative_humidity = (
                 water_vapour_pressure / saturation_vapour_pressure
             ) * 100
+            relative_humidity.attrs = {
+                "standard_name": "relative_humidity",
+                "long_name": "Near-Surface Relative Humidity",
+                "units": "%",
+            }
             relative_humidity = relative_humidity.resample(time="D").mean()
             relative_humidity = relative_humidity.raster.reproject_like(
                 DEM, method="average"
@@ -1367,6 +1403,11 @@ class GEBModel(GridModel):
             pressure = self.download_ERA(
                 "surface_pressure", starttime, endtime, method="raw"
             )
+            pressure.attrs = {
+                "standard_name": "surface_air_pressure",
+                "long_name": "Surface Air Pressure",
+                "units": "Pa",
+            }
             pressure = pressure.resample(time="D").mean()
             pressure = pressure.raster.reproject_like(DEM, method="average")
             pressure.name = "ps"
@@ -1382,6 +1423,11 @@ class GEBModel(GridModel):
             )
             v_wind = v_wind.resample(time="D").mean()
             wind_speed = np.sqrt(u_wind**2 + v_wind**2)
+            wind_speed.attrs = {
+                "standard_name": "wind_speed",
+                "long_name": "Near-Surface Wind Speed",
+                "units": "m s-1",
+            }
             wind_speed = wind_speed.raster.reproject_like(DEM, method="average")
             wind_speed.name = "sfcwind"
             self.set_forcing(wind_speed, name="climate/sfcwind")
@@ -1390,11 +1436,6 @@ class GEBModel(GridModel):
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
             raise ValueError(f"Unknown data source: {data_source}")
-
-        if calculate_SPEI:
-            self.setup_SPEI()
-        if calculate_GEV:
-            self.setup_GEV()
 
     def download_ERA(
         self, variable, starttime: date, endtime: date, method: str, download_only=False
@@ -1484,7 +1525,7 @@ class GEBModel(GridModel):
             chunks={"time": 1, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
             compat="equals",  # all values and dimensions must be the same,
             combine_attrs="drop_conflicts",  # drop conflicting attributes
-        )
+        ).rio.set_crs(4326)
         # remove first time step.
         # This is an accumulation from the previous day and thus cannot be calculated
         ds = ds.isel(time=slice(1, None))
@@ -3759,6 +3800,157 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
+    def setup_sfincs(self):
+        sfincs_data_catalog = DataCatalog()
+
+        # hydrobasins
+        hydrobasins = self.data_catalog.get_geodataframe(
+            "hydrobasins_8",
+            geom=self.geoms["areamaps/region"],
+            predicate="intersects",
+        )
+        self.set_geoms(hydrobasins, name="SFINCS/hydrobasins")
+
+        sfincs_data_catalog.add_source(
+            "hydrobasins_level_8",
+            GeoDataFrameAdapter(
+                path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")
+            ),  # hydromt likes absolute paths
+        )
+
+        bounds = tuple(hydrobasins.total_bounds)
+
+        # merit hydro
+        merit_hydro = self.data_catalog.get_rasterdataset(
+            "merit_hydro", bbox=bounds, buffer=100, variables=["uparea", "flwdir", "elevtn"], provider=self.data_provider
+        )
+        del merit_hydro["flwdir"].attrs["_FillValue"]
+        self.set_forcing(merit_hydro, name="SFINCS/merit_hydro", split_dataset=False)
+
+        sfincs_data_catalog.add_source(
+            "merit_hydro",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/merit_hydro.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # glofas discharge
+        glofas_discharge = self.data_catalog.get_rasterdataset(
+            "glofas_4_0_discharge", bbox=bounds, buffer=1, variables=["discharge"]
+        )
+        glofas_discharge = glofas_discharge.rename({"latitude": "y", "longitude": "x"})
+        self.set_forcing(glofas_discharge, name="SFINCS/discharge")
+
+        sfincs_data_catalog.add_source(
+            "glofas_4_0_discharge",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/discharge.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # fabdem
+        fabdem = self.data_catalog.get_rasterdataset(
+            "fabdem", bbox=bounds, buffer=100, variables=["fabdem"]
+        )
+        self.set_forcing(fabdem, name="SFINCS/fabdem")
+
+        sfincs_data_catalog.add_source(
+            "fabdem",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/fabdem.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # river centerlines
+        river_centerlines = self.data_catalog.get_geodataframe(
+            "river_centerlines_MERIT_Basins",
+            bbox=bounds,
+            predicate="intersects",
+        )
+        self.set_geoms(river_centerlines, name="SFINCS/river_centerlines")
+
+        sfincs_data_catalog.add_source(
+            "river_centerlines_MERIT_Basins",
+            GeoDataFrameAdapter(
+                path=os.path.abspath(
+                    "input/SFINCS/river_centerlines.gpkg"
+                )  # hydromt likes absolute paths
+            ),
+        )
+
+        # landcover
+        esa_worldcover = self.data_catalog.get_rasterdataset(
+            "esa_worldcover_2020_v100",
+            geom=self.geoms["areamaps/regions"],
+            buffer=200,  # 2 km buffer
+        )
+        del esa_worldcover.attrs["_FillValue"]
+        esa_worldcover.name = "esa_worldcover"
+        self.set_forcing(esa_worldcover, name="SFINCS/esa_worldcover")
+
+        sfincs_data_catalog.add_source(
+            "esa_worldcover",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/esa_worldcover.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # TEMPORARY HACK UNTIL HYDROMT IS FIXED
+        # SEE: https://github.com/Deltares/hydromt/issues/832
+        def to_yml(
+            self,
+            path: Union[str, Path],
+            root: str = "auto",
+            source_names: Optional[List] = None,
+            used_only: bool = False,
+            meta: Optional[Dict] = None,
+        ) -> None:
+            """Write data catalog to yaml format.
+
+            Parameters
+            ----------
+            path: str, Path
+                yaml output path.
+            root: str, Path, optional
+                Global root for all relative paths in yaml file.
+                If "auto" (default) the data source paths are relative to the yaml
+                output ``path``.
+            source_names: list, optional
+                List of source names to export, by default None in which case all sources
+                are exported. This argument is ignored if `used_only=True`.
+            used_only: bool, optional
+                If True, export only data entries kept in used_data list, by default False.
+            meta: dict, optional
+                key-value pairs to add to the data catalog meta section, such as 'version',
+                by default empty.
+            """
+            import yaml
+
+            meta = meta or []
+            yml_dir = os.path.dirname(os.path.abspath(path))
+            if root == "auto":
+                root = yml_dir
+            data_dict = self.to_dict(
+                root=root, source_names=source_names, meta=meta, used_only=used_only
+            )
+            if str(root) == yml_dir:
+                data_dict["meta"].pop(
+                    "root", None
+                )  # remove root if it equals the yml_dir
+            if data_dict:
+                with open(path, "w") as f:
+                    yaml.dump(data_dict, f, default_flow_style=False, sort_keys=False)
+            else:
+                self.logger.info("The data catalog is empty, no yml file is written.")
+
+        sfincs_data_catalog.to_yml = to_yml
+
+        sfincs_data_catalog.to_yml(
+            sfincs_data_catalog,
+            Path(self.root) / "SFINCS" / "sfincs_data_catalog.yml",
+        )
+        return None
+
     def write_grid(self):
         self._assert_write_mode
         for var, grid in self.grid.items():
@@ -3814,7 +4006,14 @@ class GEBModel(GridModel):
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
 
-    def write_forcing_to_netcdf(self, var, forcing) -> None:
+    def write_forcing_to_netcdf(
+        self,
+        var,
+        forcing,
+        y_chunksize=XY_CHUNKSIZE,
+        x_chunksize=XY_CHUNKSIZE,
+        time_chunksize=1,
+    ) -> None:
         self.logger.info(f"Write {var}")
         fn = var + ".nc"
         self.model_structure["forcing"][var] = fn
@@ -3824,36 +4023,63 @@ class GEBModel(GridModel):
         if fp.exists():
             fp.unlink()
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-        forcing = forcing.chunk(
-            {
-                "time": 1,
-                "y": min(forcing.y.size, XY_CHUNKSIZE),
-                "x": min(forcing.x.size, XY_CHUNKSIZE),
-            }
-        )
-        with ProgressBar(dt=10):  # print progress bar every 10 seconds
-            assert (
-                forcing.dims[0] == "time"
-            ), "time dimension must be first, otherwise xarray will not chunk correctly"
+        if "time" in forcing.dims:
+            with ProgressBar(dt=10):  # print progress bar every 10 seconds
+                assert (
+                    forcing.dims[0] == "time"
+                ), "time dimension must be first, otherwise xarray will not chunk correctly"
+                assert (
+                    forcing.dims[1] == "y" and forcing.dims[2] == "x"
+                ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
+                forcing.to_netcdf(
+                    fp,
+                    mode="w",
+                    engine="netcdf4",
+                    encoding={
+                        forcing.name: {
+                            "chunksizes": (
+                                min(forcing.time.size, time_chunksize),
+                                min(forcing.y.size, y_chunksize),
+                                min(forcing.x.size, x_chunksize),
+                            ),
+                            "zlib": True,
+                            "complevel": 9,
+                        }
+                    },
+                )
+            return xr.open_dataset(
+                fp,
+                chunks={"time": min(forcing.time.size, time_chunksize), "y": min(forcing.y.size, y_chunksize), "x": min(forcing.x.size, x_chunksize)},
+                lock=False,
+            )[forcing.name]
+        else:
+            if isinstance(forcing, xr.DataArray):
+                name = forcing.name
+                encoding = {forcing.name: {"zlib": True, "complevel": 9}}
+            elif isinstance(forcing, xr.Dataset):
+                assert (
+                    len(forcing.data_vars) > 1
+                ), "forcing must have more than one variable or name must be set"
+                encoding = {
+                    var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
+                }
+            else:
+                raise ValueError("forcing must be a DataArray or Dataset")
             forcing.to_netcdf(
                 fp,
                 mode="w",
-                engine="netcdf4",
-                encoding={
-                    forcing.name: {
-                        "chunksizes": (
-                            1,
-                            min(forcing.y.size, XY_CHUNKSIZE),
-                            min(forcing.x.size, XY_CHUNKSIZE),
-                        ),
-                        "zlib": True,
-                        "complevel": 9,
-                    }
-                },
+                encoding=encoding,
             )
-            return xr.open_dataset(
-                fp, chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE}, lock=False
-            )[forcing.name]
+            ds = xr.open_dataset(
+                fp,
+                chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                lock=False,
+                engine="netcdf4",
+            )
+            if isinstance(forcing, xr.DataArray):
+                return ds[name]
+            else:
+                return ds
 
     def write_forcing(self) -> None:
         self._assert_write_mode
@@ -4056,9 +4282,14 @@ class GEBModel(GridModel):
                 Path(self.root) / fn,
                 chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
                 lock=False,
-            )[name.split("/")[-1]] as da:
-                assert "x" in da.dims and "y" in da.dims
-                self.set_forcing(da, name=name, update=False)
+            ) as ds:
+                assert "x" in ds.dims and "y" in ds.dims
+                data_vars = set(ds.data_vars)
+                data_vars.discard("spatial_ref")
+                if len(data_vars) == 1:
+                    self.set_forcing(ds[name.split("/")[-1]], name=name, update=False)
+                else:
+                    self.set_forcing(ds, name=name, update=False, split_dataset=False)
 
     def read(self):
         self.read_model_structure()
@@ -4080,10 +4311,27 @@ class GEBModel(GridModel):
         self.is_updated["geoms"][name] = {"updated": update}
         super().set_geoms(geoms, name=name)
 
-    def set_forcing(self, data, name: str, update=True, write=True, *args, **kwargs):
+    def set_forcing(
+        self,
+        data,
+        name: str,
+        update=True,
+        write=True,
+        x_chunksize=XY_CHUNKSIZE,
+        y_chunksize=XY_CHUNKSIZE,
+        time_chunksize=1,
+        *args,
+        **kwargs,
+    ):
         self.is_updated["forcing"][name] = {"updated": update}
         if update and write:
-            data = self.write_forcing_to_netcdf(name, data)
+            data = self.write_forcing_to_netcdf(
+                name,
+                data,
+                x_chunksize=x_chunksize,
+                y_chunksize=y_chunksize,
+                time_chunksize=time_chunksize,
+            )
             self.is_updated["forcing"][name]["updated"] = False
         super().set_forcing(data, name=name, *args, **kwargs)
 
