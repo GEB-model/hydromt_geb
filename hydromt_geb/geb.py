@@ -3822,7 +3822,7 @@ class GEBModel(GridModel):
 
         # merit hydro
         merit_hydro = self.data_catalog.get_rasterdataset(
-            "merit_hydro", bbox=bounds, buffer=100, variables=["uparea", "flwdir"], provider=self.data_provider
+            "merit_hydro", bbox=bounds, buffer=100, variables=["uparea", "flwdir", "elevtn"], provider=self.data_provider
         )
         del merit_hydro["flwdir"].attrs["_FillValue"]
         self.set_forcing(merit_hydro, name="SFINCS/merit_hydro", split_dataset=False)
@@ -3850,7 +3850,7 @@ class GEBModel(GridModel):
 
         # fabdem
         fabdem = self.data_catalog.get_rasterdataset(
-            "fabdem", bbox=bounds, buffer=10, variables=["fabdem"]
+            "fabdem", bbox=bounds, buffer=100, variables=["fabdem"]
         )
         self.set_forcing(fabdem, name="SFINCS/fabdem")
 
@@ -3876,6 +3876,23 @@ class GEBModel(GridModel):
                     "input/SFINCS/river_centerlines.gpkg"
                 )  # hydromt likes absolute paths
             ),
+        )
+
+        # landcover
+        esa_worldcover = self.data_catalog.get_rasterdataset(
+            "esa_worldcover_2020_v100",
+            geom=self.geoms["areamaps/regions"],
+            buffer=200,  # 2 km buffer
+        )
+        del esa_worldcover.attrs["_FillValue"]
+        esa_worldcover.name = "esa_worldcover"
+        self.set_forcing(esa_worldcover, name="SFINCS/esa_worldcover")
+
+        sfincs_data_catalog.add_source(
+            "esa_worldcover",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/esa_worldcover.nc")
+            ),  # hydromt likes absolute paths
         )
 
         # TEMPORARY HACK UNTIL HYDROMT IS FIXED
