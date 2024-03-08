@@ -1197,8 +1197,6 @@ class GEBModel(GridModel):
         resolution_arcsec: int = 30,
         forcing: str = "chelsa-w5e5v1.0",
         ssp=None,
-        calculate_SPEI: bool = True,
-        calculate_GEV: bool = True,
     ):
         """
         Sets up the forcing data for GEB.
@@ -1438,11 +1436,6 @@ class GEBModel(GridModel):
             raise NotImplementedError("CMIP forcing data is not yet supported")
         else:
             raise ValueError(f"Unknown data source: {data_source}")
-
-        if calculate_SPEI:
-            self.setup_SPEI()
-        if calculate_GEV:
-            self.setup_GEV()
 
     def download_ERA(
         self, variable, starttime: date, endtime: date, method: str, download_only=False
@@ -3819,7 +3812,7 @@ class GEBModel(GridModel):
         self.set_geoms(hydrobasins, name="SFINCS/hydrobasins")
 
         sfincs_data_catalog.add_source(
-            "HydroBasins_Level_8",
+            "hydrobasins_level_8",
             GeoDataFrameAdapter(
                 path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")
             ),  # hydromt likes absolute paths
@@ -3829,7 +3822,7 @@ class GEBModel(GridModel):
 
         # merit hydro
         merit_hydro = self.data_catalog.get_rasterdataset(
-            "merit_hydro_30sec", bbox=bounds, buffer=10, variables=["uparea", "flwdir"]
+            "merit_hydro", bbox=bounds, buffer=100, variables=["uparea", "flwdir"], provider=self.data_provider
         )
         del merit_hydro["flwdir"].attrs["_FillValue"]
         self.set_forcing(merit_hydro, name="SFINCS/merit_hydro", split_dataset=False)
@@ -3838,6 +3831,20 @@ class GEBModel(GridModel):
             "merit_hydro",
             RasterDatasetAdapter(
                 path=os.path.abspath("input/SFINCS/merit_hydro.nc")
+            ),  # hydromt likes absolute paths
+        )
+
+        # glofas discharge
+        glofas_discharge = self.data_catalog.get_rasterdataset(
+            "glofas_4_0_discharge", bbox=bounds, buffer=1, variables=["discharge"]
+        )
+        glofas_discharge = glofas_discharge.rename({"latitude": "y", "longitude": "x"})
+        self.set_forcing(glofas_discharge, name="SFINCS/discharge")
+
+        sfincs_data_catalog.add_source(
+            "glofas_4_0_discharge",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/discharge.nc")
             ),  # hydromt likes absolute paths
         )
 
@@ -3863,7 +3870,7 @@ class GEBModel(GridModel):
         self.set_geoms(river_centerlines, name="SFINCS/river_centerlines")
 
         sfincs_data_catalog.add_source(
-            "River_Centerline_V2",
+            "river_centerlines_MERIT_Basins",
             GeoDataFrameAdapter(
                 path=os.path.abspath(
                     "input/SFINCS/river_centerlines.gpkg"
@@ -3982,7 +3989,14 @@ class GEBModel(GridModel):
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
 
-    def write_forcing_to_netcdf(self, var, forcing) -> None:
+    def write_forcing_to_netcdf(
+        self,
+        var,
+        forcing,
+        y_chunksize=XY_CHUNKSIZE,
+        x_chunksize=XY_CHUNKSIZE,
+        time_chunksize=1,
+    ) -> None:
         self.logger.info(f"Write {var}")
         fn = var + ".nc"
         self.model_structure["forcing"][var] = fn
@@ -3993,17 +4007,13 @@ class GEBModel(GridModel):
             fp.unlink()
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
         if "time" in forcing.dims:
-            forcing = forcing.chunk(
-                {
-                    "time": 1,
-                    "y": min(forcing.y.size, XY_CHUNKSIZE),
-                    "x": min(forcing.x.size, XY_CHUNKSIZE),
-                }
-            )
             with ProgressBar(dt=10):  # print progress bar every 10 seconds
                 assert (
                     forcing.dims[0] == "time"
                 ), "time dimension must be first, otherwise xarray will not chunk correctly"
+                assert (
+                    forcing.dims[1] == "y" and forcing.dims[2] == "x"
+                ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
                 forcing.to_netcdf(
                     fp,
                     mode="w",
@@ -4011,20 +4021,20 @@ class GEBModel(GridModel):
                     encoding={
                         forcing.name: {
                             "chunksizes": (
-                                1,
-                                min(forcing.y.size, XY_CHUNKSIZE),
-                                min(forcing.x.size, XY_CHUNKSIZE),
+                                min(forcing.time.size, time_chunksize),
+                                min(forcing.y.size, y_chunksize),
+                                min(forcing.x.size, x_chunksize),
                             ),
                             "zlib": True,
                             "complevel": 9,
                         }
                     },
                 )
-                return xr.open_dataset(
-                    fp,
-                    chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
-                    lock=False,
-                )[forcing.name]
+            return xr.open_dataset(
+                fp,
+                chunks={"time": min(forcing.time.size, time_chunksize), "y": min(forcing.y.size, y_chunksize), "x": min(forcing.x.size, x_chunksize)},
+                lock=False,
+            )[forcing.name]
         else:
             if isinstance(forcing, xr.DataArray):
                 name = forcing.name
@@ -4257,7 +4267,9 @@ class GEBModel(GridModel):
                 lock=False,
             ) as ds:
                 assert "x" in ds.dims and "y" in ds.dims
-                if len(ds.data_vars) == 1:
+                data_vars = set(ds.data_vars)
+                data_vars.discard("spatial_ref")
+                if len(data_vars) == 1:
                     self.set_forcing(ds[name.split("/")[-1]], name=name, update=False)
                 else:
                     self.set_forcing(ds, name=name, update=False, split_dataset=False)
@@ -4282,10 +4294,27 @@ class GEBModel(GridModel):
         self.is_updated["geoms"][name] = {"updated": update}
         super().set_geoms(geoms, name=name)
 
-    def set_forcing(self, data, name: str, update=True, write=True, *args, **kwargs):
+    def set_forcing(
+        self,
+        data,
+        name: str,
+        update=True,
+        write=True,
+        x_chunksize=XY_CHUNKSIZE,
+        y_chunksize=XY_CHUNKSIZE,
+        time_chunksize=1,
+        *args,
+        **kwargs,
+    ):
         self.is_updated["forcing"][name] = {"updated": update}
         if update and write:
-            data = self.write_forcing_to_netcdf(name, data)
+            data = self.write_forcing_to_netcdf(
+                name,
+                data,
+                x_chunksize=x_chunksize,
+                y_chunksize=y_chunksize,
+                time_chunksize=time_chunksize,
+            )
             self.is_updated["forcing"][name]["updated"] = False
         super().set_forcing(data, name=name, *args, **kwargs)
 
