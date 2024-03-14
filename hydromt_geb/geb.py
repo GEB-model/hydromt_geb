@@ -2932,7 +2932,9 @@ class GEBModel(GridModel):
         cut_farms = cut_farms[cut_farms != -1]
 
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
-        subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
+        subgrid_farms = farms.raster.clip_bbox(
+            self.subgrid["areamaps/sub_grid_mask"].raster.bounds
+        )
 
         subgrid_farms_in_study_area = xr.where(
             np.isin(subgrid_farms, cut_farms), -1, subgrid_farms, keep_attrs=True
