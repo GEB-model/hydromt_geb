@@ -2,7 +2,7 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import List, Optional
 import hydromt.workflows
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Union, Any, Dict
 import logging
 import os
@@ -60,6 +60,7 @@ from .workflows import (
     get_farm_distribution,
     calculate_cell_area,
     fetch_and_save,
+    bounds_are_within,
 )
 from .workflows.population import generate_locations
 
@@ -290,6 +291,9 @@ class GEBModel(GridModel):
         )
         submask.raster.set_nodata(None)
         submask.data = repeat_grid(mask.data, sub_grid_factor)
+
+        assert bounds_are_within(submask.raster.bounds, mask.raster.bounds)
+        assert bounds_are_within(mask.raster.bounds, submask.raster.bounds)
 
         self.set_subgrid(submask, name=submask.name)
 
@@ -2232,7 +2236,17 @@ class GEBModel(GridModel):
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
         self.set_forcing(wind_output_clipped, f"climate/sfcwind")
 
-    def setup_SPEI(self):
+    def setup_SPEI(self, starttime: date, endtime: date):
+        """
+        Sets up the Standardized Precipitation Evapotranspiration Index (SPEI).
+
+        Parameters
+        ----------
+        starttime : date
+            The start time of the SPEI data in ISO 8601 format (YYYY-MM-DD).
+        endtime : date
+            The end time of the SPEI data in ISO 8601 format (YYYY-MM-DD). Endtime is exclusive.
+        """
         self.logger.info("setting up SPEI...")
 
         # assert input data have the same coordinates
@@ -2248,6 +2262,13 @@ class GEBModel(GridModel):
         assert np.array_equal(
             self.forcing["climate/pr"].y, self.forcing["climate/tasmax"].y
         )
+        assert self.forcing[
+            "climate/pr"
+        ].time.min().dt.date <= starttime and self.forcing[
+            "climate/pr"
+        ].time.max().dt.date >= endtime - timedelta(
+            days=1
+        ), "water data does not cover the entire reference period"
 
         pet = xci.potential_evapotranspiration(
             tasmin=self.forcing["climate/tasmin"],
@@ -2263,12 +2284,7 @@ class GEBModel(GridModel):
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
-        assert water_budget_positive.time.min().dt.date < date(
-            2010, 1, 1
-        ) and water_budget_positive.time.max().dt.date > date(
-            1980, 1, 1
-        ), "water budget data does not cover the reference period"
-        wb_cal = water_budget_positive.sel(time=slice("1981-01-01", "2010-01-01"))
+        wb_cal = water_budget_positive.sel(time=slice(starttime, endtime))
         assert wb_cal.time.size > 0
 
         # Compute the SPEI
@@ -2347,38 +2363,40 @@ class GEBModel(GridModel):
             geom=self.geoms["areamaps/region"],
             predicate="intersects",
         ).rename(columns={unique_region_id: "region_id", ISO3_column: "ISO3"})
+
+        assert bounds_are_within(
+            self.geoms["areamaps/region"].total_bounds,
+            regions.to_crs(self.geoms["areamaps/region"].crs).total_bounds,
+        )
         assert np.issubdtype(
             regions["region_id"].dtype, np.integer
         ), "Region ID must be integer"
+
         region_id_mapping = {
             i: region_id for region_id, i in enumerate(regions["region_id"])
         }
         regions["region_id"] = regions["region_id"].map(region_id_mapping)
         self.set_dict(region_id_mapping, name="areamaps/region_id_mapping")
+
         assert (
             "ISO3" in regions.columns
         ), f"Region database must contain ISO3 column ({self.data_catalog[region_database].path})"
+
         self.set_geoms(regions, name="areamaps/regions")
-
-        regions_bounds = self.geoms["areamaps/regions"].total_bounds
-
-        region_bounds = (
-            self.geoms["areamaps/region"]
-            .to_crs(self.geoms["areamaps/regions"].crs)
-            .total_bounds
-        )
-        assert region_bounds[0] >= regions_bounds[0], "Region bounds do not match"
-        assert region_bounds[1] >= regions_bounds[1], "Region bounds do not match"
-        assert region_bounds[2] <= regions_bounds[2], "Region bounds do not match"
-        assert region_bounds[3] <= regions_bounds[3], "Region bounds do not match"
 
         resolution_x, resolution_y = self.subgrid[
             "areamaps/sub_grid_mask"
         ].rio.resolution()
-        pad_minx = regions_bounds[0] - abs(resolution_x) / 2.0
-        pad_miny = regions_bounds[1] - abs(resolution_y) / 2.0
-        pad_maxx = regions_bounds[2] + abs(resolution_x) / 2.0
-        pad_maxy = regions_bounds[3] + abs(resolution_y) / 2.0
+
+        regions_bounds = self.geoms["areamaps/regions"].total_bounds
+        mask_bounds = self.grid["areamaps/grid_mask"].raster.bounds
+
+        # The bounds should be set to a bit larger than the regions to avoid edge effects
+        # and also larger than the mask, to ensure that the entire grid is covered.
+        pad_minx = min(regions_bounds[0], mask_bounds[0]) - abs(resolution_x) / 2.0
+        pad_miny = min(regions_bounds[1], mask_bounds[1]) - abs(resolution_y) / 2.0
+        pad_maxx = max(regions_bounds[2], mask_bounds[2]) + abs(resolution_x) / 2.0
+        pad_maxy = max(regions_bounds[3], mask_bounds[3]) + abs(resolution_y) / 2.0
 
         # TODO: Is there a better way to do this?
         padded_subgrid, region_subgrid_slice = pad_xy(
@@ -2390,6 +2408,7 @@ class GEBModel(GridModel):
             return_slice=True,
             constant_values=1,
         )
+
         padded_subgrid.raster.set_nodata(-1)
         self.set_region_subgrid(padded_subgrid, name="areamaps/region_mask")
 
@@ -2400,13 +2419,13 @@ class GEBModel(GridModel):
         )
         reprojected_land_use = land_use.raster.reproject_like(
             padded_subgrid, method="nearest"
-        ).compute()
+        )
 
         region_raster = reprojected_land_use.raster.rasterize(
             self.geoms["areamaps/regions"],
             col_name="region_id",
             all_touched=True,
-        ).compute()
+        )
         self.set_region_subgrid(region_raster, name="areamaps/region_subgrid")
 
         padded_cell_area = self.grid["areamaps/cell_area"].rio.pad_box(*regions_bounds)
@@ -2447,7 +2466,7 @@ class GEBModel(GridModel):
         # remove padding from region subgrid
         region_cell_area_subgrid_clipped_to_region.data = (
             region_cell_area_subgrid.raster.clip_bbox(
-                region_cell_area_subgrid_clipped_to_region.raster.bounds
+                (pad_minx, pad_miny, pad_maxx, pad_maxy)
             )
         )
 
@@ -2575,7 +2594,9 @@ class GEBModel(GridModel):
         inflation_rates_dict["time"] = years_inflation_rates
 
         for _, region in self.geoms["areamaps/regions"].iterrows():
-            region_id = str(region["region_id"]) # convert to string for json compatibility
+            region_id = str(
+                region["region_id"]
+            )  # convert to string for json compatibility
             ISO3 = region["ISO3"]
 
             lending_rates_country = (
@@ -2911,7 +2932,9 @@ class GEBModel(GridModel):
         cut_farms = cut_farms[cut_farms != -1]
 
         assert farms.min() >= -1  # -1 is nodata value, all farms should be positive
-        subgrid_farms = clip_with_grid(farms, ~region_mask)[0]
+        subgrid_farms = farms.raster.clip_bbox(
+            self.subgrid["areamaps/sub_grid_mask"].raster.bounds
+        )
 
         subgrid_farms_in_study_area = xr.where(
             np.isin(subgrid_farms, cut_farms), -1, subgrid_farms, keep_attrs=True
@@ -3842,7 +3865,11 @@ class GEBModel(GridModel):
 
         # merit hydro
         merit_hydro = self.data_catalog.get_rasterdataset(
-            "merit_hydro", bbox=bounds, buffer=100, variables=["uparea", "flwdir", "elevtn"], provider=self.data_provider
+            "merit_hydro",
+            bbox=bounds,
+            buffer=100,
+            variables=["uparea", "flwdir", "elevtn"],
+            provider=self.data_provider,
         )
         del merit_hydro["flwdir"].attrs["_FillValue"]
         self.set_forcing(merit_hydro, name="SFINCS/merit_hydro", split_dataset=False)
@@ -4069,7 +4096,11 @@ class GEBModel(GridModel):
                 )
             return xr.open_dataset(
                 fp,
-                chunks={"time": min(forcing.time.size, time_chunksize), "y": min(forcing.y.size, y_chunksize), "x": min(forcing.x.size, x_chunksize)},
+                chunks={
+                    "time": min(forcing.time.size, time_chunksize),
+                    "y": min(forcing.y.size, y_chunksize),
+                    "x": min(forcing.x.size, x_chunksize),
+                },
                 lock=False,
             )[forcing.name]
         else:
