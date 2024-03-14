@@ -300,7 +300,7 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
             estimated_area = (estimate * farm_sizes).sum()
 
             absolute_difference = target_area - estimated_area
-            if absolute_difference == 0:
+            if abs(absolute_difference) < 1e-3:
                 break
 
             difference = (target_area / estimated_area) ** (1 / (n_farm_sizes - 1))
