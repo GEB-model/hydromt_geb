@@ -40,6 +40,8 @@ if os.name == "nt":
 else:
     os.environ["ESMFMKFILE"] = str(Path(os.__file__).parent.parent / "esmf.mk")
 
+os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
+
 from affine import Affine
 import geopandas as gpd
 
@@ -2328,6 +2330,7 @@ class GEBModel(GridModel):
         unique_region_id="UID",
         ISO3_column="GID_0",
         river_threshold=100,
+        land_cover="esa_worldcover_2021_v200",
     ):
         """
         Sets up the (administrative) regions and land use data for GEB. The regions can be used for multiple purposes,
@@ -2413,7 +2416,7 @@ class GEBModel(GridModel):
         self.set_region_subgrid(padded_subgrid, name="areamaps/region_mask")
 
         land_use = self.data_catalog.get_rasterdataset(
-            "esa_worldcover_2020_v100",
+            land_cover,
             geom=self.geoms["areamaps/regions"],
             buffer=200,  # 2 km buffer
         )
@@ -3843,7 +3846,7 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
-    def setup_sfincs(self):
+    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200"):
         sfincs_data_catalog = DataCatalog()
 
         # hydrobasins
@@ -3927,7 +3930,7 @@ class GEBModel(GridModel):
 
         # landcover
         esa_worldcover = self.data_catalog.get_rasterdataset(
-            "esa_worldcover_2020_v100",
+            land_cover,
             geom=self.geoms["areamaps/regions"],
             buffer=200,  # 2 km buffer
         )
