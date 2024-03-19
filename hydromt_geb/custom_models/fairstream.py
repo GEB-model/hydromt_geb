@@ -38,7 +38,7 @@ class Survey:
 
     def estimate_parameters(self, plot=False, save=False):
         print("Learning network parameters")
-        self.model = BayesianNetwork(self.model.edges())
+        self.model = BayesianNetwork(self.model)
         self.model.fit(
             self.samples,
             estimator=BayesianEstimator,
@@ -86,7 +86,7 @@ class Survey:
         print("Saving model")
         self.model.save(str(path))
 
-    def load_bayesian_network(self, path):
+    def read(self, path):
         print("Loading model")
         self.model = BayesianNetwork().load(str(path), n_jobs=1)
 
@@ -96,19 +96,26 @@ class Survey:
         mean,
         std,
         nan_value=-1,
-        left_bound=0.01,
-        right_bound=0.99,
         plot=False,
+        save=False,
         distribution="normal",
         invert=False,
     ):
         assert distribution == "normal", "Only normal distribution is implemented"
         values = self.get(variable).values
         values = values[values != nan_value]
+
+        # Get all unique values. There may be gaps in the values, so we need to fill them in
         unique_values, unique_counts = np.unique(values, return_counts=True)
-        values_intervals = np.arange(unique_values[0], unique_values[-1] + 1)
-        values_intervals[unique_values] = unique_counts
+        # ... which we do using arange from the first to the last value
+        values_intervals = np.zeros(
+            unique_values[-1] + 1 - unique_values[0], dtype=np.int32
+        )
+        # then we set the counts of the unique values at the correct indices
+        values_intervals[unique_values - unique_values[0]] = unique_counts
+
         values_intervals = values_intervals / values.size
+
         assert values_intervals.sum() == 1
         values_intervals_cum = np.insert(np.cumsum(values_intervals), 0, 0.01)
         assert values_intervals_cum[1] > 0.01
@@ -116,7 +123,7 @@ class Survey:
         values_intervals_cum[-1] = 0.99
         values_sd_values = norm.ppf(values_intervals_cum, loc=mean, scale=std)
 
-        if plot:
+        if plot or save:
             _, ax = plt.subplots()
             x = np.linspace(mean - 3 * std, mean + 3 * std, 1000)
             y = norm.pdf(x, mean, std)
@@ -124,7 +131,10 @@ class Survey:
             for left_sd, right_sd in zip(values_sd_values[:-1], values_sd_values[1:]):
                 assert left_sd < right_sd
                 ax.fill_between(x, y, where=(x >= left_sd) & (x < right_sd))
-            plt.show()
+            if plot:
+                plt.show()
+            if save:
+                plt.savefig(save)
         self.mappers[variable] = {
             "sd_bins": values_sd_values,
             "mean": mean,
@@ -217,9 +227,9 @@ class Survey:
 
 
 class FarmerSurvey(Survey):
-    def __init__(self, password):
+    def __init__(self):
         super().__init__()
-        self.password = password
+        # self.password = password
         self.bins = {
             "What is your age?": {
                 "bins": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -269,13 +279,14 @@ class FarmerSurvey(Survey):
             "How many years of education did you complete?": "education",
             "How large is the area you grow crops on in hectares?": "field_size",
             "How do you see yourself? Are you generally a person who is fully prepared to take risks or do you try to avoid taking risks?": "risk_aversion",
+            "Some people live day by day and do not plan some years ahead in making financial decision for their household, how similar do you feel you are to those people?": "discount_rate",
         }
 
     def load_survey(self, path):
         # Read the survey data
         with zipfile.ZipFile(path) as zf:
             with zf.open(
-                "survey_results_cleaned.xlsx", pwd=self.password
+                "survey_results_cleaned.xlsx"  # , pwd=self.password
             ) as excel_file:
                 df = pd.read_excel(excel_file)
         return df
@@ -316,6 +327,7 @@ class FarmerSurvey(Survey):
                 "perceived self efficacy",
                 "perceived effectivity",
                 "How do you see yourself? Are you generally a person who is fully prepared to take risks or do you try to avoid taking risks?",
+                "Some people live day by day and do not plan some years ahead in making financial decision for their household, how similar do you feel you are to those people?",
             ]
         ]
 
@@ -701,34 +713,53 @@ class fairSTREAMModel(GEBModel):
         discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
-    def estimate_bayesian_network(self, risk_aversion_mean, risk_aversion_std):
+    def estimate_bayesian_network(
+        self,
+        risk_aversion_mean,
+        risk_aversion_std,
+        discount_rate_mean,
+        discount_rate_std,
+        overwrite_bayesian_network=False,
+    ):
         bayesian_net_folder = Path(self.root).parent / "preprocessing" / "bayesian_net"
         bayesian_net_folder.mkdir(exist_ok=True, parents=True)
 
-        IHDS_survey = IHDSSurvey()
-        IHDS_survey.parse(path=Path("data") / "IHDS_I.csv")
-        IHDS_survey.learn_structure()
-        IHDS_survey.estimate_parameters(
-            plot=False, save=bayesian_net_folder / "IHDS.png"
-        )
-        IHDS_survey.save(bayesian_net_folder / "IHDS.bif")
+        # IHDS_survey = IHDSSurvey()
+        # IHDS_survey.parse(path=Path("data") / "IHDS_I.csv")
+        # IHDS_survey.learn_structure()
+        # IHDS_survey.estimate_parameters(
+        #     plot=False, save=bayesian_net_folder / "IHDS.png"
+        # )
+        # IHDS_survey.save(bayesian_net_folder / "IHDS.bif")
 
-        farmer_survey = FarmerSurvey(b"2!hM0t$2Kd66")
+        farmer_survey = FarmerSurvey()
         farmer_survey.parse(path=Path("data") / "survey_results_cleaned.zip")
-        farmer_survey.learn_structure()
-        farmer_survey.estimate_parameters(
-            plot=False, save=bayesian_net_folder / "farmer_survey.png"
-        )
-        farmer_survey.save(bayesian_net_folder / "farmer_survey.bif")
+        save_path = bayesian_net_folder / "farmer_survey.bif"
+        if not save_path.exists() or overwrite_bayesian_network:
+            farmer_survey.learn_structure()
+            farmer_survey.estimate_parameters(
+                plot=False, save=bayesian_net_folder / "farmer_survey.png"
+            )
+            farmer_survey.save(save_path)
+        else:
+            farmer_survey.read(save_path)
 
         farmer_survey.create_mapper(
             "risk_aversion",
             mean=risk_aversion_mean,
             std=risk_aversion_std,
             nan_value=-1,
-            left_bound=0.01,
-            right_bound=0.99,
-            plot=False,
+            save=bayesian_net_folder / "risk_aversion_mapper.png",
+            invert=True,
+        )
+
+        # High values (5) means very short term planning, low values (1) means very long term planning
+        farmer_survey.create_mapper(
+            "discount_rate",
+            mean=discount_rate_mean,
+            std=discount_rate_std,
+            nan_value=-1,
+            save=bayesian_net_folder / "discount_rate_mapper.png",
             invert=True,
         )
 
@@ -750,6 +781,7 @@ class fairSTREAMModel(GEBModel):
 
         perceived_effectivity = np.full_like(farm_size_m2, -1, dtype=np.int32)
         risk_aversion_raw = np.full_like(farm_size_m2, -1, dtype=np.int32)
+        discount_rate_raw = np.full_like(farm_size_m2, -1, dtype=np.int32)
         for group_count, (group, group_size) in enumerate(zip(groups, group_counts)):
             group_mask = group_inverse == group_count
 
@@ -766,12 +798,15 @@ class fairSTREAMModel(GEBModel):
                 int
             )  # use array to avoid mathing on index, convert to int to make sure it is an integer
             risk_aversion_raw[group_mask] = samples["risk_aversion"].astype(int)
+            discount_rate_raw[group_mask] = samples["discount_rate"].astype(int)
 
         risk_aversion = farmer_survey.apply_mapper("risk_aversion", risk_aversion_raw)
+        discount_rate = farmer_survey.apply_mapper("discount_rate", discount_rate_raw)
 
         self.set_binary(
             perceived_effectivity, name="agents/farmers/perceived_effectivity"
         )
         self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
         return None
