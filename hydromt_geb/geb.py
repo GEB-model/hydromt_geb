@@ -65,6 +65,7 @@ from .workflows import (
     bounds_are_within,
 )
 from .workflows.population import generate_locations
+from .workflows.crop_calendars import parse_MIRCA2000_crop_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -1488,45 +1489,54 @@ class GEBModel(GridModel):
 
                 c = cdsapi.Client()
 
-                c.retrieve(
-                    "reanalysis-era5-land",
-                    {
-                        "product_type": "reanalysis",
-                        "format": "netcdf",
-                        "variable": [
-                            variable,
-                        ],
-                        "date": f"{year}-01-01/{year}-12-31",
-                        "time": [
-                            "00:00",
-                            "01:00",
-                            "02:00",
-                            "03:00",
-                            "04:00",
-                            "05:00",
-                            "06:00",
-                            "07:00",
-                            "08:00",
-                            "09:00",
-                            "10:00",
-                            "11:00",
-                            "12:00",
-                            "13:00",
-                            "14:00",
-                            "15:00",
-                            "16:00",
-                            "17:00",
-                            "18:00",
-                            "19:00",
-                            "20:00",
-                            "21:00",
-                            "22:00",
-                            "23:00",
-                        ],
-                        "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
-                    },
-                    output_fn,
-                )
+                try:
+                    c.retrieve(
+                        "reanalysis-era5-land",
+                        {
+                            "product_type": "reanalysis",
+                            "format": "netcdf",
+                            "variable": [
+                                variable,
+                            ],
+                            "date": f"{year}-01-01/{year}-12-31",
+                            "time": [
+                                "00:00",
+                                "01:00",
+                                "02:00",
+                                "03:00",
+                                "04:00",
+                                "05:00",
+                                "06:00",
+                                "07:00",
+                                "08:00",
+                                "09:00",
+                                "10:00",
+                                "11:00",
+                                "12:00",
+                                "13:00",
+                                "14:00",
+                                "15:00",
+                                "16:00",
+                                "17:00",
+                                "18:00",
+                                "19:00",
+                                "20:00",
+                                "21:00",
+                                "22:00",
+                                "23:00",
+                            ],
+                            "area": (
+                                ymax,
+                                xmin,
+                                ymin,
+                                xmax,
+                            ),  # North, West, South, East
+                        },
+                        output_fn,
+                    )
+                except Exception as e:
+                    print(e)
+                    raise
             return output_fn
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -3413,6 +3423,8 @@ class GEBModel(GridModel):
         n_seasons=3,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
+
+        crop_calendar = parse_MIRCA2000_crop_calendar(self.data_catalog, self.bounds)
 
         for season in range(1, n_seasons + 1):
             # randomly sample from crops
