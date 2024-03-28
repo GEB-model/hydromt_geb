@@ -2251,15 +2251,21 @@ class GEBModel(GridModel):
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
         self.set_forcing(wind_output_clipped, f"climate/sfcwind")
 
-    def setup_SPEI(self, starttime: date, endtime: date):
+    def setup_SPEI(
+        self,
+        calibration_period_start: date = date(1981, 1, 1),
+        calibration_period_end: date = date(2010, 1, 1),
+    ):
         """
-        Sets up the Standardized Precipitation Evapotranspiration Index (SPEI).
+        Sets up the Standardized Precipitation Evapotranspiration Index (SPEI). Note that
+        due to the sliding window, the SPEI data will be shorter than the original data. When
+        a sliding window of 12 months is used, the SPEI data will be shorter by 11 months.
 
         Parameters
         ----------
-        starttime : date
-            The start time of the SPEI data in ISO 8601 format (YYYY-MM-DD).
-        endtime : date
+        calibration_period_start : date
+            The start time of the reSPEI data in ISO 8601 format (YYYY-MM-DD).
+        calibration_period_end : date
             The end time of the SPEI data in ISO 8601 format (YYYY-MM-DD). Endtime is exclusive.
         """
         self.logger.info("setting up SPEI...")
@@ -2279,11 +2285,11 @@ class GEBModel(GridModel):
         )
         assert self.forcing[
             "climate/pr"
-        ].time.min().dt.date <= starttime and self.forcing[
+        ].time.min().dt.date <= calibration_period_start and self.forcing[
             "climate/pr"
-        ].time.max().dt.date >= endtime - timedelta(
+        ].time.max().dt.date >= calibration_period_end - timedelta(
             days=1
-        ), "water data does not cover the entire reference period"
+        ), "water data does not cover the entire calibration period"
 
         pet = xci.potential_evapotranspiration(
             tasmin=self.forcing["climate/tasmin"],
@@ -2292,25 +2298,24 @@ class GEBModel(GridModel):
         )
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(
-            pr=self.forcing["climate/pr"], evspsblpot=pet
-        )
+        water_budget = xci.water_budget(pr=self.forcing["climate/pr"], evspsblpot=pet)
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
-        wb_cal = water_budget_positive.sel(time=slice(starttime, endtime))
-        assert wb_cal.time.size > 0
-
         # Compute the SPEI
-        spei = xci._agro.standardized_precipitation_evapotranspiration_index(
+        sliding_window = 12
+        spei = xci.standardized_precipitation_evapotranspiration_index(
             wb=water_budget_positive,
-            wb_cal=wb_cal,
+            cal_start=calibration_period_start,
+            cal_end=calibration_period_end,
             freq="MS",
-            window=12,
+            window=sliding_window,
             dist="gamma",
             method="APP",
         )
+        # remove all nan values as a result of the sliding window
+        spei = spei.isel(time=slice(sliding_window - 1, None))
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
