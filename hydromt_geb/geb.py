@@ -11,6 +11,8 @@ import requests
 import time
 import random
 import zipfile
+import shutil
+import tempfile
 import json
 from urllib.parse import urlparse
 import concurrent.futures
@@ -4129,72 +4131,88 @@ class GEBModel(GridModel):
         fn = var + ".nc"
         self.model_structure["forcing"][var] = fn
         self.is_updated["forcing"][var]["filename"] = fn
-        fp = Path(self.root, fn)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        if fp.exists():
-            fp.unlink()
+
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-        if "time" in forcing.dims:
-            with ProgressBar(dt=10):  # print progress bar every 10 seconds
-                assert (
-                    forcing.dims[0] == "time"
-                ), "time dimension must be first, otherwise xarray will not chunk correctly"
-                assert (
-                    forcing.dims[1] == "y" and forcing.dims[2] == "x"
-                ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
-                forcing.to_netcdf(
+
+        # create temporary file path
+        with tempfile.TemporaryDirectory(dir=".") as tmpdirname:
+            # write netcdf to temporary file
+            fp_temp = Path(tmpdirname, 'tempfile.nc')
+            fp_temp.parent.mkdir(parents=True, exist_ok=True)
+            if "time" in forcing.dims:
+                with ProgressBar(dt=10):  # print progress bar every 10 seconds
+                    assert (
+                        forcing.dims[0] == "time"
+                    ), "time dimension must be first, otherwise xarray will not chunk correctly"
+                    assert (
+                        forcing.dims[1] == "y" and forcing.dims[2] == "x"
+                    ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
+                    forcing.to_netcdf(
+                        fp_temp,
+                        mode="w",
+                        engine="netcdf4",
+                        encoding={
+                            forcing.name: {
+                                "chunksizes": (
+                                    min(forcing.time.size, time_chunksize),
+                                    min(forcing.y.size, y_chunksize),
+                                    min(forcing.x.size, x_chunksize),
+                                ),
+                                "zlib": True,
+                                "complevel": 9,
+                            }
+                        },
+                    )
+
+                    # move file to final location
+                    fp = Path(self.root, fn)
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+
+                    shutil.move(fp_temp, fp)
+                return xr.open_dataset(
                     fp,
-                    mode="w",
-                    engine="netcdf4",
-                    encoding={
-                        forcing.name: {
-                            "chunksizes": (
-                                min(forcing.time.size, time_chunksize),
-                                min(forcing.y.size, y_chunksize),
-                                min(forcing.x.size, x_chunksize),
-                            ),
-                            "zlib": True,
-                            "complevel": 9,
-                        }
+                    chunks={
+                        "time": min(forcing.time.size, time_chunksize),
+                        "y": min(forcing.y.size, y_chunksize),
+                        "x": min(forcing.x.size, x_chunksize),
                     },
+                    lock=False,
+                )[forcing.name]
+            else:
+                if isinstance(forcing, xr.DataArray):
+                    name = forcing.name
+                    encoding = {forcing.name: {"zlib": True, "complevel": 9}}
+                elif isinstance(forcing, xr.Dataset):
+                    assert (
+                        len(forcing.data_vars) > 1
+                    ), "forcing must have more than one variable or name must be set"
+                    encoding = {
+                        var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
+                    }
+                else:
+                    raise ValueError("forcing must be a DataArray or Dataset")
+                forcing.to_netcdf(
+                    fp_temp,
+                    mode="w",
+                    encoding=encoding,
                 )
-            return xr.open_dataset(
-                fp,
-                chunks={
-                    "time": min(forcing.time.size, time_chunksize),
-                    "y": min(forcing.y.size, y_chunksize),
-                    "x": min(forcing.x.size, x_chunksize),
-                },
-                lock=False,
-            )[forcing.name]
-        else:
-            if isinstance(forcing, xr.DataArray):
-                name = forcing.name
-                encoding = {forcing.name: {"zlib": True, "complevel": 9}}
-            elif isinstance(forcing, xr.Dataset):
-                assert (
-                    len(forcing.data_vars) > 1
-                ), "forcing must have more than one variable or name must be set"
-                encoding = {
-                    var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
-                }
-            else:
-                raise ValueError("forcing must be a DataArray or Dataset")
-            forcing.to_netcdf(
-                fp,
-                mode="w",
-                encoding=encoding,
-            )
-            ds = xr.open_dataset(
-                fp,
-                chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
-                lock=False,
-                engine="netcdf4",
-            )
-            if isinstance(forcing, xr.DataArray):
-                return ds[name]
-            else:
-                return ds
+
+                # move file to final location
+                fp = Path(self.root, fn)
+                fp.parent.mkdir(parents=True, exist_ok=True)
+
+                shutil.move(fp_temp, fp)
+
+                ds = xr.open_dataset(
+                    fp,
+                    chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                    lock=False,
+                    engine="netcdf4",
+                )
+                if isinstance(forcing, xr.DataArray):
+                    return ds[name]
+                else:
+                    return ds
 
     def write_forcing(self) -> None:
         self._assert_write_mode
