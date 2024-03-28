@@ -1212,7 +1212,7 @@ class GEBModel(GridModel):
         endtime: date,
         data_source: str = "isimip",
         resolution_arcsec: int = 30,
-        forcing: str = "chelsa-w5e5v1.0",
+        forcing: str = "chelsa-w5e5",
         ssp=None,
     ):
         """
@@ -1247,8 +1247,8 @@ class GEBModel(GridModel):
         if data_source == "isimip":
             if resolution_arcsec == 30:
                 assert (
-                    forcing == "chelsa-w5e5v1.0"
-                ), "Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution"
+                    forcing == "chelsa-w5e5"
+                ), "Only chelsa-w5e5 is supported for 30 arcsec resolution"
                 # download source data from ISIMIP
                 self.logger.info("setting up forcing data")
                 high_res_variables = ["pr", "rsds", "tas", "tasmax", "tasmin"]
@@ -1812,7 +1812,7 @@ class GEBModel(GridModel):
                 variable=variable,
                 starttime=starttime,
                 endtime=endtime,
-                forcing="chelsa-w5e5v1.0",
+                forcing="chelsa-w5e5",
                 resolution="30arcsec",
             )
             ds = ds.rename({"lon": "x", "lat": "y"})
@@ -2136,7 +2136,7 @@ class GEBModel(GridModel):
         ).psl  # some buffer to avoid edge effects / errors in ISIMIP API
 
         orography = self.download_isimip(
-            product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
+            product="InputData", variable="orog", forcing="chelsa-w5e5", buffer=1
         ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
         import xesmf as xe
 
