@@ -1,4 +1,10 @@
 import numpy as np
+from datetime import date
+import calendar
+
+
+def get_day_of_year(date):
+    return date.timetuple().tm_yday
 
 
 def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
@@ -37,26 +43,45 @@ def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
                     continue
                 start_month = int(crops[rotation * 3 + 1])
                 end_month = int(crops[rotation * 3 + 2])
-                crop_rotations.append((start_month, end_month, area))
+                start_day = get_day_of_year(date(2000, start_month, 1))
+                end_day = get_day_of_year(
+                    date(2000, end_month, calendar.monthrange(2000, end_month)[1])
+                )
+                crop_rotations.append((start_day, end_day, area))
+
+            del start_month
+            del end_month
 
             crop_rotations = sorted(crop_rotations, key=lambda x: x[2])  # sort by area
             if len(crop_rotations) == 1:
-                start_month, end_month, area = crop_rotations[0]
-                crop_rotation = area, crop_class, ((start_month, end_month),)
+                start_day, end_day, area = crop_rotations[0]
+                crop_rotation = (
+                    area,
+                    np.array(
+                        ((crop_class, start_day, end_day), (-1, -1, -1), (-1, -1, -1))
+                    ),
+                )  # -1 means no crop
                 MIRCA2000_data[unit_code].append(crop_rotation)
             elif len(crop_rotations) == 2:
                 crop_rotation = (
                     crop_rotations[1][2] - crop_rotations[0][2],
-                    crop_class,
-                    ((crop_rotations[1][0], crop_rotations[1][1]),),
+                    np.array(
+                        (
+                            (crop_class, crop_rotations[1][0], crop_rotations[1][1]),
+                            (-1, -1, -1),
+                            (-1, -1, -1),
+                        )
+                    ),  # -1 means no crop
                 )
                 MIRCA2000_data[unit_code].append(crop_rotation)
                 crop_rotation = (
                     crop_rotations[0][2],
-                    crop_class,
-                    (
-                        (crop_rotations[0][0], crop_rotations[0][1]),
-                        (crop_rotations[1][0], crop_rotations[1][1]),
+                    np.array(
+                        (
+                            (crop_class, crop_rotations[0][0], crop_rotations[0][1]),
+                            (crop_class, crop_rotations[1][0], crop_rotations[1][1]),
+                            (-1, -1, -1),
+                        )
                     ),
                 )
                 MIRCA2000_data[unit_code].append(crop_rotation)

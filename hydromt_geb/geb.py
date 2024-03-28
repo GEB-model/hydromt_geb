@@ -30,6 +30,8 @@ from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
 from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter
 
+from honeybees.library.raster import sample_from_map
+
 XY_CHUNKSIZE = 350
 
 # temporary fix for ESMF on Windows
@@ -64,6 +66,7 @@ from .workflows import (
     fetch_and_save,
     bounds_are_within,
 )
+from .workflows.farmers import get_farm_locations
 from .workflows.population import generate_locations
 from .workflows.crop_calendars import parse_MIRCA2000_crop_calendar
 
@@ -3425,6 +3428,47 @@ class GEBModel(GridModel):
         n_farmers = self.binary["agents/farmers/id"].size
 
         crop_calendar = parse_MIRCA2000_crop_calendar(self.data_catalog, self.bounds)
+        MIRCA_unit_grid = self.data_catalog.get_rasterdataset(
+            "MIRCA2000_unit_grid", bbox=self.bounds, buffer=2
+        )
+
+        farmer_mirca_units = sample_from_map(
+            MIRCA_unit_grid.values,
+            get_farm_locations(self.subgrid["agents/farmers/farms"], method="centroid"),
+            MIRCA_unit_grid.raster.transform.to_gdal(),
+        )
+
+        crop_calendar_per_farmer = np.zeros((n_farmers, 3, 3), dtype=np.int32)
+        for mirca_unit in np.unique(farmer_mirca_units):
+            n_farmers_mirca_unit = (farmer_mirca_units == mirca_unit).sum()
+
+            area_per_crop_rotation = []
+            cropping_calenders_crop_rotation = []
+            for crop_rotation in crop_calendar[mirca_unit]:
+                area_per_crop_rotation.append(crop_rotation[0])
+                cropping_calenders_crop_rotation.append(crop_rotation[1])
+            area_per_crop_rotation = np.array(area_per_crop_rotation)
+            cropping_calenders_crop_rotation = np.stack(
+                cropping_calenders_crop_rotation
+            )
+
+            # select n crop rotations weighted by the area for each crop rotation
+            farmer_crop_rotations_idx = np.random.choice(
+                np.arange(len(area_per_crop_rotation)),
+                size=n_farmers_mirca_unit,
+                replace=True,
+                p=area_per_crop_rotation / area_per_crop_rotation.sum(),
+            )
+            crop_calendar_per_farmer_mirca_unit = cropping_calenders_crop_rotation[
+                farmer_crop_rotations_idx
+            ]
+            crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
+                crop_calendar_per_farmer_mirca_unit
+            )
+
+        self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
+
+        # TODO: sort the crop calendars by start date depending on implementation in GEB
 
         for season in range(1, n_seasons + 1):
             # randomly sample from crops
