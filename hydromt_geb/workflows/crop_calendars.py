@@ -31,7 +31,7 @@ def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
                 continue
             if unit_code not in MIRCA2000_data:
                 MIRCA2000_data[unit_code] = []
-            crop_class = int(line[1])
+            crop_class = int(line[1]) - 1  # minus one to make it zero based
             number_of_rotations = int(line[2])
             if number_of_rotations == 0:
                 continue

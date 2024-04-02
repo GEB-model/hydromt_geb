@@ -355,8 +355,7 @@ class GEBModel(GridModel):
 
     def setup_crops(
         self,
-        crop_ids: dict,
-        crop_variables: dict,
+        source: str,
         crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
         cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
         project_future_until_year: Optional[int] = False,
@@ -366,10 +365,6 @@ class GEBModel(GridModel):
 
         Parameters
         ----------
-        crop_ids : dict
-            A dictionary of crop IDs and names.
-        crop_variables : dict
-            A dictionary of crop variables and their values.
         crop_prices : str or dict, optional
             The file path or dictionary of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
             The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
@@ -380,8 +375,20 @@ class GEBModel(GridModel):
             crop IDs and their cultivation costs.
         """
         self.logger.info(f"Preparing crops data")
-        self.set_dict(crop_ids, name="crops/crop_ids")
-        self.set_dict(crop_variables, name="crops/crop_variables")
+
+        assert source in (
+            "MIRCA2000",
+        ), f"crop_variables_source {source} not understood, must be 'MIRCA2000'"
+
+        crop_data = {
+            "data": (
+                self.data_catalog.get_dataframe("MIRCA2000_crop_data")
+                .set_index("id")
+                .to_dict(orient="index")
+            ),
+            "type": "MIRCA2000",
+        }
+        self.set_dict(crop_data, name="crops/crop_data")
 
         def project_to_future(df, project_future_until_year, inflation_rates):
             # expand table until year
@@ -4137,7 +4144,7 @@ class GEBModel(GridModel):
         # create temporary file path
         with tempfile.TemporaryDirectory(dir=".") as tmpdirname:
             # write netcdf to temporary file
-            fp_temp = Path(tmpdirname, 'tempfile.nc')
+            fp_temp = Path(tmpdirname, "tempfile.nc")
             fp_temp.parent.mkdir(parents=True, exist_ok=True)
             if "time" in forcing.dims:
                 with ProgressBar(dt=10):  # print progress bar every 10 seconds
