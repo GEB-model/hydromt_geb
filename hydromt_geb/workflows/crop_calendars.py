@@ -7,6 +7,14 @@ def get_day_of_year(date):
     return date.timetuple().tm_yday
 
 
+def get_growing_season_length(start_day, end_day):
+    length = (end_day - start_day) % 365
+    if length == 0:
+        return 365
+    else:
+        return length
+
+
 def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
     MIRCA2000_unit_grid = data_catalog.get_rasterdataset(
         "MIRCA2000_unit_grid", bbox=bounds
@@ -47,18 +55,26 @@ def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
                 end_day = get_day_of_year(
                     date(2000, end_month, calendar.monthrange(2000, end_month)[1])
                 )
-                crop_rotations.append((start_day, end_day, area))
+                growth_length = get_growing_season_length(start_day, end_day)
+                crop_rotations.append((start_day, growth_length, area))
 
             del start_month
             del end_month
+            del start_day
+            del end_day
+            del growth_length
 
             crop_rotations = sorted(crop_rotations, key=lambda x: x[2])  # sort by area
             if len(crop_rotations) == 1:
-                start_day, end_day, area = crop_rotations[0]
+                start_day, growth_length, area = crop_rotations[0]
                 crop_rotation = (
                     area,
                     np.array(
-                        ((crop_class, start_day, end_day), (-1, -1, -1), (-1, -1, -1))
+                        (
+                            (crop_class, start_day, growth_length),
+                            (-1, -1, -1),
+                            (-1, -1, -1),
+                        )
                     ),
                 )  # -1 means no crop
                 MIRCA2000_data[unit_code].append(crop_rotation)
