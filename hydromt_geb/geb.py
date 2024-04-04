@@ -432,7 +432,7 @@ class GEBModel(GridModel):
             }
         else:
             raise ValueError(f"must be a file path or an integer, got {type(data)}")
-        
+
         return data
 
     def setup_cultivation_costs(
@@ -2296,18 +2296,16 @@ class GEBModel(GridModel):
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
         # Compute the SPEI
-        sliding_window = 12
         spei = xci.standardized_precipitation_evapotranspiration_index(
             wb=water_budget_positive,
             cal_start=calibration_period_start,
             cal_end=calibration_period_end,
             freq="MS",
-            window=sliding_window,
+            window=1,
             dist="gamma",
             method="APP",
         )
         # remove all nan values as a result of the sliding window
-        spei = spei.isel(time=slice(sliding_window - 1, None))
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
@@ -3415,12 +3413,10 @@ class GEBModel(GridModel):
         self,
         irrigation_sources=None,
         irrigation_choice=0,
-        crop_choices=None,
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
         discount_rate=0.1,
-        n_seasons=3,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3464,19 +3460,6 @@ class GEBModel(GridModel):
             )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
-
-        # TODO: sort the crop calendars by start date depending on implementation in GEB
-
-        for season in range(1, n_seasons + 1):
-            # randomly sample from crops
-            if crop_choices[season - 1] == "random":
-                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
-                farmer_crops = random.choices(crop_ids, k=n_farmers)
-            else:
-                farmer_crops = np.full(
-                    n_farmers, crop_choices[season - 1], dtype=np.int32
-                )
-            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
@@ -3899,8 +3882,15 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
-    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200"):
+    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200", coastline=None):
         sfincs_data_catalog = DataCatalog()
+
+        # coastline
+        if coastline is not None:
+            coastline = self.data_catalog.get_geodataframe(
+                coastline, bbox=self.bounds, predicate="intersects"
+            )
+            self.set_geoms(coastline, name="SFINCS/coastline")
 
         # hydrobasins
         hydrobasins = self.data_catalog.get_geodataframe(
