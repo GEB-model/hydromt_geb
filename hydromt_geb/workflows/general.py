@@ -3,6 +3,8 @@ import tempfile
 import requests
 from tqdm import tqdm
 import time
+import pandas as pd
+from datetime import date
 from typing import Any, Union
 import xarray
 import numpy as np
@@ -189,3 +191,26 @@ def fetch_and_save(
 
     # If all attempts fail, raise an exception
     raise Exception("All attempts to download the file have failed.")
+
+
+def project_to_future(df, project_future_until_year, inflation_rates):
+    # expand table until year
+    assert isinstance(df.index, pd.core.indexes.datetimes.DatetimeIndex)
+    future_index = pd.date_range(
+        df.index[-1],
+        date(project_future_until_year, 12, 31),
+        freq=pd.infer_freq(df.index),
+        inclusive="right",
+    )
+    df = df.reindex(df.index.union(future_index))
+    for future_date in tqdm(future_index):
+        source_date = future_date - pd.DateOffset(years=1)  # source is year ago
+        inflation_index = inflation_rates["time"].index(str(future_date.year))
+        for region_id, _ in df.columns:
+            region_inflation_rate = inflation_rates["data"][str(region_id)][
+                inflation_index
+            ]
+            df.loc[future_date, region_id] = (
+                df.loc[source_date, region_id] * region_inflation_rate
+            ).values
+    return df

@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
-import warnings
 from random import random
 from numba import njit
+from honeybees.library.raster import pixels_to_coords
 
 
 @njit(cache=True)
@@ -319,3 +319,37 @@ def get_farm_distribution(n, x0, x1, mean, offset, logger=None):
 
     assert n == n_farms.sum()
     return n_farms, farm_sizes
+
+
+def get_farm_locations(farms, method="centroid"):
+    if method != "centroid":
+        raise NotImplementedError
+    gt = farms.raster.transform.to_gdal()
+
+    farms = farms.values
+    n_farmers = np.unique(farms[farms != -1]).size
+
+    vertical_index = (
+        np.arange(farms.shape[0])
+        .repeat(farms.shape[1])
+        .reshape(farms.shape)[farms != -1]
+    )
+    horizontal_index = np.tile(np.arange(farms.shape[1]), farms.shape[0]).reshape(
+        farms.shape
+    )[farms != -1]
+
+    pixels = np.zeros((n_farmers, 2), dtype=np.int32)
+    pixels[:, 0] = np.round(
+        np.bincount(farms[farms != -1], horizontal_index)
+        / np.bincount(farms[farms != -1])
+    ).astype(int)
+    pixels[:, 1] = np.round(
+        np.bincount(farms[farms != -1], vertical_index)
+        / np.bincount(farms[farms != -1])
+    ).astype(int)
+
+    locations = pixels_to_coords(
+        pixels + 0.5,
+        gt,
+    )
+    return locations

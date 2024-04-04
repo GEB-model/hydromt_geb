@@ -11,6 +11,8 @@ import requests
 import time
 import random
 import zipfile
+import shutil
+import tempfile
 import json
 from urllib.parse import urlparse
 import concurrent.futures
@@ -29,6 +31,8 @@ from dateutil.relativedelta import relativedelta
 from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
 from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter
+
+from honeybees.library.raster import sample_from_map
 
 XY_CHUNKSIZE = 350
 
@@ -64,7 +68,10 @@ from .workflows import (
     fetch_and_save,
     bounds_are_within,
 )
+from .workflows.general import project_to_future
+from .workflows.farmers import get_farm_locations
 from .workflows.population import generate_locations
+from .workflows.crop_calendars import parse_MIRCA2000_crop_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -349,21 +356,13 @@ class GEBModel(GridModel):
 
     def setup_crops(
         self,
-        crop_ids: dict,
-        crop_variables: dict,
-        crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
-        cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
-        project_future_until_year: Optional[int] = False,
+        source: str,
     ):
         """
         Sets up the crops data for the model.
 
         Parameters
         ----------
-        crop_ids : dict
-            A dictionary of crop IDs and names.
-        crop_variables : dict
-            A dictionary of crop variables and their values.
         crop_prices : str or dict, optional
             The file path or dictionary of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
             The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
@@ -374,112 +373,109 @@ class GEBModel(GridModel):
             crop IDs and their cultivation costs.
         """
         self.logger.info(f"Preparing crops data")
-        self.set_dict(crop_ids, name="crops/crop_ids")
-        self.set_dict(crop_variables, name="crops/crop_variables")
 
-        def project_to_future(df, project_future_until_year, inflation_rates):
-            # expand table until year
-            assert isinstance(df.index, pd.core.indexes.datetimes.DatetimeIndex)
-            future_index = pd.date_range(
-                df.index[-1],
-                date(project_future_until_year, 12, 31),
-                freq=pd.infer_freq(df.index),
-                inclusive="right",
+        assert source in (
+            "MIRCA2000",
+        ), f"crop_variables_source {source} not understood, must be 'MIRCA2000'"
+
+        crop_data = {
+            "data": (
+                self.data_catalog.get_dataframe("MIRCA2000_crop_data")
+                .set_index("id")
+                .to_dict(orient="index")
+            ),
+            "type": "MIRCA2000",
+        }
+        self.set_dict(crop_data, name="crops/crop_data")
+
+    def process_crop_data(self, data, project_future_until_year=None):
+        if isinstance(data, str):
+            fp = Path(self.root, data)
+            if not fp.exists():
+                raise ValueError(f"file {fp.resolve()} does not exist")
+            with open(fp) as f:
+                data = json.load(f)
+            data = pd.DataFrame(
+                {
+                    crop_id: data["crops"][crop_name]
+                    for crop_id, crop_name in crop_ids.items()
+                },
+                index=pd.to_datetime(data["time"]),
             )
-            df = df.reindex(df.index.union(future_index))
-            for future_date in tqdm(future_index):
-                source_date = future_date - pd.DateOffset(years=1)  # source is year ago
-                inflation_index = inflation_rates["time"].index(str(future_date.year))
-                for region_id, _ in df.columns:
-                    region_inflation_rate = inflation_rates["data"][str(region_id)][
-                        inflation_index
+            data = data.reindex(
+                columns=pd.MultiIndex.from_product(
+                    [
+                        self.geoms["areamaps/regions"]["region_id"],
+                        data.columns,
                     ]
-                    df.loc[future_date, region_id] = (
-                        df.loc[source_date, region_id] * region_inflation_rate
-                    ).values
-            return df
-
-        if crop_prices is not None:
-            self.logger.info(f"Preparing crop prices")
-            if isinstance(crop_prices, str):
-                fp = Path(self.root, crop_prices)
-                if not fp.exists():
-                    raise ValueError(f"crop_prices file {fp.resolve()} does not exist")
-                with open(fp, "r") as f:
-                    crop_prices_data = json.load(f)
-                crop_prices = pd.DataFrame(
-                    {
-                        crop_id: crop_prices_data["crops"][crop_name]
-                        for crop_id, crop_name in crop_ids.items()
-                    },
-                    index=pd.to_datetime(crop_prices_data["time"]),
+                ),
+                level=1,
+            )
+            if project_future_until_year:
+                data = project_to_future(
+                    data,
+                    project_future_until_year,
+                    self.dict["economics/inflation_rates"],
                 )
-                crop_prices = crop_prices.reindex(
-                    columns=pd.MultiIndex.from_product(
-                        [
-                            self.geoms["areamaps/regions"]["region_id"],
-                            crop_prices.columns,
-                        ]
-                    ),
-                    level=1,
-                )
-                if project_future_until_year:
-                    crop_prices = project_to_future(
-                        crop_prices,
-                        project_future_until_year,
-                        self.dict["economics/inflation_rates"],
-                    )
-
-            crop_prices = {
-                "time": crop_prices.index.tolist(),
+            data = {
+                "type": "time_series",
+                "time": data.index.tolist(),
                 "data": {
-                    str(region_id): crop_prices[region_id].to_dict(orient="list")
+                    str(region_id): data[region_id].to_dict(orient="list")
                     for region_id in self.geoms["areamaps/regions"]["region_id"]
                 },
             }
-
-            self.set_dict(crop_prices, name="crops/crop_prices")
-
-        if cultivation_costs is not None:
-            self.logger.info(f"Preparing cultivation costs")
-            if isinstance(cultivation_costs, str):
-                fp = Path(self.root, cultivation_costs)
-                if not fp.exists():
-                    raise ValueError(
-                        f"cultivation_costs file {fp.resolve()} does not exist"
-                    )
-                with open(fp) as f:
-                    cultivation_costs = json.load(f)
-                cultivation_costs = pd.DataFrame(
-                    {
-                        crop_id: cultivation_costs["crops"][crop_name]
-                        for crop_id, crop_name in crop_ids.items()
-                    },
-                    index=pd.to_datetime(cultivation_costs["time"]),
-                )
-                cultivation_costs = cultivation_costs.reindex(
-                    columns=pd.MultiIndex.from_product(
-                        [
-                            self.geoms["areamaps/regions"]["region_id"],
-                            cultivation_costs.columns,
-                        ]
-                    ),
-                    level=1,
-                )
-                if project_future_until_year:
-                    cultivation_costs = project_to_future(
-                        cultivation_costs,
-                        project_future_until_year,
-                        self.dict["economics/inflation_rates"],
-                    )
-            cultivation_costs = {
-                "time": cultivation_costs.index.tolist(),
-                "data": {
-                    str(region_id): cultivation_costs[region_id].to_dict(orient="list")
-                    for region_id in self.geoms["areamaps/regions"]["region_id"]
-                },
+        elif isinstance(data, (int, float)):
+            data = {
+                "type": "constant",
+                "data": data,
             }
-            self.set_dict(cultivation_costs, name="crops/cultivation_costs")
+        else:
+            raise ValueError(f"must be a file path or an integer, got {type(data)}")
+
+        return data
+
+    def setup_cultivation_costs(
+        self,
+        cultivation_costs: Optional[Union[str, int, float]] = 0,
+        project_future_until_year: Optional[int] = False,
+    ):
+        """
+        Sets up the cultivation costs for the model.
+
+        Parameters
+        ----------
+        cultivation_costs : str or int or float, optional
+            The file path or integer of cultivation costs. If a file path is provided, the file is loaded and parsed as JSON.
+            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+            IDs and their cultivation costs. If .
+        """
+        self.logger.info(f"Preparing cultivation costs")
+        cultivation_costs = self.process_crop_data(
+            cultivation_costs, project_future_until_year=project_future_until_year
+        )
+        self.set_dict(cultivation_costs, name="crops/cultivation_costs")
+
+    def setup_crop_prices(
+        self,
+        crop_prices: Optional[Union[str, int, float]] = 0,
+        project_future_until_year: Optional[int] = False,
+    ):
+        """
+        Sets up the crop prices for the model.
+
+        Parameters
+        ----------
+        crop_prices : str or int or float, optional
+            The file path or integer of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
+            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+            IDs and their prices.
+        """
+        self.logger.info(f"Preparing crop prices")
+        crop_prices = self.process_crop_data(
+            crop_prices, project_future_until_year=project_future_until_year
+        )
+        self.set_dict(crop_prices, name="crops/crop_prices")
 
     def setup_mannings(self) -> None:
         """
@@ -1211,7 +1207,7 @@ class GEBModel(GridModel):
         endtime: date,
         data_source: str = "isimip",
         resolution_arcsec: int = 30,
-        forcing: str = "chelsa-w5e5v1.0",
+        forcing: str = "chelsa-w5e5",
         ssp=None,
     ):
         """
@@ -1246,8 +1242,8 @@ class GEBModel(GridModel):
         if data_source == "isimip":
             if resolution_arcsec == 30:
                 assert (
-                    forcing == "chelsa-w5e5v1.0"
-                ), "Only chelsa-w5e5v1.0 is supported for 30 arcsec resolution"
+                    forcing == "chelsa-w5e5"
+                ), "Only chelsa-w5e5 is supported for 30 arcsec resolution"
                 # download source data from ISIMIP
                 self.logger.info("setting up forcing data")
                 high_res_variables = ["pr", "rsds", "tas", "tasmax", "tasmin"]
@@ -1488,45 +1484,54 @@ class GEBModel(GridModel):
 
                 c = cdsapi.Client()
 
-                c.retrieve(
-                    "reanalysis-era5-land",
-                    {
-                        "product_type": "reanalysis",
-                        "format": "netcdf",
-                        "variable": [
-                            variable,
-                        ],
-                        "date": f"{year}-01-01/{year}-12-31",
-                        "time": [
-                            "00:00",
-                            "01:00",
-                            "02:00",
-                            "03:00",
-                            "04:00",
-                            "05:00",
-                            "06:00",
-                            "07:00",
-                            "08:00",
-                            "09:00",
-                            "10:00",
-                            "11:00",
-                            "12:00",
-                            "13:00",
-                            "14:00",
-                            "15:00",
-                            "16:00",
-                            "17:00",
-                            "18:00",
-                            "19:00",
-                            "20:00",
-                            "21:00",
-                            "22:00",
-                            "23:00",
-                        ],
-                        "area": (ymax, xmin, ymin, xmax),  # North, West, South, East
-                    },
-                    output_fn,
-                )
+                try:
+                    c.retrieve(
+                        "reanalysis-era5-land",
+                        {
+                            "product_type": "reanalysis",
+                            "format": "netcdf",
+                            "variable": [
+                                variable,
+                            ],
+                            "date": f"{year}-01-01/{year}-12-31",
+                            "time": [
+                                "00:00",
+                                "01:00",
+                                "02:00",
+                                "03:00",
+                                "04:00",
+                                "05:00",
+                                "06:00",
+                                "07:00",
+                                "08:00",
+                                "09:00",
+                                "10:00",
+                                "11:00",
+                                "12:00",
+                                "13:00",
+                                "14:00",
+                                "15:00",
+                                "16:00",
+                                "17:00",
+                                "18:00",
+                                "19:00",
+                                "20:00",
+                                "21:00",
+                                "22:00",
+                                "23:00",
+                            ],
+                            "area": (
+                                ymax,
+                                xmin,
+                                ymin,
+                                xmax,
+                            ),  # North, West, South, East
+                        },
+                        output_fn,
+                    )
+                except Exception as e:
+                    print(e)
+                    raise
             return output_fn
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -1802,7 +1807,7 @@ class GEBModel(GridModel):
                 variable=variable,
                 starttime=starttime,
                 endtime=endtime,
-                forcing="chelsa-w5e5v1.0",
+                forcing="chelsa-w5e5",
                 resolution="30arcsec",
             )
             ds = ds.rename({"lon": "x", "lat": "y"})
@@ -2126,7 +2131,7 @@ class GEBModel(GridModel):
         ).psl  # some buffer to avoid edge effects / errors in ISIMIP API
 
         orography = self.download_isimip(
-            product="InputData", variable="orog", forcing="chelsa-w5e5v1.0", buffer=1
+            product="InputData", variable="orog", forcing="chelsa-w5e5", buffer=1
         ).orog  # some buffer to avoid edge effects / errors in ISIMIP API
         import xesmf as xe
 
@@ -2238,15 +2243,21 @@ class GEBModel(GridModel):
         wind_output_clipped = self.snap_to_grid(wind_output_clipped, self.grid)
         self.set_forcing(wind_output_clipped, f"climate/sfcwind")
 
-    def setup_SPEI(self, starttime: date, endtime: date):
+    def setup_SPEI(
+        self,
+        calibration_period_start: date = date(1981, 1, 1),
+        calibration_period_end: date = date(2010, 1, 1),
+    ):
         """
-        Sets up the Standardized Precipitation Evapotranspiration Index (SPEI).
+        Sets up the Standardized Precipitation Evapotranspiration Index (SPEI). Note that
+        due to the sliding window, the SPEI data will be shorter than the original data. When
+        a sliding window of 12 months is used, the SPEI data will be shorter by 11 months.
 
         Parameters
         ----------
-        starttime : date
-            The start time of the SPEI data in ISO 8601 format (YYYY-MM-DD).
-        endtime : date
+        calibration_period_start : date
+            The start time of the reSPEI data in ISO 8601 format (YYYY-MM-DD).
+        calibration_period_end : date
             The end time of the SPEI data in ISO 8601 format (YYYY-MM-DD). Endtime is exclusive.
         """
         self.logger.info("setting up SPEI...")
@@ -2266,11 +2277,11 @@ class GEBModel(GridModel):
         )
         assert self.forcing[
             "climate/pr"
-        ].time.min().dt.date <= starttime and self.forcing[
+        ].time.min().dt.date <= calibration_period_start and self.forcing[
             "climate/pr"
-        ].time.max().dt.date >= endtime - timedelta(
+        ].time.max().dt.date >= calibration_period_end - timedelta(
             days=1
-        ), "water data does not cover the entire reference period"
+        ), "water data does not cover the entire calibration period"
 
         pet = xci.potential_evapotranspiration(
             tasmin=self.forcing["climate/tasmin"],
@@ -2279,25 +2290,22 @@ class GEBModel(GridModel):
         )
 
         # Compute the potential evapotranspiration
-        water_budget = xci._agro.water_budget(
-            pr=self.forcing["climate/pr"], evspsblpot=pet
-        )
+        water_budget = xci.water_budget(pr=self.forcing["climate/pr"], evspsblpot=pet)
 
         water_budget_positive = water_budget - 1.01 * water_budget.min()
         water_budget_positive.attrs = {"units": "kg m-2 s-1"}
 
-        wb_cal = water_budget_positive.sel(time=slice(starttime, endtime))
-        assert wb_cal.time.size > 0
-
         # Compute the SPEI
-        spei = xci._agro.standardized_precipitation_evapotranspiration_index(
+        spei = xci.standardized_precipitation_evapotranspiration_index(
             wb=water_budget_positive,
-            wb_cal=wb_cal,
+            cal_start=calibration_period_start,
+            cal_end=calibration_period_end,
             freq="MS",
-            window=12,
+            window=1,
             dist="gamma",
             method="APP",
         )
+        # remove all nan values as a result of the sliding window
         spei.attrs = {
             "units": "-",
             "long_name": "Standard Precipitation Evapotranspiration Index",
@@ -3405,25 +3413,53 @@ class GEBModel(GridModel):
         self,
         irrigation_sources=None,
         irrigation_choice=0,
-        crop_choices=None,
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
         discount_rate=0.1,
-        n_seasons=3,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
-        for season in range(1, n_seasons + 1):
-            # randomly sample from crops
-            if crop_choices[season - 1] == "random":
-                crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
-                farmer_crops = random.choices(crop_ids, k=n_farmers)
-            else:
-                farmer_crops = np.full(
-                    n_farmers, crop_choices[season - 1], dtype=np.int32
-                )
-            self.set_binary(farmer_crops, name=f"agents/farmers/season_#{season}_crop")
+        crop_calendar = parse_MIRCA2000_crop_calendar(self.data_catalog, self.bounds)
+        MIRCA_unit_grid = self.data_catalog.get_rasterdataset(
+            "MIRCA2000_unit_grid", bbox=self.bounds, buffer=2
+        )
+
+        farmer_mirca_units = sample_from_map(
+            MIRCA_unit_grid.values,
+            get_farm_locations(self.subgrid["agents/farmers/farms"], method="centroid"),
+            MIRCA_unit_grid.raster.transform.to_gdal(),
+        )
+
+        crop_calendar_per_farmer = np.zeros((n_farmers, 3, 3), dtype=np.int32)
+        for mirca_unit in np.unique(farmer_mirca_units):
+            n_farmers_mirca_unit = (farmer_mirca_units == mirca_unit).sum()
+
+            area_per_crop_rotation = []
+            cropping_calenders_crop_rotation = []
+            for crop_rotation in crop_calendar[mirca_unit]:
+                area_per_crop_rotation.append(crop_rotation[0])
+                cropping_calenders_crop_rotation.append(crop_rotation[1])
+            area_per_crop_rotation = np.array(area_per_crop_rotation)
+            cropping_calenders_crop_rotation = np.stack(
+                cropping_calenders_crop_rotation
+            )
+
+            # select n crop rotations weighted by the area for each crop rotation
+            farmer_crop_rotations_idx = np.random.choice(
+                np.arange(len(area_per_crop_rotation)),
+                size=n_farmers_mirca_unit,
+                replace=True,
+                p=area_per_crop_rotation / area_per_crop_rotation.sum(),
+            )
+            crop_calendar_per_farmer_mirca_unit = cropping_calenders_crop_rotation[
+                farmer_crop_rotations_idx
+            ]
+            crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
+                crop_calendar_per_farmer_mirca_unit
+            )
+
+        self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
@@ -3846,8 +3882,15 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
-    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200"):
+    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200", coastline=None):
         sfincs_data_catalog = DataCatalog()
+
+        # coastline
+        if coastline is not None:
+            coastline = self.data_catalog.get_geodataframe(
+                coastline, bbox=self.bounds, predicate="intersects"
+            )
+            self.set_geoms(coastline, name="SFINCS/coastline")
 
         # hydrobasins
         hydrobasins = self.data_catalog.get_geodataframe(
@@ -4068,72 +4111,88 @@ class GEBModel(GridModel):
         fn = var + ".nc"
         self.model_structure["forcing"][var] = fn
         self.is_updated["forcing"][var]["filename"] = fn
-        fp = Path(self.root, fn)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        if fp.exists():
-            fp.unlink()
+
         forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
-        if "time" in forcing.dims:
-            with ProgressBar(dt=10):  # print progress bar every 10 seconds
-                assert (
-                    forcing.dims[0] == "time"
-                ), "time dimension must be first, otherwise xarray will not chunk correctly"
-                assert (
-                    forcing.dims[1] == "y" and forcing.dims[2] == "x"
-                ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
-                forcing.to_netcdf(
+
+        # create temporary file path
+        with tempfile.TemporaryDirectory(dir=".") as tmpdirname:
+            # write netcdf to temporary file
+            fp_temp = Path(tmpdirname, "tempfile.nc")
+            fp_temp.parent.mkdir(parents=True, exist_ok=True)
+            if "time" in forcing.dims:
+                with ProgressBar(dt=10):  # print progress bar every 10 seconds
+                    assert (
+                        forcing.dims[0] == "time"
+                    ), "time dimension must be first, otherwise xarray will not chunk correctly"
+                    assert (
+                        forcing.dims[1] == "y" and forcing.dims[2] == "x"
+                    ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
+                    forcing.to_netcdf(
+                        fp_temp,
+                        mode="w",
+                        engine="netcdf4",
+                        encoding={
+                            forcing.name: {
+                                "chunksizes": (
+                                    min(forcing.time.size, time_chunksize),
+                                    min(forcing.y.size, y_chunksize),
+                                    min(forcing.x.size, x_chunksize),
+                                ),
+                                "zlib": True,
+                                "complevel": 9,
+                            }
+                        },
+                    )
+
+                    # move file to final location
+                    fp = Path(self.root, fn)
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+
+                    shutil.move(fp_temp, fp)
+                return xr.open_dataset(
                     fp,
-                    mode="w",
-                    engine="netcdf4",
-                    encoding={
-                        forcing.name: {
-                            "chunksizes": (
-                                min(forcing.time.size, time_chunksize),
-                                min(forcing.y.size, y_chunksize),
-                                min(forcing.x.size, x_chunksize),
-                            ),
-                            "zlib": True,
-                            "complevel": 9,
-                        }
+                    chunks={
+                        "time": min(forcing.time.size, time_chunksize),
+                        "y": min(forcing.y.size, y_chunksize),
+                        "x": min(forcing.x.size, x_chunksize),
                     },
+                    lock=False,
+                )[forcing.name]
+            else:
+                if isinstance(forcing, xr.DataArray):
+                    name = forcing.name
+                    encoding = {forcing.name: {"zlib": True, "complevel": 9}}
+                elif isinstance(forcing, xr.Dataset):
+                    assert (
+                        len(forcing.data_vars) > 1
+                    ), "forcing must have more than one variable or name must be set"
+                    encoding = {
+                        var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
+                    }
+                else:
+                    raise ValueError("forcing must be a DataArray or Dataset")
+                forcing.to_netcdf(
+                    fp_temp,
+                    mode="w",
+                    encoding=encoding,
                 )
-            return xr.open_dataset(
-                fp,
-                chunks={
-                    "time": min(forcing.time.size, time_chunksize),
-                    "y": min(forcing.y.size, y_chunksize),
-                    "x": min(forcing.x.size, x_chunksize),
-                },
-                lock=False,
-            )[forcing.name]
-        else:
-            if isinstance(forcing, xr.DataArray):
-                name = forcing.name
-                encoding = {forcing.name: {"zlib": True, "complevel": 9}}
-            elif isinstance(forcing, xr.Dataset):
-                assert (
-                    len(forcing.data_vars) > 1
-                ), "forcing must have more than one variable or name must be set"
-                encoding = {
-                    var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
-                }
-            else:
-                raise ValueError("forcing must be a DataArray or Dataset")
-            forcing.to_netcdf(
-                fp,
-                mode="w",
-                encoding=encoding,
-            )
-            ds = xr.open_dataset(
-                fp,
-                chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
-                lock=False,
-                engine="netcdf4",
-            )
-            if isinstance(forcing, xr.DataArray):
-                return ds[name]
-            else:
-                return ds
+
+                # move file to final location
+                fp = Path(self.root, fn)
+                fp.parent.mkdir(parents=True, exist_ok=True)
+
+                shutil.move(fp_temp, fp)
+
+                ds = xr.open_dataset(
+                    fp,
+                    chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
+                    lock=False,
+                    engine="netcdf4",
+                )
+                if isinstance(forcing, xr.DataArray):
+                    return ds[name]
+                else:
+                    return ds
 
     def write_forcing(self) -> None:
         self._assert_write_mode
