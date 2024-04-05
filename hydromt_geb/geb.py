@@ -30,7 +30,11 @@ from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
-from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter, DatasetAdapter
+from hydromt.data_adapter import (
+    GeoDataFrameAdapter,
+    RasterDatasetAdapter,
+    DatasetAdapter,
+)
 
 from honeybees.library.raster import sample_from_map
 
@@ -3439,7 +3443,12 @@ class GEBModel(GridModel):
             cropping_calenders_crop_rotation = []
             for crop_rotation in crop_calendar[mirca_unit]:
                 area_per_crop_rotation.append(crop_rotation[0])
-                cropping_calenders_crop_rotation.append(crop_rotation[1])
+                crop_rotation_matrix = crop_rotation[1]
+                starting_days = crop_rotation_matrix[:, 1]
+                starting_days = starting_days[starting_days != -1]
+                assert np.unique(starting_days).size == starting_days.size, "ensure all starting days are unique"
+                # TODO: Add check to ensure crop calendars are not overlapping.
+                cropping_calenders_crop_rotation.append(crop_rotation_matrix)
             area_per_crop_rotation = np.array(area_per_crop_rotation)
             cropping_calenders_crop_rotation = np.stack(
                 cropping_calenders_crop_rotation

@@ -64,6 +64,13 @@ def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
             del end_day
             del growth_length
 
+            # discard crop rotations with zero area
+            crop_rotations = [
+                crop_rotation
+                for crop_rotation in crop_rotations
+                if crop_rotation[2] > 0
+            ]
+
             crop_rotations = sorted(crop_rotations, key=lambda x: x[2])  # sort by area
             if len(crop_rotations) == 1:
                 start_day, growth_length, area = crop_rotations[0]
@@ -79,27 +86,58 @@ def parse_MIRCA2000_crop_calendar(data_catalog, bounds):
                 )  # -1 means no crop
                 MIRCA2000_data[unit_code].append(crop_rotation)
             elif len(crop_rotations) == 2:
-                crop_rotation = (
-                    crop_rotations[1][2] - crop_rotations[0][2],
-                    np.array(
-                        (
-                            (crop_class, crop_rotations[1][0], crop_rotations[1][1]),
-                            (-1, -1, -1),
-                            (-1, -1, -1),
+                # if crop rotations start on the same day, they cannot be implemented
+                # by the same farmer, so we split them
+                # TODO: Ensure that this only happens when the crop rotations cannot overlap.
+                if crop_rotations[0][0] == crop_rotations[1][0]:
+                    for crop_rotation in crop_rotations:
+                        start_day, growth_length, area = crop_rotation
+                        crop_rotation = (
+                            area,
+                            np.array(
+                                (
+                                    (crop_class, start_day, growth_length),
+                                    (-1, -1, -1),
+                                    (-1, -1, -1),
+                                )
+                            ),
                         )
-                    ),  # -1 means no crop
-                )
-                MIRCA2000_data[unit_code].append(crop_rotation)
-                crop_rotation = (
-                    crop_rotations[0][2],
-                    np.array(
-                        (
-                            (crop_class, crop_rotations[0][0], crop_rotations[0][1]),
-                            (crop_class, crop_rotations[1][0], crop_rotations[1][1]),
-                            (-1, -1, -1),
-                        )
-                    ),
-                )
+                        MIRCA2000_data[unit_code].append(crop_rotation)
+                # if the crop rotations are consecutive, we assume multi-cropping.
+                else:
+                    crop_rotation = (
+                        crop_rotations[1][2] - crop_rotations[0][2],
+                        np.array(
+                            (
+                                (
+                                    crop_class,
+                                    crop_rotations[1][0],
+                                    crop_rotations[1][1],
+                                ),
+                                (-1, -1, -1),
+                                (-1, -1, -1),
+                            )
+                        ),  # -1 means no crop
+                    )
+                    MIRCA2000_data[unit_code].append(crop_rotation)
+                    crop_rotation = (
+                        crop_rotations[0][2],
+                        np.array(
+                            (
+                                (
+                                    crop_class,
+                                    crop_rotations[0][0],
+                                    crop_rotations[0][1],
+                                ),
+                                (
+                                    crop_class,
+                                    crop_rotations[1][0],
+                                    crop_rotations[1][1],
+                                ),
+                                (-1, -1, -1),
+                            )
+                        ),
+                    )
                 MIRCA2000_data[unit_code].append(crop_rotation)
             else:
                 raise NotImplementedError
