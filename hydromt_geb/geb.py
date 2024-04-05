@@ -30,7 +30,7 @@ from dateutil.relativedelta import relativedelta
 
 from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
-from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter
+from hydromt.data_adapter import GeoDataFrameAdapter, RasterDatasetAdapter, DatasetAdapter
 
 from honeybees.library.raster import sample_from_map
 
@@ -3882,15 +3882,8 @@ class GEBModel(GridModel):
             ds = ds.assign_coords(time=ds.time - np.timedelta64(12, "h"))
         return ds
 
-    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200", coastline=None):
+    def setup_sfincs(self, land_cover="esa_worldcover_2021_v200", include_coastal=True):
         sfincs_data_catalog = DataCatalog()
-
-        # coastline
-        if coastline is not None:
-            coastline = self.data_catalog.get_geodataframe(
-                coastline, bbox=self.bounds, predicate="intersects"
-            )
-            self.set_geoms(coastline, name="SFINCS/coastline")
 
         # hydrobasins
         hydrobasins = self.data_catalog.get_geodataframe(
@@ -3903,11 +3896,62 @@ class GEBModel(GridModel):
         sfincs_data_catalog.add_source(
             "hydrobasins_level_8",
             GeoDataFrameAdapter(
-                path=os.path.abspath("input/SFINCS/hydrobasins.gpkg")
+                path=os.path.abspath("input/SFINCS/hydrobasins.gpkg"),
+                meta=self.data_catalog.get_source("hydrobasins_8").meta,
             ),  # hydromt likes absolute paths
         )
 
         bounds = tuple(hydrobasins.total_bounds)
+
+        gebco = self.data_catalog.get_rasterdataset(
+            "gebco", bbox=bounds, buffer=100, variables=["elevation"]
+        )
+        gebco.name = "gebco"
+        self.set_forcing(gebco, name="SFINCS/gebco")
+
+        sfincs_data_catalog.add_source(
+            "gebco",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/gebco.nc"),
+                meta=self.data_catalog.get_source("gebco").meta,
+            ),  # hydromt likes absolute paths
+        )
+
+        if include_coastal:
+            water_levels = self.data_catalog.get_dataset("GTSM")
+            assert (
+                water_levels.time.diff("time").astype(np.int64)
+                == (water_levels.time[1] - water_levels.time[0]).astype(np.int64)
+            ).all()
+            # convert to geodataframe
+            stations = gpd.GeoDataFrame(
+                water_levels.stations,
+                geometry=gpd.points_from_xy(
+                    water_levels.station_x_coordinate, water_levels.station_y_coordinate
+                ),
+            )
+            # filter all stations within the bounds, considering a buffer
+            station_ids = stations.cx[
+                self.bounds[0] - 0.1 : self.bounds[2] + 0.1,
+                self.bounds[1] - 0.1 : self.bounds[3] + 0.1,
+            ].index.values
+
+            water_levels = water_levels.sel(stations=station_ids).compute()
+
+            self.set_forcing(
+                water_levels,
+                name="SFINCS/waterlevel",
+                split_dataset=False,
+                is_spatial_dataset=False,
+                time_chunksize=24 * 6,  # 10 minute data
+            )
+            sfincs_data_catalog.add_source(
+                "waterlevel",
+                DatasetAdapter(
+                    path=os.path.abspath("input/SFINCS/waterlevel.nc"),
+                    meta=self.data_catalog.get_source("GTSM").meta,
+                ),  # hydromt likes absolute paths
+            )
 
         # merit hydro
         merit_hydro = self.data_catalog.get_rasterdataset(
@@ -3923,7 +3967,8 @@ class GEBModel(GridModel):
         sfincs_data_catalog.add_source(
             "merit_hydro",
             RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/merit_hydro.nc")
+                path=os.path.abspath("input/SFINCS/merit_hydro.nc"),
+                meta=self.data_catalog.get_source("merit_hydro").meta,
             ),  # hydromt likes absolute paths
         )
 
@@ -3937,7 +3982,8 @@ class GEBModel(GridModel):
         sfincs_data_catalog.add_source(
             "glofas_4_0_discharge",
             RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/discharge.nc")
+                path=os.path.abspath("input/SFINCS/discharge.nc"),
+                meta=self.data_catalog.get_source("glofas_4_0_discharge").meta,
             ),  # hydromt likes absolute paths
         )
 
@@ -3950,7 +3996,8 @@ class GEBModel(GridModel):
         sfincs_data_catalog.add_source(
             "fabdem",
             RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/fabdem.nc")
+                path=os.path.abspath("input/SFINCS/fabdem.nc"),
+                meta=self.data_catalog.get_source("fabdem").meta,
             ),  # hydromt likes absolute paths
         )
 
@@ -3967,7 +4014,10 @@ class GEBModel(GridModel):
             GeoDataFrameAdapter(
                 path=os.path.abspath(
                     "input/SFINCS/river_centerlines.gpkg"
-                )  # hydromt likes absolute paths
+                ),  # hydromt likes absolute paths
+                meta=self.data_catalog.get_source(
+                    "river_centerlines_MERIT_Basins"
+                ).meta,
             ),
         )
 
@@ -3984,7 +4034,8 @@ class GEBModel(GridModel):
         sfincs_data_catalog.add_source(
             "esa_worldcover",
             RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/esa_worldcover.nc")
+                path=os.path.abspath("input/SFINCS/esa_worldcover.nc"),
+                meta=self.data_catalog.get_source(land_cover).meta,
             ),  # hydromt likes absolute paths
         )
 
@@ -4106,13 +4157,15 @@ class GEBModel(GridModel):
         y_chunksize=XY_CHUNKSIZE,
         x_chunksize=XY_CHUNKSIZE,
         time_chunksize=1,
+        is_spatial_dataset=True,
     ) -> None:
         self.logger.info(f"Write {var}")
         fn = var + ".nc"
         self.model_structure["forcing"][var] = fn
         self.is_updated["forcing"][var]["filename"] = fn
 
-        forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
+        if is_spatial_dataset:
+            forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
 
         # create temporary file path
         with tempfile.TemporaryDirectory(dir=".") as tmpdirname:
@@ -4124,20 +4177,29 @@ class GEBModel(GridModel):
                     assert (
                         forcing.dims[0] == "time"
                     ), "time dimension must be first, otherwise xarray will not chunk correctly"
-                    assert (
-                        forcing.dims[1] == "y" and forcing.dims[2] == "x"
-                    ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
+                    if is_spatial_dataset:
+                        assert (
+                            forcing.dims[1] == "y" and forcing.dims[2] == "x"
+                        ), "y and x dimensions must be second and third, otherwise xarray will not chunk correctly"
+                        chunksizes = {
+                            "time": min(forcing.time.size, time_chunksize),
+                            "y": min(forcing.y.size, y_chunksize),
+                            "x": min(forcing.x.size, x_chunksize),
+                        }
+                        chunksizes_tuple = tuple(chunksizes.values())
+                    else:
+                        # chunksizes = (
+                        #     min(forcing.time.size, time_chunksize),
+                        #     forcing[forcing.dims[1]].size,
+                        # )
+                        chunksizes, chunksizes_tuple = None, None
                     forcing.to_netcdf(
                         fp_temp,
                         mode="w",
                         engine="netcdf4",
                         encoding={
                             forcing.name: {
-                                "chunksizes": (
-                                    min(forcing.time.size, time_chunksize),
-                                    min(forcing.y.size, y_chunksize),
-                                    min(forcing.x.size, x_chunksize),
-                                ),
+                                "chunksizes": chunksizes_tuple,
                                 "zlib": True,
                                 "complevel": 9,
                             }
@@ -4151,11 +4213,7 @@ class GEBModel(GridModel):
                     shutil.move(fp_temp, fp)
                 return xr.open_dataset(
                     fp,
-                    chunks={
-                        "time": min(forcing.time.size, time_chunksize),
-                        "y": min(forcing.y.size, y_chunksize),
-                        "x": min(forcing.x.size, x_chunksize),
-                    },
+                    chunks=chunksizes,
                     lock=False,
                 )[forcing.name]
             else:
@@ -4396,7 +4454,6 @@ class GEBModel(GridModel):
                 chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
                 lock=False,
             ) as ds:
-                assert "x" in ds.dims and "y" in ds.dims
                 data_vars = set(ds.data_vars)
                 data_vars.discard("spatial_ref")
                 if len(data_vars) == 1:
@@ -4433,6 +4490,7 @@ class GEBModel(GridModel):
         x_chunksize=XY_CHUNKSIZE,
         y_chunksize=XY_CHUNKSIZE,
         time_chunksize=1,
+        is_spatial_dataset=True,
         *args,
         **kwargs,
     ):
@@ -4444,6 +4502,7 @@ class GEBModel(GridModel):
                 x_chunksize=x_chunksize,
                 y_chunksize=y_chunksize,
                 time_chunksize=time_chunksize,
+                is_spatial_dataset=is_spatial_dataset,
             )
             self.is_updated["forcing"][name]["updated"] = False
         super().set_forcing(data, name=name, *args, **kwargs)
