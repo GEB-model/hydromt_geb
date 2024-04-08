@@ -5,6 +5,10 @@ import numpy as np
 import geopandas as gpd
 import zipfile
 import gzip
+from tqdm import tqdm
+from datetime import date
+import json
+from typing import Union, Any, Dict, Optional
 from pathlib import Path
 import pandas as pd
 from honeybees.library.raster import pixels_to_coords
@@ -810,3 +814,137 @@ class fairSTREAMModel(GEBModel):
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
         return None
+
+    def setup_crops(
+        self,
+        crop_ids: dict,
+        crop_variables: dict,
+        crop_prices: Optional[Union[str, Dict[str, Any]]] = None,
+        cultivation_costs: Optional[Union[str, Dict[str, Any]]] = None,
+        project_future_until_year: Optional[int] = False,
+    ):
+        """
+        Sets up the crops data for the model.
+
+        Parameters
+        ----------
+        crop_ids : dict
+            A dictionary of crop IDs and names.
+        crop_variables : dict
+            A dictionary of crop variables and their values.
+        crop_prices : str or dict, optional
+            The file path or dictionary of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
+            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+            IDs and their prices.
+        cultivation_costs : str or dict, optional
+            The file path or dictionary of cultivation costs. If a file path is provided, the file is loaded and parsed as
+            JSON. The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of
+            crop IDs and their cultivation costs.
+        """
+        self.logger.info(f"Preparing crops data")
+        self.set_dict(crop_ids, name="crops/crop_ids")
+        self.set_dict(crop_variables, name="crops/crop_variables")
+
+        def project_to_future(df, project_future_until_year, inflation_rates):
+            # expand table until year
+            assert isinstance(df.index, pd.core.indexes.datetimes.DatetimeIndex)
+            future_index = pd.date_range(
+                df.index[-1],
+                date(project_future_until_year, 12, 31),
+                freq=pd.infer_freq(df.index),
+                inclusive="right",
+            )
+            df = df.reindex(df.index.union(future_index))
+            for future_date in tqdm(future_index):
+                source_date = future_date - pd.DateOffset(years=1)  # source is year ago
+                inflation_index = inflation_rates["time"].index(str(future_date.year))
+                for region_id, _ in df.columns:
+                    region_inflation_rate = inflation_rates["data"][str(region_id)][
+                        inflation_index
+                    ]
+                    df.loc[future_date, region_id] = (
+                        df.loc[source_date, region_id] * region_inflation_rate
+                    ).values
+            return df
+
+        if crop_prices is not None:
+            self.logger.info(f"Preparing crop prices")
+            if isinstance(crop_prices, str):
+                fp = Path(self.root, crop_prices)
+                if not fp.exists():
+                    raise ValueError(f"crop_prices file {fp.resolve()} does not exist")
+                with open(fp, "r") as f:
+                    crop_prices_data = json.load(f)
+                crop_prices = pd.DataFrame(
+                    {
+                        crop_id: crop_prices_data["crops"][crop_name]
+                        for crop_id, crop_name in crop_ids.items()
+                    },
+                    index=pd.to_datetime(crop_prices_data["time"]),
+                )
+                crop_prices = crop_prices.reindex(
+                    columns=pd.MultiIndex.from_product(
+                        [
+                            self.geoms["areamaps/regions"]["region_id"],
+                            crop_prices.columns,
+                        ]
+                    ),
+                    level=1,
+                )
+                if project_future_until_year:
+                    crop_prices = project_to_future(
+                        crop_prices,
+                        project_future_until_year,
+                        self.dict["economics/inflation_rates"],
+                    )
+
+            crop_prices = {
+                "time": crop_prices.index.tolist(),
+                "data": {
+                    str(region_id): crop_prices[region_id].to_dict(orient="list")
+                    for region_id in self.geoms["areamaps/regions"]["region_id"]
+                },
+            }
+
+            self.set_dict(crop_prices, name="crops/crop_prices")
+
+        if cultivation_costs is not None:
+            self.logger.info(f"Preparing cultivation costs")
+            if isinstance(cultivation_costs, str):
+                fp = Path(self.root, cultivation_costs)
+                if not fp.exists():
+                    raise ValueError(
+                        f"cultivation_costs file {fp.resolve()} does not exist"
+                    )
+                with open(fp) as f:
+                    cultivation_costs = json.load(f)
+                cultivation_costs = pd.DataFrame(
+                    {
+                        crop_id: cultivation_costs["crops"][crop_name]
+                        for crop_id, crop_name in crop_ids.items()
+                    },
+                    index=pd.to_datetime(cultivation_costs["time"]),
+                )
+                cultivation_costs = cultivation_costs.reindex(
+                    columns=pd.MultiIndex.from_product(
+                        [
+                            self.geoms["areamaps/regions"]["region_id"],
+                            cultivation_costs.columns,
+                        ]
+                    ),
+                    level=1,
+                )
+                if project_future_until_year:
+                    cultivation_costs = project_to_future(
+                        cultivation_costs,
+                        project_future_until_year,
+                        self.dict["economics/inflation_rates"],
+                    )
+            cultivation_costs = {
+                "time": cultivation_costs.index.tolist(),
+                "data": {
+                    str(region_id): cultivation_costs[region_id].to_dict(orient="list")
+                    for region_id in self.geoms["areamaps/regions"]["region_id"]
+                },
+            }
+            self.set_dict(cultivation_costs, name="crops/cultivation_costs")
