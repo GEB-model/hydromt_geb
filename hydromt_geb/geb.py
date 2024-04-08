@@ -1,9 +1,8 @@
 from tqdm import tqdm
 from pathlib import Path
-from typing import List, Optional
 import hydromt.workflows
 from datetime import date, datetime, timedelta
-from typing import Union, Any, Dict
+from typing import Union, Any, Dict, List, Optional
 import logging
 import os
 import math
@@ -1586,7 +1585,7 @@ class GEBModel(GridModel):
         # assert there is only one data variable
         assert len(ds.data_vars) == 1
 
-        # select the variable
+        # select the variable and rename longitude and latitude variable
         ds = ds[list(ds.data_vars)[0]].rename({"longitude": "x", "latitude": "y"})
 
         if method == "accumulation":
@@ -1929,7 +1928,9 @@ class GEBModel(GridModel):
                 end_month = datetime(year, month, monthrange(year, month)[1])
 
                 w5e5_30min_sel = hurs_30_min.sel(time=slice(start_month, end_month))
-                w5e5_regridded = regridder(w5e5_30min_sel) * 0.01  # convert to fraction
+                w5e5_regridded = (
+                    regridder(w5e5_30min_sel, output_chunks=(-1, -1)) * 0.01
+                )  # convert to fraction
                 assert (
                     w5e5_regridded >= 0.1
                 ).all(), "too low values in relative humidity"
@@ -2048,9 +2049,9 @@ class GEBModel(GridModel):
             hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
         )
 
-        hurs_coarse_regridded = regridder(hurs_coarse).rename({"lon": "x", "lat": "y"})
-        tas_coarse_regridded = regridder(tas_coarse).rename({"lon": "x", "lat": "y"})
-        rlds_coarse_regridded = regridder(rlds_coarse).rename({"lon": "x", "lat": "y"})
+        hurs_coarse_regridded = regridder(hurs_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
+        tas_coarse_regridded = regridder(tas_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
+        rlds_coarse_regridded = regridder(rlds_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
 
         hurs_fine = self.forcing[f"climate/hurs"]
         tas_fine = self.forcing[f"climate/tas"]
@@ -2140,12 +2141,12 @@ class GEBModel(GridModel):
         import xesmf as xe
 
         regridder = xe.Regridder(orography, target, "bilinear")
-        orography = regridder(orography).rename({"lon": "x", "lat": "y"})
+        orography = regridder(orography, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
 
         regridder = xe.Regridder(
             pressure_30_min.isel(time=0).drop_vars("time"), target, "bilinear"
         )
-        pressure_30_min_regridded = regridder(pressure_30_min).rename(
+        pressure_30_min_regridded = regridder(pressure_30_min, output_chunks=(-1, -1)).rename(
             {"lon": "x", "lat": "y"}
         )
         pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(
@@ -2198,7 +2199,7 @@ class GEBModel(GridModel):
         import xesmf as xe
 
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
-        global_wind_atlas_regridded = regridder(global_wind_atlas)
+        global_wind_atlas_regridded = regridder(global_wind_atlas, output_chunks=(-1, -1))
 
         wind_30_min_avg = self.download_isimip(
             product="SecondaryInputData",
@@ -3446,7 +3447,9 @@ class GEBModel(GridModel):
                 crop_rotation_matrix = crop_rotation[1]
                 starting_days = crop_rotation_matrix[:, 1]
                 starting_days = starting_days[starting_days != -1]
-                assert np.unique(starting_days).size == starting_days.size, "ensure all starting days are unique"
+                assert (
+                    np.unique(starting_days).size == starting_days.size
+                ), "ensure all starting days are unique"
                 # TODO: Add check to ensure crop calendars are not overlapping.
                 cropping_calenders_crop_rotation.append(crop_rotation_matrix)
             area_per_crop_rotation = np.array(area_per_crop_rotation)
