@@ -2049,9 +2049,15 @@ class GEBModel(GridModel):
             hurs_coarse.isel(time=0).drop_vars("time"), target, "bilinear"
         )
 
-        hurs_coarse_regridded = regridder(hurs_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
-        tas_coarse_regridded = regridder(tas_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
-        rlds_coarse_regridded = regridder(rlds_coarse, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
+        hurs_coarse_regridded = regridder(hurs_coarse, output_chunks=(-1, -1)).rename(
+            {"lon": "x", "lat": "y"}
+        )
+        tas_coarse_regridded = regridder(tas_coarse, output_chunks=(-1, -1)).rename(
+            {"lon": "x", "lat": "y"}
+        )
+        rlds_coarse_regridded = regridder(rlds_coarse, output_chunks=(-1, -1)).rename(
+            {"lon": "x", "lat": "y"}
+        )
 
         hurs_fine = self.forcing[f"climate/hurs"]
         tas_fine = self.forcing[f"climate/tas"]
@@ -2141,14 +2147,16 @@ class GEBModel(GridModel):
         import xesmf as xe
 
         regridder = xe.Regridder(orography, target, "bilinear")
-        orography = regridder(orography, output_chunks=(-1, -1)).rename({"lon": "x", "lat": "y"})
+        orography = regridder(orography, output_chunks=(-1, -1)).rename(
+            {"lon": "x", "lat": "y"}
+        )
 
         regridder = xe.Regridder(
             pressure_30_min.isel(time=0).drop_vars("time"), target, "bilinear"
         )
-        pressure_30_min_regridded = regridder(pressure_30_min, output_chunks=(-1, -1)).rename(
-            {"lon": "x", "lat": "y"}
-        )
+        pressure_30_min_regridded = regridder(
+            pressure_30_min, output_chunks=(-1, -1)
+        ).rename({"lon": "x", "lat": "y"})
         pressure_30_min_regridded_corr = pressure_30_min_regridded * np.exp(
             -(g * orography * M) / (T0 * r0)
         )
@@ -2199,7 +2207,9 @@ class GEBModel(GridModel):
         import xesmf as xe
 
         regridder = xe.Regridder(global_wind_atlas.copy(), target, "bilinear")
-        global_wind_atlas_regridded = regridder(global_wind_atlas, output_chunks=(-1, -1))
+        global_wind_atlas_regridded = regridder(
+            global_wind_atlas, output_chunks=(-1, -1)
+        )
 
         wind_30_min_avg = self.download_isimip(
             product="SecondaryInputData",
@@ -3425,9 +3435,12 @@ class GEBModel(GridModel):
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
-        crop_calendar = parse_MIRCA2000_crop_calendar(self.data_catalog, self.bounds)
         MIRCA_unit_grid = self.data_catalog.get_rasterdataset(
             "MIRCA2000_unit_grid", bbox=self.bounds, buffer=2
+        )
+        crop_calendar = parse_MIRCA2000_crop_calendar(
+            self.data_catalog,
+            MIRCA_units=np.unique(MIRCA_unit_grid.values),
         )
 
         farmer_mirca_units = sample_from_map(
@@ -3435,6 +3448,9 @@ class GEBModel(GridModel):
             get_farm_locations(self.subgrid["agents/farmers/farms"], method="centroid"),
             MIRCA_unit_grid.raster.transform.to_gdal(),
         )
+
+        # initialize the is_irrigated as -1 for all farmers
+        is_irrigated = np.full(n_farmers, -1, dtype=np.int32)
 
         crop_calendar_per_farmer = np.zeros((n_farmers, 3, 3), dtype=np.int32)
         for mirca_unit in np.unique(farmer_mirca_units):
@@ -3445,7 +3461,7 @@ class GEBModel(GridModel):
             for crop_rotation in crop_calendar[mirca_unit]:
                 area_per_crop_rotation.append(crop_rotation[0])
                 crop_rotation_matrix = crop_rotation[1]
-                starting_days = crop_rotation_matrix[:, 1]
+                starting_days = crop_rotation_matrix[:, 2]
                 starting_days = starting_days[starting_days != -1]
                 assert (
                     np.unique(starting_days).size == starting_days.size
@@ -3467,19 +3483,37 @@ class GEBModel(GridModel):
             crop_calendar_per_farmer_mirca_unit = cropping_calenders_crop_rotation[
                 farmer_crop_rotations_idx
             ]
+            is_irrigated[farmer_mirca_units == mirca_unit] = (
+                crop_calendar_per_farmer_mirca_unit[:, :, 1] == 1
+            ).any(axis=1)
+
             crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
-                crop_calendar_per_farmer_mirca_unit
+                crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3]]
             )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
-            irrigation_source = random.choices(
-                list(irrigation_sources.values()), k=n_farmers
+            irrigation_source = np.random.choice(
+                list(self.dict["agents/farmers/irrigation_sources"].values()),
+                size=n_farmers,
             )
         else:
-            irrigation_source = np.full(n_farmers, irrigation_choice, dtype=np.int32)
+            assert isinstance(irrigation_choice, dict)
+            # convert irrigation sources to integers based on irrigation sources dictionary
+            # which was set previously
+            irrigation_choice_int = {
+                self.dict["agents/farmers/irrigation_sources"][i]: k
+                for i, k in irrigation_choice.items()
+            }
+            # pick irrigation source based on the probabilities
+            irrigation_source = np.random.choice(
+                list(irrigation_choice_int.keys()),
+                size=n_farmers,
+                p=np.array(list(irrigation_choice_int.values()))
+                / sum(irrigation_choice_int.values()),
+            )
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
         household_size = random.choices([1, 2, 3, 4, 5, 6, 7], k=n_farmers)
