@@ -359,7 +359,60 @@ class GEBModel(GridModel):
 
     def setup_crops(
         self,
-        source: str,
+        crop_data: dict,
+        type: str = "MIRCA2000",
+    ):
+        assert type in ("MIRCA2000", "GAEZ")
+        for crop_id, crop_values in crop_data.items():
+            assert "name" in crop_values
+            assert "reference_yield_kg_m2" in crop_values
+            assert "is_paddy" in crop_values
+
+            if type == "GAEZ":
+                crop_values["l_ini"] = crop_values["d1"]
+                crop_values["l_dev"] = crop_values["d2a"] + crop_values["d2b"]
+                crop_values["l_mid"] = crop_values["d3a"] + crop_values["d3b"]
+                crop_values["l_late"] = crop_values["d4"]
+                del crop_values["d1"]
+                del crop_values["d2a"]
+                del crop_values["d2b"]
+                del crop_values["d3a"]
+                del crop_values["d3b"]
+                del crop_values["d4"]
+
+                assert "KyT" in crop_values
+            
+            elif type == "MIRCA2000":
+                assert "a" in crop_values
+                assert "b" in crop_values
+                assert "P0" in crop_values
+                assert "P1" in crop_values
+                assert "l_ini" in crop_values
+                assert "l_dev" in crop_values
+                assert "l_mid" in crop_values
+                assert "l_late" in crop_values
+                assert "kc_initial" in crop_values
+                assert "kc_mid" in crop_values
+                assert "kc_end" in crop_values
+
+            assert (
+                crop_values["l_ini"]
+                + crop_values["l_dev"]
+                + crop_values["l_mid"]
+                + crop_values["l_late"]
+                == 100
+            ), "Sum of l_ini, l_dev, l_mid, and l_late must be 100[%]"
+
+        crop_data = {
+            "data": crop_data,
+            "type": type,
+        }
+
+        self.set_dict(crop_data, name="crops/crop_data")
+
+    def setup_crops_from_source(
+        self,
+        source: Union[str, None] = "MIRCA2000",
     ):
         """
         Sets up the crops data for the model.
