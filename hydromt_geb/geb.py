@@ -381,7 +381,7 @@ class GEBModel(GridModel):
                 del crop_values["d4"]
 
                 assert "KyT" in crop_values
-            
+
             elif type == "MIRCA2000":
                 assert "a" in crop_values
                 assert "b" in crop_values
@@ -416,17 +416,6 @@ class GEBModel(GridModel):
     ):
         """
         Sets up the crops data for the model.
-
-        Parameters
-        ----------
-        crop_prices : str or dict, optional
-            The file path or dictionary of crop prices. If a file path is provided, the file is loaded and parsed as JSON.
-            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
-            IDs and their prices.
-        cultivation_costs : str or dict, optional
-            The file path or dictionary of cultivation costs. If a file path is provided, the file is loaded and parsed as
-            JSON. The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of
-            crop IDs and their cultivation costs.
         """
         self.logger.info(f"Preparing crops data")
 
@@ -454,7 +443,7 @@ class GEBModel(GridModel):
             data = pd.DataFrame(
                 {
                     crop_id: data["crops"][crop_name]
-                    for crop_id, crop_name in crop_ids.items()
+                    for crop_id, crop_name in self.dict["crops/crop_ids"].items()
                 },
                 index=pd.to_datetime(data["time"]),
             )
