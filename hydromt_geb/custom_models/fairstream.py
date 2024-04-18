@@ -659,7 +659,7 @@ class fairSTREAMModel(GEBModel):
             # randomly sample from crops
             if crop_choices[season - 1] == "random":
                 crop_ids = [int(ID) for ID in self.dict["crops/crop_ids"].keys()]
-                farmer_crops = random.choices(crop_ids, k=n_farmers)
+                farmer_crops = np.array(random.choices(crop_ids, k=n_farmers))
             else:
                 farmer_crops = np.full(
                     n_farmers, crop_choices[season - 1], dtype=np.int32
@@ -685,6 +685,11 @@ class fairSTREAMModel(GEBModel):
         irrigation_source[
             (well_irrigated_farms) & (irrigation_source == irrigation_sources["no"])
         ] = irrigation_sources["well"]
+
+        self.binary["agents/farmers/season_#2_crop"][
+            irrigation_source == irrigation_sources["no"]
+        ] = -1
+        self.binary["agents/farmers/season_#3_crop"][:] = -1
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
