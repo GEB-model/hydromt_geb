@@ -646,12 +646,8 @@ class fairSTREAMModel(GEBModel):
             name="agents/farmers/education_level",
         )
 
-    def setup_farmer_characteristics(
+    def setup_farmer_cropping(
         self,
-        risk_aversion_mean,
-        risk_aversion_standard_deviation,
-        discount_rate,
-        interest_rate,
         well_irrigated_ratio,
         seasons,
         crop_variables,
@@ -659,24 +655,8 @@ class fairSTREAMModel(GEBModel):
         n_farmers = self.binary["agents/farmers/id"].size
         farms = self.subgrid["agents/farmers/farms"]
 
-        crop_calendar_per_farmer = np.full((n_farmers, 3, 3), -1, dtype=np.int32)
-
-        crop_ids = list(crop_variables.keys())
-
-        for idx in range(n_farmers):
-            farmer_crop_calendar = crop_calendar_per_farmer[idx]
-            crops = np.random.choice(crop_ids, size=3)
-            for season_idx, crop in enumerate(crops):
-                farmer_crop_calendar[season_idx] = [
-                    crop,
-                    seasons[f"season_#{season_idx+1}_start"],
-                    crop_variables[crop][f"season_#{season_idx+1}_duration"],
-                ]
-
-        self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
-
+        # process irrigation sources
         irrigation_sources = self.dict["agents/farmers/irrigation_sources"]
-
         irrigation_source = np.full(n_farmers, irrigation_sources["no"], dtype=np.int32)
 
         if "routing/lakesreservoirs/subcommand_areas" in self.subgrid:
@@ -697,49 +677,55 @@ class fairSTREAMModel(GEBModel):
 
         self.set_binary(irrigation_source, name="agents/farmers/irrigation_source")
 
-        daily_non_farm_income_family = random.choices([50, 100, 200, 500], k=n_farmers)
-        self.set_binary(
-            daily_non_farm_income_family,
-            name="agents/farmers/daily_non_farm_income_family",
-        )
+        # process crop calendars
+        crop_calendar_per_farmer = np.full((n_farmers, 3, 3), -1, dtype=np.int32)
+        crop_ids = list(crop_variables.keys())
 
-        daily_consumption_per_capita = random.choices([50, 100, 200, 500], k=n_farmers)
-        self.set_binary(
-            daily_consumption_per_capita,
-            name="agents/farmers/daily_consumption_per_capita",
-        )
+        for idx in range(n_farmers):
+            farmer_crop_calendar = crop_calendar_per_farmer[idx]
+            farmer_irrigation_source = irrigation_source[idx]
 
-        risk_aversion = np.random.normal(
-            loc=risk_aversion_mean,
-            scale=risk_aversion_standard_deviation,
-            size=n_farmers,
-        )
-        self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
+            if farmer_irrigation_source in (
+                irrigation_sources["well"],
+                irrigation_sources["canal"],
+            ):
+                n_crops = 1 if np.random.random() < 0.2 else 2
+            else:
+                n_crops = 1 if np.random.random() < 0.8 else 2
 
-        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
-        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
+            crops = np.random.choice(crop_ids, size=n_crops)
+            for season_idx, crop in enumerate(crops):
+                farmer_crop_calendar[season_idx] = [
+                    crop,
+                    seasons[f"season_#{season_idx+1}_start"],
+                    crop_variables[crop][f"season_#{season_idx+1}_duration"],
+                ]
 
-        discount_rate = np.full(n_farmers, discount_rate, dtype=np.float32)
-        self.set_binary(discount_rate, name="agents/farmers/discount_rate")
+        self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
 
-    def estimate_bayesian_network(
+    def setup_farmer_characteristics(
         self,
         risk_aversion_mean,
         risk_aversion_std,
         discount_rate_mean,
         discount_rate_std,
+        interest_rate,
         overwrite_bayesian_network=False,
     ):
         bayesian_net_folder = Path(self.root).parent / "preprocessing" / "bayesian_net"
         bayesian_net_folder.mkdir(exist_ok=True, parents=True)
 
-        # IHDS_survey = IHDSSurvey()
-        # IHDS_survey.parse(path=Path("data") / "IHDS_I.csv")
-        # IHDS_survey.learn_structure()
-        # IHDS_survey.estimate_parameters(
-        #     plot=False, save=bayesian_net_folder / "IHDS.png"
-        # )
-        # IHDS_survey.save(bayesian_net_folder / "IHDS.bif")
+        IHDS_survey = IHDSSurvey()
+        IHDS_survey.parse(path=Path("data") / "IHDS_I.csv")
+        save_path = bayesian_net_folder / "IHDS.bif"
+        if not save_path.exists() or overwrite_bayesian_network:
+            IHDS_survey.learn_structure()
+            IHDS_survey.estimate_parameters(
+                plot=False, save=bayesian_net_folder / "IHDS.png"
+            )
+            IHDS_survey.save(save_path)
+        else:
+            IHDS_survey.read(save_path)
 
         farmer_survey = FarmerSurvey()
         farmer_survey.parse(path=Path("data") / "survey_results_cleaned.zip")
@@ -772,6 +758,8 @@ class fairSTREAMModel(GEBModel):
             invert=True,
         )
 
+        n_farmers = self.binary["agents/farmers/id"].size
+
         household_head_age = self.binary["agents/farmers/age_household_head"]
         farms = self.subgrid["agents/farmers/farms"]
         farm_ids, farm_size_n_cells = np.unique(farms, return_counts=True)
@@ -788,26 +776,39 @@ class fairSTREAMModel(GEBModel):
             farm_size_bins, return_inverse=True, return_counts=True
         )
 
+        # TODO: should this be float32?
         perceived_effectivity = np.full_like(farm_size_m2, -1, dtype=np.int32)
         risk_aversion_raw = np.full_like(farm_size_m2, -1, dtype=np.int32)
         discount_rate_raw = np.full_like(farm_size_m2, -1, dtype=np.int32)
+
         for group_count, (group, group_size) in enumerate(zip(groups, group_counts)):
             group_mask = group_inverse == group_count
 
-            samples = farmer_survey.sample(
+            farmer_survey_samples = farmer_survey.sample(
                 n=group_size,
                 evidence=[group],
                 evidence_columns=["field_size"],
                 show_progress=False,
             )
 
-            perceived_effectivity[group_mask] = samples[
+            perceived_effectivity[group_mask] = farmer_survey_samples[
                 "perceived_effectivity"
             ].values.astype(
                 int
             )  # use array to avoid mathing on index, convert to int to make sure it is an integer
-            risk_aversion_raw[group_mask] = samples["risk_aversion"].astype(int)
-            discount_rate_raw[group_mask] = samples["discount_rate"].astype(int)
+            risk_aversion_raw[group_mask] = farmer_survey_samples[
+                "risk_aversion"
+            ].astype(int)
+            discount_rate_raw[group_mask] = farmer_survey_samples[
+                "discount_rate"
+            ].astype(int)
+
+            # IHDS_survey_samples = IHDS_survey.sample(
+            #     n=group_size,
+            #     evidence=[group],
+            #     evidence_columns=["field_size"],
+            #     show_progress=False,
+            # )
 
         risk_aversion = farmer_survey.apply_mapper("risk_aversion", risk_aversion_raw)
         discount_rate = farmer_survey.apply_mapper("discount_rate", discount_rate_raw)
@@ -818,4 +819,5 @@ class fairSTREAMModel(GEBModel):
         self.set_binary(risk_aversion, name="agents/farmers/risk_aversion")
         self.set_binary(discount_rate, name="agents/farmers/discount_rate")
 
-        return None
+        interest_rate = np.full(n_farmers, interest_rate, dtype=np.float32)
+        self.set_binary(interest_rate, name="agents/farmers/interest_rate")
