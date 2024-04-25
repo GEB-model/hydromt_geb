@@ -3991,6 +3991,20 @@ class GEBModel(GridModel):
 
         bounds = tuple(hydrobasins.total_bounds)
 
+        gcn250 = self.data_catalog.get_rasterdataset(
+            "gcn250", bbox=bounds, buffer=100, variables=["cn_avg"]
+        )
+        gcn250.name = "gcn250"
+        self.set_forcing(gcn250, name="SFINCS/gcn250")
+
+        sfincs_data_catalog.add_source(
+            "gcn250",
+            RasterDatasetAdapter(
+                path=os.path.abspath("input/SFINCS/gcn250.nc"),
+                meta=self.data_catalog.get_source("gcn250").meta,
+            ),  # hydromt likes absolute paths
+        )
+
         gebco = self.data_catalog.get_rasterdataset(
             "gebco", bbox=bounds, buffer=100, variables=["elevation"]
         )
@@ -4004,42 +4018,6 @@ class GEBModel(GridModel):
                 meta=self.data_catalog.get_source("gebco").meta,
             ),  # hydromt likes absolute paths
         )
-
-        if include_coastal:
-            water_levels = self.data_catalog.get_dataset("GTSM")
-            assert (
-                water_levels.time.diff("time").astype(np.int64)
-                == (water_levels.time[1] - water_levels.time[0]).astype(np.int64)
-            ).all()
-            # convert to geodataframe
-            stations = gpd.GeoDataFrame(
-                water_levels.stations,
-                geometry=gpd.points_from_xy(
-                    water_levels.station_x_coordinate, water_levels.station_y_coordinate
-                ),
-            )
-            # filter all stations within the bounds, considering a buffer
-            station_ids = stations.cx[
-                self.bounds[0] - 0.1 : self.bounds[2] + 0.1,
-                self.bounds[1] - 0.1 : self.bounds[3] + 0.1,
-            ].index.values
-
-            water_levels = water_levels.sel(stations=station_ids).compute()
-
-            self.set_forcing(
-                water_levels,
-                name="SFINCS/waterlevel",
-                split_dataset=False,
-                is_spatial_dataset=False,
-                time_chunksize=24 * 6,  # 10 minute data
-            )
-            sfincs_data_catalog.add_source(
-                "waterlevel",
-                DatasetAdapter(
-                    path=os.path.abspath("input/SFINCS/waterlevel.nc"),
-                    meta=self.data_catalog.get_source("GTSM").meta,
-                ),  # hydromt likes absolute paths
-            )
 
         # merit hydro
         merit_hydro = self.data_catalog.get_rasterdataset(
@@ -4062,16 +4040,20 @@ class GEBModel(GridModel):
 
         # glofas discharge
         glofas_discharge = self.data_catalog.get_rasterdataset(
-            "glofas_4_0_discharge", bbox=bounds, buffer=1, variables=["discharge"]
+            "glofas_4_0_discharge_yearly",
+            bbox=bounds,
+            buffer=1,
+            variables=["discharge"],
         )
         glofas_discharge = glofas_discharge.rename({"latitude": "y", "longitude": "x"})
-        self.set_forcing(glofas_discharge, name="SFINCS/discharge")
+        glofas_discharge.name = "discharge_yearly"
+        self.set_forcing(glofas_discharge, name="SFINCS/discharge_yearly")
 
         sfincs_data_catalog.add_source(
-            "glofas_4_0_discharge",
+            "glofas_discharge_Yearly_Resampled_Global",
             RasterDatasetAdapter(
-                path=os.path.abspath("input/SFINCS/discharge.nc"),
-                meta=self.data_catalog.get_source("glofas_4_0_discharge").meta,
+                path=os.path.abspath("input/SFINCS/discharge_yearly.nc"),
+                meta=self.data_catalog.get_source("glofas_4_0_discharge_yearly").meta,
             ),  # hydromt likes absolute paths
         )
 
@@ -4126,6 +4108,42 @@ class GEBModel(GridModel):
                 meta=self.data_catalog.get_source(land_cover).meta,
             ),  # hydromt likes absolute paths
         )
+
+        if include_coastal:
+            water_levels = self.data_catalog.get_dataset("GTSM")
+            assert (
+                water_levels.time.diff("time").astype(np.int64)
+                == (water_levels.time[1] - water_levels.time[0]).astype(np.int64)
+            ).all()
+            # convert to geodataframe
+            stations = gpd.GeoDataFrame(
+                water_levels.stations,
+                geometry=gpd.points_from_xy(
+                    water_levels.station_x_coordinate, water_levels.station_y_coordinate
+                ),
+            )
+            # filter all stations within the bounds, considering a buffer
+            station_ids = stations.cx[
+                self.bounds[0] - 0.1 : self.bounds[2] + 0.1,
+                self.bounds[1] - 0.1 : self.bounds[3] + 0.1,
+            ].index.values
+
+            water_levels = water_levels.sel(stations=station_ids).compute()
+
+            self.set_forcing(
+                water_levels,
+                name="SFINCS/waterlevel",
+                split_dataset=False,
+                is_spatial_dataset=False,
+                time_chunksize=24 * 6,  # 10 minute data
+            )
+            sfincs_data_catalog.add_source(
+                "waterlevel",
+                DatasetAdapter(
+                    path=os.path.abspath("input/SFINCS/waterlevel.nc"),
+                    meta=self.data_catalog.get_source("GTSM").meta,
+                ),  # hydromt likes absolute paths
+            )
 
         # TEMPORARY HACK UNTIL HYDROMT IS FIXED
         # SEE: https://github.com/Deltares/hydromt/issues/832
@@ -4582,6 +4600,8 @@ class GEBModel(GridModel):
         *args,
         **kwargs,
     ):
+        if isinstance(data, xr.DataArray):
+            assert data.name == name.split("/")[-1]
         self.is_updated["forcing"][name] = {"updated": update}
         if update and write:
             data = self.write_forcing_to_netcdf(
