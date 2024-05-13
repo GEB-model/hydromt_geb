@@ -2,7 +2,7 @@ from numba import njit
 import numpy as np
 
 
-@njit
+@njit(cache=True)
 def generate_locations(
     population: np.ndarray,
     geotransform: tuple[float, float, float, float, float, float],
