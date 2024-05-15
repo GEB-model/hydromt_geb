@@ -1094,23 +1094,27 @@ class GEBModel(GridModel):
 
         def set(file, accessor, name, ssp, starttime, endtime):
             ds_historic = self.data_catalog.get_rasterdataset(
-                f"cwatm_{file}_historical", bbox=self.bounds, buffer=2
+                f"cwatm_{file}_historical_year", bbox=self.bounds, buffer=2
             )
             if accessor:
                 ds_historic = getattr(ds_historic, accessor)
             ds_future = self.data_catalog.get_rasterdataset(
-                f"cwatm_{file}_{ssp}", bbox=self.bounds, buffer=2
+                f"cwatm_{file}_{ssp}_year", bbox=self.bounds, buffer=2
             )
             if accessor:
                 ds_future = getattr(ds_future, accessor)
-            ds = xr.concat([ds_historic, ds_future], dim="time")
+            ds = ds_historic.combine_first(ds_future)
+            assert (ds.time.diff("time") == 1.0).all(), "not all years are there"
+            assert ds.time[-1] < 200, "data beyond year 2100 is not available"
             ds["time"] = pd.date_range(
                 start=datetime(1901, 1, 1)
-                + relativedelta(months=int(ds.time[0].data.item())),
+                + relativedelta(years=int(ds.time[0].data.item())),
                 periods=len(ds.time),
                 freq="AS",
             )
             assert (ds.time.dt.year.diff("time") == 1).all(), "not all years are there"
+            assert ds.time[0].dt.date.item() <= starttime
+            assert ds.time[-1].dt.date.item() >= endtime.replace(month=1, day=1)
             ds = ds.sel(time=slice(starttime, endtime))
             ds.name = name
             self.set_forcing(
