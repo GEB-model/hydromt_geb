@@ -679,6 +679,7 @@ class fairSTREAMModel(GEBModel):
 
         # process crop calendars
         crop_calendar_per_farmer = np.full((n_farmers, 3, 4), -1, dtype=np.int32)
+        crop_calendar_rotation_years = np.full(n_farmers, 1, dtype=np.int32)
         crop_ids = list(crop_variables.keys())
 
         for idx in range(n_farmers):
@@ -698,6 +699,7 @@ class fairSTREAMModel(GEBModel):
                 duration = crop_variables[crop][f"season_#{season_idx+1}_duration"]
                 if duration > 365:
                     year_index = 1
+                    crop_calendar_rotation_years[idx] = 2
                 else:
                     year_index = 0
                 farmer_crop_calendar[season_idx] = [
@@ -708,6 +710,10 @@ class fairSTREAMModel(GEBModel):
                 ]
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
+        self.set_binary(
+            crop_calendar_rotation_years,
+            name="agents/farmers/crop_calendar_rotation_years",
+        )
 
     def setup_farmer_characteristics(
         self,
