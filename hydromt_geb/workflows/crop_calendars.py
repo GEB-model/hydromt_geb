@@ -3,12 +3,12 @@ from datetime import date
 import calendar
 
 
-def get_day_of_year(date):
-    return date.timetuple().tm_yday
+def get_day_index(date):
+    return date.timetuple().tm_yday - 1  # 0-indexed
 
 
-def get_growing_season_length(start_day, end_day):
-    length = (end_day - start_day) % 365
+def get_growing_season_length(start_day_index, end_day_index):
+    length = (end_day_index - start_day_index) % 365
     if length == 0:
         return 365
     else:
@@ -41,17 +41,19 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                     continue
                 start_month = int(crops[rotation * 3 + 1])
                 end_month = int(crops[rotation * 3 + 2])
-                start_day = get_day_of_year(date(2000, start_month, 1))
-                end_day = get_day_of_year(
+                start_day_index = get_day_index(date(2000, start_month, 1))
+                end_day_index = get_day_index(
                     date(2000, end_month, calendar.monthrange(2000, end_month)[1])
                 )
-                growth_length = get_growing_season_length(start_day, end_day)
-                crop_rotations.append((start_day, growth_length, area))
+                growth_length = get_growing_season_length(
+                    start_day_index, end_day_index
+                )
+                crop_rotations.append((start_day_index, growth_length, area))
 
             del start_month
             del end_month
-            del start_day
-            del end_day
+            del start_day_index
+            del end_day_index
             del growth_length
 
             # discard crop rotations with zero area
@@ -70,12 +72,12 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                     "More than 2 crop rotations found, discarding the one with the lowest area. This should be fixed later."
                 )
             if len(crop_rotations) == 1:
-                start_day, growth_length, area = crop_rotations[0]
+                start_day_index, growth_length, area = crop_rotations[0]
                 crop_rotation = (
                     area,
                     np.array(
                         (
-                            (crop_class, is_irrigated, start_day, growth_length),
+                            (crop_class, is_irrigated, start_day_index, growth_length),
                             (-1, -1, -1, -1),
                             (-1, -1, -1, -1),
                         )
@@ -96,7 +98,7 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                                     (
                                         crop_class,
                                         is_irrigated,
-                                        start_day,
+                                        start_day_index,
                                         growth_length,
                                     ),
                                     (-1, -1, -1 - 1),
