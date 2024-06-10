@@ -212,7 +212,7 @@ class GEBModel(GridModel):
         """
 
         assert (
-            sub_grid_factor > 10
+            sub_grid_factor >= 10
         ), "sub_grid_factor must be larger than 10, because this is the resolution of the MERIT high-res DEM"
         assert sub_grid_factor % 10 == 0, "sub_grid_factor must be a multiple of 10"
 
@@ -2365,6 +2365,7 @@ class GEBModel(GridModel):
             window=1,
             dist="gamma",
             method="APP",
+            fitkwargs={"floc": 0},
         )
         # remove all nan values as a result of the sliding window
         spei.attrs = {
@@ -2432,7 +2433,8 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
-            geom=self.geoms["areamaps/region"],
+            # geom=self.geoms["areamaps/region"],
+            bbox=self.grid.raster.bounds,
             predicate="intersects",
         ).rename(columns={unique_region_id: "region_id", ISO3_column: "ISO3"})
 
