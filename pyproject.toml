@@ -19,6 +19,7 @@ dependencies = [
     "pyogrio>=0.7",
     "osm-flex>=1.1.1",
     "cdsapi>=0.6.1",
+    "rioxarray==0.15.1",
 ]
 requires-python = ">=3.11"
 readme = "README.md"
