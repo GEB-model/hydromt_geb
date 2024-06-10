@@ -2349,19 +2349,27 @@ class GEBModel(GridModel):
         # Compute the potential evapotranspiration
         water_budget = xci.water_budget(pr=self.forcing["climate/pr"], evspsblpot=pet)
 
-        water_budget_positive = water_budget - 1.01 * water_budget.min()
-        water_budget_positive.attrs = {"units": "kg m-2 s-1"}
+        water_budget.attrs = {"units": "kg m-2 s-1"}
+
+        water_budget_flattened = water_budget.values.flatten()
+
+        fit_kwargs_estimate = xci.stats._fit_start(
+            x=water_budget_flattened, dist="gamma"
+        )
 
         # Compute the SPEI
         spei = xci.standardized_precipitation_evapotranspiration_index(
-            wb=water_budget_positive,
+            wb=water_budget,
             cal_start=calibration_period_start,
             cal_end=calibration_period_end,
             freq="MS",
             window=1,
             dist="gamma",
             method="APP",
-            fitkwargs={"floc": 0},
+            fitkwargs={
+                "floc": fit_kwargs_estimate[1]["loc"],
+                "scale": fit_kwargs_estimate[1]["scale"],
+            },
         )
         # remove all nan values as a result of the sliding window
         spei.attrs = {
@@ -4513,7 +4521,9 @@ class GEBModel(GridModel):
             self.set_dict(d, name=name, update=False)
 
     def read_netcdf(self, fn: str, name: str) -> xr.Dataset:
-        with xr.load_dataset(Path(self.root) / fn, mask_and_scale=False).rename( # deleted decode_cf=False
+        with xr.load_dataset(
+            Path(self.root) / fn, mask_and_scale=False
+        ).rename(  # deleted decode_cf=False
             {"band_data": name}
         ) as da:
             if fn.endswith(".tif") and "band" in da.dims and da.band.size == 1:
