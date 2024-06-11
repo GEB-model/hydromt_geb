@@ -77,9 +77,15 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                     area,
                     np.array(
                         (
-                            (crop_class, is_irrigated, start_day_index, growth_length),
-                            (-1, -1, -1, -1),
-                            (-1, -1, -1, -1),
+                            (
+                                crop_class,
+                                is_irrigated,
+                                start_day_index,
+                                growth_length,
+                                0,
+                            ),
+                            (-1, -1, -1, -1, -1),
+                            (-1, -1, -1, -1, -1),
                         )
                     ),
                 )  # -1 means no crop
@@ -90,7 +96,7 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                 # TODO: Ensure that this only happens when the crop rotations cannot overlap.
                 if crop_rotations[0][0] == crop_rotations[1][0]:
                     for crop_rotation in crop_rotations:
-                        start_day, growth_length, area = crop_rotation
+                        start_day_index, growth_length, area = crop_rotation
                         crop_rotation = (
                             area,
                             np.array(
@@ -100,9 +106,10 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                                         is_irrigated,
                                         start_day_index,
                                         growth_length,
+                                        0,
                                     ),
-                                    (-1, -1, -1 - 1),
-                                    (-1, -1, -1, -1),
+                                    (-1, -1, -1, -1, -1),
+                                    (-1, -1, -1, -1, -1),
                                 ),
                                 dtype=np.int32,
                             ),
@@ -119,9 +126,10 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                                     is_irrigated,
                                     crop_rotations[1][0],
                                     crop_rotations[1][1],
+                                    0,
                                 ),
-                                (-1, -1, -1, -1),
-                                (-1, -1, -1, -1),
+                                (-1, -1, -1, -1, -1),
+                                (-1, -1, -1, -1, -1),
                             ),
                             dtype=np.int32,
                         ),  # -1 means no crop
@@ -136,14 +144,16 @@ def parse_MIRCA_file(parsed_calendar, crop_calendar, MIRCA_units, is_irrigated):
                                     is_irrigated,
                                     crop_rotations[0][0],
                                     crop_rotations[0][1],
+                                    0,
                                 ),
                                 (
                                     crop_class,
                                     is_irrigated,
                                     crop_rotations[1][0],
                                     crop_rotations[1][1],
+                                    0,
                                 ),
-                                (-1, -1, -1, -1),
+                                (-1, -1, -1, -1, -1),
                             ),
                             dtype=np.int32,
                         ),

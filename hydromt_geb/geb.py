@@ -3478,8 +3478,9 @@ class GEBModel(GridModel):
 
     def setup_farmer_characteristics_simple(
         self,
-        irrigation_sources=None,
-        irrigation_choice=0,
+        irrigation_choice={
+            "no": 1.0,
+        },
         risk_aversion_mean=1.5,
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
@@ -3504,7 +3505,7 @@ class GEBModel(GridModel):
         # initialize the is_irrigated as -1 for all farmers
         is_irrigated = np.full(n_farmers, -1, dtype=np.int32)
 
-        crop_calendar_per_farmer = np.zeros((n_farmers, 3, 3), dtype=np.int32)
+        crop_calendar_per_farmer = np.zeros((n_farmers, 3, 4), dtype=np.int32)
         for mirca_unit in np.unique(farmer_mirca_units):
             n_farmers_mirca_unit = (farmer_mirca_units == mirca_unit).sum()
 
@@ -3540,10 +3541,15 @@ class GEBModel(GridModel):
             ).any(axis=1)
 
             crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
-                crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3]]
+                crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
+        assert crop_calendar_per_farmer[:, :, 3].max() == 0
+        self.set_binary(
+            np.full_like(is_irrigated, 1, dtype=np.int32),
+            name="agents/farmers/crop_calendar_rotation_years",
+        )
 
         if irrigation_choice == "random":
             # randomly sample from irrigation sources
