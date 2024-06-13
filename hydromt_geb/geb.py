@@ -998,23 +998,6 @@ class GEBModel(GridModel):
             command_areas["waterbody_id"] = command_areas["waterbody_id"].astype(
                 np.int32
             )
-            command_areas["geometry_in_region_bounds"] = gpd.overlay(
-                command_areas, self.region, how="intersection", keep_geom_type=False
-            )["geometry"]
-            command_areas["area"] = command_areas.to_crs(3857).area
-            command_areas["area_in_region_bounds"] = (
-                command_areas["geometry_in_region_bounds"].to_crs(3857).area
-            )
-            areas_per_waterbody = command_areas.groupby("waterbody_id").agg(
-                {"area": "sum", "area_in_region_bounds": "sum"}
-            )
-            relative_area_in_region = (
-                areas_per_waterbody["area_in_region_bounds"]
-                / areas_per_waterbody["area"]
-            )
-            relative_area_in_region.name = (
-                "relative_area_in_region"  # set name for merge
-            )
 
             self.set_grid(
                 self.grid.raster.rasterize(
@@ -1041,10 +1024,6 @@ class GEBModel(GridModel):
             waterbodies.loc[
                 waterbodies.index.isin(command_areas["waterbody_id"]), "waterbody_type"
             ] = 2
-            # set relative area in region for command area. If no command area, set this is set to nan.
-            waterbodies = waterbodies.merge(
-                relative_area_in_region, how="left", left_index=True, right_index=True
-            )
         else:
             command_areas = hydromt.raster.full(
                 self.grid.raster.coords,
