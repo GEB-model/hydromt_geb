@@ -433,43 +433,81 @@ class GEBModel(GridModel):
         }
         self.set_dict(crop_data, name="crops/crop_data")
 
-    def process_crop_data(self, data, project_future_until_year=None):
+    def process_crop_data(
+        self, data, project_future_until_year=None, inter_and_extrapolate=None
+    ):
         if isinstance(data, str):
-            fp = Path(self.root, data)
-            if not fp.exists():
-                raise ValueError(f"file {fp.resolve()} does not exist")
-            with open(fp) as f:
-                data = json.load(f)
-            data = pd.DataFrame(
-                {
-                    crop_id: data["crops"][crop_name]
-                    for crop_id, crop_name in self.dict["crops/crop_ids"].items()
-                },
-                index=pd.to_datetime(data["time"]),
+            crop_data = self.data_catalog.get_dataframe("crop_price")
+
+            # Filter and rename necessary columns
+            crop_data = crop_data[["Area", "Year", "Item", "Value"]]
+            crop_data.rename(
+                columns={"Area": "Country Code", "Item": "crops", "Year": "time"},
+                inplace=True,
             )
-            data = data.reindex(
-                columns=pd.MultiIndex.from_product(
-                    [
-                        self.geoms["areamaps/regions"]["region_id"],
-                        data.columns,
-                    ]
-                ),
-                level=1,
-            )
-            if project_future_until_year:
-                data = project_to_future(
-                    data,
-                    project_future_until_year,
-                    self.dict["economics/inflation_rates"],
+            crop_data["crops"] = crop_data["crops"].str.lower()
+
+            data = {}
+
+            # Setup dataFrame for further data corrections
+            for _, region in self.geoms["areamaps/regions"].iterrows():
+                region_name = region["NAME_0"]
+                region_id = str(region["region_id"])
+
+                # Filter and pivot data for the current region
+                region_crop_data = crop_data[crop_data["Country Code"] == region_name]
+                region_pivot = region_crop_data.pivot_table(
+                    index="time", columns="crops", values="Value", aggfunc="first"
                 )
-            data = {
+
+                # Store pivoted data in dictionary with region_id as key
+                data[region_id] = region_pivot
+
+            # Concatenate all regional data into a single DataFrame with MultiIndex
+            data = pd.concat(data, names=["Region_ID", "Year"])
+
+            if inter_and_extrapolate:
+                prices_plus_changes = self.get_changes(data)
+                data = self.inter_and_extrapolate(prices_plus_changes)
+                total_years = data.index.get_level_values("Year").unique()
+
+                data = self.process_additional_years(
+                    data,
+                    total_years=total_years,
+                    lower_bound=1980,
+                    upper_bound=2016,
+                )
+
+            crop_data = self.dict["crops/crop_data"]["data"]
+
+            # Create a dictionary structure with regions as keys and crops as nested dictionaries
+            formatted_data = {
                 "type": "time_series",
-                "time": data.index.tolist(),
-                "data": {
-                    str(region_id): data[region_id].to_dict(orient="list")
-                    for region_id in self.geoms["areamaps/regions"]["region_id"]
-                },
+                "data": {},
+                "time": data.index.get_level_values("Year")
+                .unique()
+                .tolist(),  # Extract unique years for the time key
             }
+
+            regions = data.index.get_level_values("Region_ID").unique()
+            for _, region in self.geoms["areamaps/regions"].iterrows():
+                region_dict = {}
+                region_id = str(region["region_id"])
+                region_data = data.loc[region_id]
+
+                # Ensuring all crops are present according to the crop_data keys
+                for crop_id, crop_info in crop_data.items():
+                    crop_name = crop_info["name"]
+                    if crop_name in region_data.columns:
+                        region_dict[str(crop_id)] = region_data[crop_name].to_list()
+                    else:
+                        # Add NaN entries for the entire time period if crop is not present in the region data
+                        region_dict[str(crop_id)] = [np.nan] * len(region_data)
+
+                formatted_data["data"][region_id] = region_dict
+
+            data = formatted_data.copy()
+
         elif isinstance(data, (int, float)):
             data = {
                 "type": "constant",
@@ -479,6 +517,157 @@ class GEBModel(GridModel):
             raise ValueError(f"must be a file path or an integer, got {type(data)}")
 
         return data
+
+    def get_changes(self, costs):
+        costs["changes"] = np.nan
+        # Determine the average changes of price of all crops in the region and add it to the data
+        for _, region in self.geoms["areamaps/regions"].iterrows():
+            region_id = str(region["region_id"])
+            region_data = costs.loc[region_id]
+            changes = np.nanmean(
+                region_data[1:].to_numpy() / region_data[:-1].to_numpy(), axis=1
+            )
+            changes = np.insert(changes, 0, np.nan)
+
+            costs.at[region_id, "changes"] = changes
+
+        return costs
+
+    def inter_and_extrapolate(self, data):
+        # Extract the crop names from the dictionary and convert them to lowercase
+        crop_names = [
+            crop["name"].lower()
+            for idx, crop in self.dict["crops/crop_data"]["data"].items()
+        ]
+
+        # Filter the columns of the data DataFrame
+        data = data[
+            [
+                col
+                for col in data.columns
+                if col.lower() in crop_names or col == "changes"
+            ]
+        ]
+
+        for _, region in self.geoms["areamaps/regions"].iterrows():
+            region_id = str(region["region_id"])
+            region_data = data.loc[region_id]
+
+            n = len(region_data)
+            for crop in region_data.columns:
+                if crop == "changes":
+                    continue
+                crop_data = region_data[crop].to_numpy()
+                changes_data = region_data["changes"].to_numpy()
+                k = -1
+                while np.isnan(crop_data[k]):
+                    k -= 1
+                for i in range(k + 1, 0, 1):
+                    crop_data[i] = crop_data[i - 1] * changes_data[i]
+                k = 0
+                while np.isnan(crop_data[k]):
+                    k += 1
+                for i in range(k - 1, -1, -1):
+                    crop_data[i] = crop_data[i + 1] / changes_data[i + 1]
+                for j in range(0, n):
+                    if np.isnan(crop_data[j]):
+                        k = j
+                        while np.isnan(crop_data[k]):
+                            k += 1
+                        empty_size = k - j
+                        step_changes = changes_data[j : k + 1]
+                        total_changes = np.prod(step_changes)
+                        real_changes = crop_data[k] / crop_data[j - 1]
+                        scaled_changes = (
+                            step_changes
+                            * (real_changes ** (1 / empty_size))
+                            / (total_changes ** (1 / empty_size))
+                        )
+                        for i, change in zip(range(j, k), scaled_changes):
+                            crop_data[i] = crop_data[i - 1] * change
+                data.loc[region_id, crop] = crop_data
+
+        # assert no nan values in costs
+        data = data.drop(columns=["changes"])
+        assert not data.isnull().values.any()
+        return data
+
+    def process_additional_years(
+        self, costs, total_years, lower_bound=None, upper_bound=None
+    ):
+        inflation = self.dict["economics/inflation_rates"]
+        for _, region in self.geoms["areamaps/regions"].iterrows():
+            region_id = str(region["region_id"])
+
+            if lower_bound:
+                costs = self.process_region_years(
+                    costs=costs,
+                    inflation=inflation,
+                    region_id=region_id,
+                    start_year=total_years[0],
+                    end_year=lower_bound,
+                )
+
+            if upper_bound:
+                costs = self.process_region_years(
+                    costs=costs,
+                    inflation=inflation,
+                    region_id=region_id,
+                    start_year=total_years[-1],
+                    end_year=upper_bound,
+                )
+
+        return costs
+
+    def process_region_years(
+        self,
+        costs,
+        inflation,
+        region_id,
+        start_year,
+        end_year,
+    ):
+        assert (
+            end_year != start_year
+        ), "extra processed years must not be the same as data years"
+
+        if end_year < start_year:
+            operator = "div"
+            step = -1
+        else:
+            operator = "mul"
+            step = 1
+
+        inflation_rate_region = inflation["data"][region_id]
+
+        for year in range(start_year, end_year, step):
+            year_str = str(year)
+            year_index = inflation["time"].index(year_str)
+            inflation_rate = inflation_rate_region[year_index]
+
+            # Check and add an empty row if needed
+            if (region_id, year) not in costs.index:
+                empty_row = pd.DataFrame(
+                    {col: [None] for col in costs.columns},
+                    index=pd.MultiIndex.from_tuples(
+                        [(region_id, year)], names=["Region_ID", "Year"]
+                    ),
+                )
+                costs = pd.concat(
+                    [costs, empty_row]
+                ).sort_index()  # Ensure the index is sorted after adding new rows
+
+            # Update costs based on inflation rate and operation
+            if operator == "div":
+                costs.loc[(region_id, year)] = (
+                    costs.loc[(region_id, year + 1)] / inflation_rate
+                )
+            elif operator == "mul":
+                costs.loc[(region_id, year)] = (
+                    costs.loc[(region_id, year - 1)] * inflation_rate
+                )
+
+        return costs
 
     def setup_cultivation_costs(
         self,
@@ -505,6 +694,7 @@ class GEBModel(GridModel):
         self,
         crop_prices: Optional[Union[str, int, float]] = 0,
         project_future_until_year: Optional[int] = False,
+        inter_and_extrapolate: Optional[int] = False,
     ):
         """
         Sets up the crop prices for the model.
@@ -518,9 +708,12 @@ class GEBModel(GridModel):
         """
         self.logger.info(f"Preparing crop prices")
         crop_prices = self.process_crop_data(
-            crop_prices, project_future_until_year=project_future_until_year
+            crop_prices,
+            project_future_until_year=project_future_until_year,
+            inter_and_extrapolate=inter_and_extrapolate,
         )
         self.set_dict(crop_prices, name="crops/crop_prices")
+        self.set_dict(crop_prices, name="crops/cultivation_costs")
 
     def setup_mannings(self) -> None:
         """
@@ -1073,12 +1266,12 @@ class GEBModel(GridModel):
 
         def set(file, accessor, name, ssp, starttime, endtime):
             ds_historic = self.data_catalog.get_rasterdataset(
-                f"cwatm_{file}_historical", bbox=self.bounds, buffer=2
+                f"cwatm_{file}_historical_year", bbox=self.bounds, buffer=2
             )
             if accessor:
                 ds_historic = getattr(ds_historic, accessor)
             ds_future = self.data_catalog.get_rasterdataset(
-                f"cwatm_{file}_{ssp}", bbox=self.bounds, buffer=2
+                f"cwatm_{file}_{ssp}_year", bbox=self.bounds, buffer=2
             )
             if accessor:
                 ds_future = getattr(ds_future, accessor)
