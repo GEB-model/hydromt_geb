@@ -430,7 +430,11 @@ class GEBModel(GridModel):
         self.set_dict(crop_data, name="crops/crop_data")
 
     def process_crop_data(
-        self, data, project_future_until_year=None, inter_and_extrapolate=None
+        self,
+        data,
+        project_past_until_year=None,
+        project_future_until_year=None,
+        inter_and_extrapolate=None,
     ):
         if isinstance(data, str):
             crop_data = self.data_catalog.get_dataframe("crop_price")
@@ -450,12 +454,12 @@ class GEBModel(GridModel):
                 region_name = region["NAME_0"]
                 region_id = str(region["region_id"])
 
-                # Filter and pivot data for the current region
                 region_crop_data = crop_data[crop_data["Country Code"] == region_name]
                 region_pivot = region_crop_data.pivot_table(
                     index="time", columns="crops", values="Value", aggfunc="first"
                 )
 
+                region_pivot["country_name"] = region_name
                 # Store pivoted data in dictionary with region_id as key
                 data[region_id] = region_pivot
 
@@ -463,20 +467,34 @@ class GEBModel(GridModel):
             data = pd.concat(data, names=["Region_ID", "Year"])
 
             if inter_and_extrapolate:
+                total_years = data.index.get_level_values("Year").unique()
+                assert (
+                    total_years[0] > project_past_until_year
+                    and total_years[-1] < project_future_until_year
+                ), "Extrapolation targets must not fall inside available data time series"
+
+            # Filter out columns that contain the word 'meat'
+            data = data[
+                [column for column in data.columns if "meat" not in column.lower()]
+            ]
+
+            data = self.adjust_crops_for_countries(data)
+
+            if inter_and_extrapolate:
                 prices_plus_changes = self.get_changes(data)
                 data = self.inter_and_extrapolate(prices_plus_changes)
-                total_years = data.index.get_level_values("Year").unique()
 
                 data = self.process_additional_years(
                     data,
                     total_years=total_years,
-                    lower_bound=1980,
-                    upper_bound=2016,
+                    lower_bound=project_past_until_year,
+                    upper_bound=project_future_until_year,
                 )
 
             crop_data = self.dict["crops/crop_data"]["data"]
 
             # Create a dictionary structure with regions as keys and crops as nested dictionaries
+            # This is the required format for crop_farmers.py
             formatted_data = {
                 "type": "time_series",
                 "data": {},
@@ -513,6 +531,101 @@ class GEBModel(GridModel):
             raise ValueError(f"must be a file path or an integer, got {type(data)}")
 
         return data
+
+    def adjust_crops_for_countries(self, data):
+        # If there are multiple countries and one has values for a crop and the other doesnt,
+        # full columns can be filled with NaNs, which gives problems later
+        # Assuming countries are close, we can convert the costs using the PPP
+        ppp_conversion_rate = self.dict["economics/ppp_conversion_rates"]
+        columns_with_all_nans_by_country = {}
+
+        for country in data["country_name"].unique():
+            # Filter the data for the current country
+            country_data = data[data["country_name"] == country]
+
+            # Group by 'Region_ID' and check each column for NaN values across all years within the region
+            columns_all_nans_by_region = country_data.groupby("Region_ID").apply(
+                lambda x: x.isna().all()
+            )
+
+            # Check for columns where all values are NaN across any region
+            columns_with_missing_values = columns_all_nans_by_region.any(axis=0)
+
+            # Store the result in the dictionary
+            columns_with_all_nans_by_country[country] = columns_with_missing_values[
+                columns_with_missing_values
+            ].index.tolist()
+
+        for (
+            country,
+            columns_with_missing_values,
+        ) in columns_with_all_nans_by_country.items():
+
+            for column in columns_with_missing_values:
+                columns_all_nans_by_region = data.groupby("Region_ID").apply(
+                    lambda x: x.isna().all()
+                )
+
+                # Find a region with available data for this column
+                regions_with_data = columns_all_nans_by_region[
+                    ~columns_all_nans_by_region[column]
+                ].index
+
+                if not regions_with_data.empty:
+                    # Select which region you want to copy data from. Change to closest
+                    region_with_data = regions_with_data[0]
+
+                    column_data_to_copy = data.loc[region_with_data][column]
+
+                    years_to_convert = column_data_to_copy.index.values
+                    full_years_array = np.array(ppp_conversion_rate["time"], dtype=str)
+                    years_index = np.isin(full_years_array, years_to_convert)
+                    source_conversion_rates = np.array(
+                            ppp_conversion_rate["data"][region_with_data],
+                            dtype=float,
+                        )[years_index]
+
+                    # Find regions that need this data
+                    regions_needing_data = columns_all_nans_by_region[
+                        columns_all_nans_by_region[column]
+                    ].index
+
+                    # Copy data from the region with data to regions without data
+                    for region in regions_needing_data:
+                        values_to_convert = column_data_to_copy.values.copy()
+
+                        target_conversion_rates = np.array(
+                            ppp_conversion_rate["data"][region], dtype=float
+                        )[years_index]
+
+                        converted_values = self.convert_price_using_ppp(
+                            values_to_convert,
+                            source_conversion_rates,
+                            target_conversion_rates,
+                        )
+
+                        data.loc[region, column] = converted_values
+
+        data = data.drop(columns=["country_name"])
+
+        return data
+
+    def convert_price_using_ppp(
+        self, price_source_LCU, ppp_factor_source, ppp_factor_target
+    ):
+        """
+        Convert a price from one country's LCU to another's using PPP conversion factors.
+
+        Parameters:
+        - price_source_LCU (float): Array of the prices in the source country's local currency units (LCU).
+        - ppp_factor_source (float): The PPP conversion factor for the source country.
+        - ppp_factor_target (float): The PPP conversion factor for the target country.
+
+        Returns:
+        - float: The price in the target country's local currency units (LCU).
+        """
+        price_target_LCU = (price_source_LCU / ppp_factor_source) * ppp_factor_target
+        return price_target_LCU
 
     def get_changes(self, costs):
         costs["changes"] = np.nan
@@ -690,6 +803,7 @@ class GEBModel(GridModel):
         self,
         crop_prices: Optional[Union[str, int, float]] = 0,
         project_future_until_year: Optional[int] = False,
+        project_past_until_year: Optional[int] = False,
         inter_and_extrapolate: Optional[int] = False,
     ):
         """
@@ -706,6 +820,7 @@ class GEBModel(GridModel):
         crop_prices = self.process_crop_data(
             crop_prices,
             project_future_until_year=project_future_until_year,
+            project_past_until_year=project_past_until_year,
             inter_and_extrapolate=inter_and_extrapolate,
         )
         self.set_dict(crop_prices, name="crops/crop_prices")
@@ -2824,7 +2939,36 @@ class GEBModel(GridModel):
         lending_rates = self.data_catalog.get_dataframe("wb_lending_rate")
         inflation_rates = self.data_catalog.get_dataframe("wb_inflation_rate")
 
-        lending_rates_dict, inflation_rates_dict = {"data": {}}, {"data": {}}
+        ppp_conversion_rates = self.data_catalog.get_dataframe("wb_ppp_conversion_rate")
+        # Filter to retain only 'Country Name' and the year columns
+        columns_to_keep = (
+            ["Country Name"]
+            + ["Country Code"]
+            + [col for col in ppp_conversion_rates.columns if "YR" in col]
+        )
+        df_filtered = ppp_conversion_rates[columns_to_keep]
+
+        # Rename the columns to just the year
+        df_filtered.columns = ["Country Name", "Country Code"] + [
+            col.split(" ")[0]
+            for col in df_filtered.columns
+            if col not in ["Country Name", "Country Code"]
+        ]
+
+        lending_rates_dict, inflation_rates_dict, ppp_conversion_rates_dict = (
+            {"data": {}},
+            {"data": {}},
+            {"data": {}},
+        )
+
+        ppp_conversion_rates = df_filtered.copy()
+        years_ppp_conversion_rates = [
+            c
+            for c in ppp_conversion_rates.columns
+            if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000
+        ]
+        ppp_conversion_rates_dict["time"] = years_ppp_conversion_rates
+
         years_lending_rates = [
             c
             for c in lending_rates.columns
@@ -2840,38 +2984,29 @@ class GEBModel(GridModel):
         inflation_rates_dict["time"] = years_inflation_rates
 
         for _, region in self.geoms["areamaps/regions"].iterrows():
-            region_id = str(
-                region["region_id"]
-            )  # convert to string for json compatibility
+            region_id = str(region["region_id"])
             ISO3 = region["ISO3"]
 
-            lending_rates_country = (
-                lending_rates.loc[
-                    lending_rates["Country Code"] == ISO3, years_lending_rates
-                ]
-                / 100
-                + 1
-            )  # percentage to rate
-            assert (
-                len(lending_rates_country) == 1
-            ), f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
-            lending_rates_dict["data"][region_id] = lending_rates_country.iloc[
-                0
-            ].tolist()
+            # Create a helper to process rates and assert single row data
+            def process_rates(df, rate_cols, convert_percent=False):
+                filtered_data = df.loc[df["Country Code"] == ISO3, rate_cols]
+                assert (
+                    len(filtered_data) == 1
+                ), f"Expected one row for {ISO3}, got {len(filtered_data)}"
+                if convert_percent:
+                    return (filtered_data.iloc[0] / 100 + 1).tolist()
+                return filtered_data.iloc[0].tolist()
 
-            inflation_rates_country = (
-                inflation_rates.loc[
-                    inflation_rates["Country Code"] == ISO3, years_inflation_rates
-                ]
-                / 100
-                + 1
-            )  # percentage to rate
-            assert (
-                len(inflation_rates_country) == 1
-            ), f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
-            inflation_rates_dict["data"][region_id] = inflation_rates_country.iloc[
-                0
-            ].tolist()
+            # Store data in dictionaries
+            ppp_conversion_rates_dict["data"][region_id] = process_rates(
+                ppp_conversion_rates, years_ppp_conversion_rates
+            )
+            lending_rates_dict["data"][region_id] = process_rates(
+                lending_rates, years_lending_rates, True
+            )
+            inflation_rates_dict["data"][region_id] = process_rates(
+                inflation_rates, years_inflation_rates, True
+            )
 
         if project_future_until_year:
             # convert to pandas dataframe
@@ -2909,6 +3044,7 @@ class GEBModel(GridModel):
 
         self.set_dict(inflation_rates_dict, name="economics/inflation_rates")
         self.set_dict(lending_rates_dict, name="economics/lending_rates")
+        self.set_dict(ppp_conversion_rates_dict, name="economics/ppp_conversion_rates")
 
     def setup_irrigation_sources(self, irrigation_sources):
         self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
