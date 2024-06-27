@@ -223,10 +223,6 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing 2D grid.")
         kind, region = hydromt.workflows.parse_region(region, logger=self.logger)
         if kind in ["basin", "subbasin"]:
-            if "bounds" not in region:
-                region.update(
-                    basin_index=self.data_catalog.get_geodataframe(basin_index_fn)
-                )
             # get basin geometry
             geom, xy = hydromt.workflows.get_basin_geometry(
                 ds=hydrography, kind=kind, logger=self.logger, **region
