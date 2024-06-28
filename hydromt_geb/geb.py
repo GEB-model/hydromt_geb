@@ -503,7 +503,6 @@ class GEBModel(GridModel):
                 .tolist(),  # Extract unique years for the time key
             }
 
-            regions = data.index.get_level_values("Region_ID").unique()
             for _, region in self.geoms["areamaps/regions"].iterrows():
                 region_dict = {}
                 region_id = str(region["region_id"])
@@ -649,6 +648,81 @@ class GEBModel(GridModel):
             for idx, crop in self.dict["crops/crop_data"]["data"].items()
         ]
 
+        # Additional potential crops that fall under the others annual category
+        other_perennial_crops = {
+            "apples",
+            "apricots",
+            "asparagus",
+            "blueberries",
+            "cherries",
+            "currants",
+            "gooseberries",
+            "hop cones",
+            "leeks and other alliaceous vegetables",
+            "other berries and fruits of the genus vaccinium n.e.c.",
+            "other stone fruits",
+            "peaches and nectarines",
+            "pears",
+            "plums and sloes",
+            "raspberries",
+            "sour cherries",
+            "walnuts, in shell",
+            "artichokes",
+            "kiwi fruit",
+            "quinces",
+        }
+        
+        other_annual_crops = {
+            "cabbages",
+            "carrots and turnips",
+            "cauliflowers and broccoli",
+            "cucumbers and gherkins",
+            "lettuce and chicory",
+            "lupins",
+            "mushrooms and truffles",
+            "mustard seed",
+            "onions and shallots, dry (excluding dehydrated)",
+            "onions and shallots, green",
+            "other beans, green",
+            "other fruits, n.e.c.",
+            "other vegetables, fresh n.e.c.",
+            "peas, green",
+            "pumpkins, squash and gourds",
+            "shorn wool, greasy, including fleece-washed shorn wool",
+            "spinach",
+            "strawberries",
+            "tomatoes",
+            "triticale",
+            "unmanufactured tobacco",
+            "vetches",
+            "buckwheat",
+            "cantaloupes and other melons",
+            "chillies and peppers, green (capsicum spp. and pimenta spp.)",
+            "green garlic",
+            "linseed",
+            "peas, dry",
+        }
+
+        def process_other_crops(data, other_crops, crop_names):
+            all_crop_names = set(crop_names).union(other_crops)
+
+            other_data = data[
+                [
+                    col
+                    for col in data.columns
+                    if col.lower() in other_crops or col == "changes"
+                ]
+            ]
+            other_data = other_data.drop(columns=["changes"])
+
+            mean_other = other_data.mean(axis=1, skipna=True)
+
+            return mean_other
+
+        # Set the perennial and other annual crops 
+        others_perennial_column = process_other_crops(data, other_perennial_crops, crop_names)
+        others_annual_column = process_other_crops(data, other_annual_crops, crop_names)
+
         # Filter the columns of the data DataFrame
         data = data[
             [
@@ -657,6 +731,10 @@ class GEBModel(GridModel):
                 if col.lower() in crop_names or col == "changes"
             ]
         ]
+            
+        # Set the perennial and other annual crops 
+        data["others perennial"] = others_perennial_column
+        data["others annual"] = others_annual_column
 
         for _, region in self.geoms["areamaps/regions"].iterrows():
             region_id = str(region["region_id"])
@@ -3789,6 +3867,7 @@ class GEBModel(GridModel):
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
         discount_rate=0.1,
+        replace_fodder=False,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3847,6 +3926,48 @@ class GEBModel(GridModel):
             crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
                 crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
+        if replace_fodder:
+            # Check which grain is most common in the area
+            most_common_value = max(
+                (
+                    3,
+                    np.count_nonzero(
+                        (crop_calendar_per_farmer[:, :, 0] == 3).any(axis=1)
+                    ),
+                ),
+                (
+                    4,
+                    np.count_nonzero(
+                        (crop_calendar_per_farmer[:, :, 0] == 4).any(axis=1)
+                    ),
+                ),
+                (
+                    5,
+                    np.count_nonzero(
+                        (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1)
+                    ),
+                ),
+                (
+                    6,
+                    np.count_nonzero(
+                        (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1)
+                    ),
+                ),
+                key=lambda x: x[1],
+            )[0]
+
+            # Determine if there are multiple cropping versions of this crop and assign it to the most common
+            new_crop_types = crop_calendar_per_farmer[
+                (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1), :, :
+            ]
+            unique_rows, counts = np.unique(new_crop_types, axis=0, return_counts=True)
+            max_index = np.argmax(counts)
+            fodder_replacement = unique_rows[max_index]
+
+            # Check where fodder is
+            fodder_mask = (crop_calendar_per_farmer[:, :, 0] == 24).any(axis=1)
+            # Replace fodder
+            crop_calendar_per_farmer[fodder_mask] = fodder_replacement
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
         assert crop_calendar_per_farmer[:, :, 3].max() == 0
