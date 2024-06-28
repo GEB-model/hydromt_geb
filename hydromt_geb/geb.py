@@ -581,9 +581,9 @@ class GEBModel(GridModel):
                     full_years_array = np.array(ppp_conversion_rate["time"], dtype=str)
                     years_index = np.isin(full_years_array, years_to_convert)
                     source_conversion_rates = np.array(
-                            ppp_conversion_rate["data"][region_with_data],
-                            dtype=float,
-                        )[years_index]
+                        ppp_conversion_rate["data"][region_with_data],
+                        dtype=float,
+                    )[years_index]
 
                     # Find regions that need this data
                     regions_needing_data = columns_all_nans_by_region[
