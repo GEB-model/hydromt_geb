@@ -1395,6 +1395,7 @@ class GEBModel(GridModel):
         )
         self.set_MODFLOW_grid(modflow_mask, name=f"groundwater/modflow/modflow_mask")
 
+        # load MERIT
         MERIT = self.data_catalog.get_rasterdataset(
             "merit_hydro",
             variables=["elv"],
@@ -1412,6 +1413,35 @@ class GEBModel(GridModel):
 
         self.set_MODFLOW_grid(
             elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
+        )
+
+        # load hydraulic conductivity
+        hydraulic_conductivity = self.data_catalog.get_rasterdataset(
+            "hydraulic_conductivity_pcrglobwb",
+            bbox=self.bounds,
+            buffer=5,
+        )
+
+        hydraulic_conductivity_modflow = hydraulic_conductivity.raster.reproject_like(
+            modflow_mask, method="average"
+        )
+        self.set_MODFLOW_grid(
+            hydraulic_conductivity_modflow,
+            name=f"groundwater/modflow/hydraulic_conductivity",
+        )
+
+        # load specific yield
+        specific_yield = self.data_catalog.get_rasterdataset(
+            "specific_yield_aquifer_pcrglobwb",
+            bbox=self.bounds,
+            buffer=5,
+        )
+
+        specific_yield_modflow = specific_yield.raster.reproject_like(
+            modflow_mask, method="average"
+        )
+        self.set_MODFLOW_grid(
+            specific_yield_modflow, name=f"groundwater/modflow/specific_yield"
         )
 
     def setup_forcing(
