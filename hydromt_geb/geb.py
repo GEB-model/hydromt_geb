@@ -366,6 +366,9 @@ class GEBModel(GridModel):
             assert "is_paddy" in crop_values
             assert "rd_rain" in crop_values  # root depth rainfed crops
             assert "rd_irr" in crop_values  # root depth irrigated crops
+            assert (
+                crop_values["rd_rain"] >= crop_values["rd_irr"]
+            )  # root depth rainfed crops should be larger than irrigated crops
 
             if type == "GAEZ":
                 crop_values["l_ini"] = crop_values["d1"]
