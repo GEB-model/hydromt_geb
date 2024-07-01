@@ -364,6 +364,8 @@ class GEBModel(GridModel):
             assert "name" in crop_values
             assert "reference_yield_kg_m2" in crop_values
             assert "is_paddy" in crop_values
+            assert "rd_rain" in crop_values  # root depth rainfed crops
+            assert "rd_irr" in crop_values  # root depth irrigated crops
 
             if type == "GAEZ":
                 crop_values["l_ini"] = crop_values["d1"]
@@ -1424,9 +1426,7 @@ class GEBModel(GridModel):
             x=MERIT.coords["x"] + MERIT_x_step / 2,
             y=MERIT.coords["y"] + MERIT_y_step / 2,
         )
-        elevation_modflow = MERIT.raster.reproject_like(
-            modflow_mask, method="average"
-        )
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method="average")
 
         self.set_MODFLOW_grid(
             elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
