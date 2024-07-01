@@ -472,6 +472,7 @@ class GEBModel(GridModel):
                     total_years[0] > project_past_until_year
                     and total_years[-1] < project_future_until_year
                 ), "Extrapolation targets must not fall inside available data time series"
+                print(f"current available time series is {total_years}")
 
             # Filter out columns that contain the word 'meat'
             data = data[
@@ -671,7 +672,7 @@ class GEBModel(GridModel):
             "kiwi fruit",
             "quinces",
         }
-        
+
         other_annual_crops = {
             "cabbages",
             "carrots and turnips",
@@ -719,8 +720,10 @@ class GEBModel(GridModel):
 
             return mean_other
 
-        # Set the perennial and other annual crops 
-        others_perennial_column = process_other_crops(data, other_perennial_crops, crop_names)
+        # Set the perennial and other annual crops
+        others_perennial_column = process_other_crops(
+            data, other_perennial_crops, crop_names
+        )
         others_annual_column = process_other_crops(data, other_annual_crops, crop_names)
 
         # Filter the columns of the data DataFrame
@@ -731,8 +734,8 @@ class GEBModel(GridModel):
                 if col.lower() in crop_names or col == "changes"
             ]
         ]
-            
-        # Set the perennial and other annual crops 
+
+        # Set the perennial and other annual crops
         data["others perennial"] = others_perennial_column
         data["others annual"] = others_annual_column
 
@@ -3927,47 +3930,59 @@ class GEBModel(GridModel):
                 crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
         if replace_fodder:
-            # Check which grain is most common in the area
-            most_common_value = max(
-                (
-                    3,
-                    np.count_nonzero(
-                        (crop_calendar_per_farmer[:, :, 0] == 3).any(axis=1)
+            # Manual replacement of certain crops
+            def replace_crop(
+                crop_calendar_per_farmer, crop_values, replaced_crop_value
+            ):
+                # Find the most common crop value among the given crop_values
+                most_common_value = max(
+                    (
+                        (
+                            value,
+                            np.count_nonzero(
+                                (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
+                            ),
+                        )
+                        for value in crop_values
                     ),
-                ),
-                (
-                    4,
-                    np.count_nonzero(
-                        (crop_calendar_per_farmer[:, :, 0] == 4).any(axis=1)
-                    ),
-                ),
-                (
-                    5,
-                    np.count_nonzero(
-                        (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1)
-                    ),
-                ),
-                (
-                    6,
-                    np.count_nonzero(
-                        (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1)
-                    ),
-                ),
-                key=lambda x: x[1],
-            )[0]
+                    key=lambda x: x[1],
+                )[0]
 
-            # Determine if there are multiple cropping versions of this crop and assign it to the most common
-            new_crop_types = crop_calendar_per_farmer[
-                (crop_calendar_per_farmer[:, :, 0] == 5).any(axis=1), :, :
-            ]
-            unique_rows, counts = np.unique(new_crop_types, axis=0, return_counts=True)
-            max_index = np.argmax(counts)
-            fodder_replacement = unique_rows[max_index]
+                # Determine if there are multiple cropping versions of this crop and assign it to the most common
+                new_crop_types = crop_calendar_per_farmer[
+                    (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(
+                        axis=1
+                    ),
+                    :,
+                    :,
+                ]
+                unique_rows, counts = np.unique(
+                    new_crop_types, axis=0, return_counts=True
+                )
+                max_index = np.argmax(counts)
+                fodder_replacement = unique_rows[max_index]
 
-            # Check where fodder is
-            fodder_mask = (crop_calendar_per_farmer[:, :, 0] == 24).any(axis=1)
-            # Replace fodder
-            crop_calendar_per_farmer[fodder_mask] = fodder_replacement
+                # Check where fodder is
+                fodder_mask = (
+                    crop_calendar_per_farmer[:, :, 0] == replaced_crop_value
+                ).any(axis=1)
+                # Replace fodder
+                crop_calendar_per_farmer[fodder_mask] = fodder_replacement
+
+                return crop_calendar_per_farmer
+
+            # Change for fodder
+            crop_values = [3, 4, 5, 6]
+            fodder_value = 24
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, crop_values, fodder_value
+            )
+            # Change for casava
+            crop_values = [9]
+            cassava_value = 10
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, crop_values, cassava_value
+            )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
         assert crop_calendar_per_farmer[:, :, 3].max() == 0
