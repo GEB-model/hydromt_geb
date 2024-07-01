@@ -1086,12 +1086,6 @@ class GEBModel(GridModel):
                 f"cwatm_{land_use_type}_5min", bbox=self.bounds, buffer=10
             )
 
-            for parameter in ("maxRootDepth", "rootFraction1"):
-                self.set_grid(
-                    self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f"landcover/{land_use_type}/{parameter}_{land_use_type}",
-                )
-
             parameter = f"cropCoefficient{land_use_type_netcdf_name}_10days"
             self.set_forcing(
                 self.interpolate(land_use_ds[parameter], interpolation_method),
