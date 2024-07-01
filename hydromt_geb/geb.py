@@ -16,6 +16,7 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
+from pyproj import CRS
 
 import numpy as np
 import pandas as pd
@@ -1441,14 +1442,12 @@ class GEBModel(GridModel):
             endtime,
         )
 
-    def setup_modflow(self, epsg: int, resolution: float):
+    def setup_modflow(self, resolution: float):
         """
         Sets up the MODFLOW grid for GEB.
 
         Parameters
         ----------
-        epsg : int
-            The EPSG code for the coordinate reference system of the model grid.
         resolution : float
             The resolution of the model grid in meters.
 
@@ -1473,8 +1472,24 @@ class GEBModel(GridModel):
         model with the name 'groundwater/modflow/modflow_elevation'.
         """
         self.logger.info("Setting up MODFLOW")
+
+        center_longitude = self.bounds[2] - (self.bounds[2] - self.bounds[0]) / 2
+        center_latitude = self.bounds[3] - (self.bounds[3] - self.bounds[1]) / 2
+
+        utm_crs = CRS.from_dict(
+            {
+                "proj": "utm",
+                "ellps": "WGS84",
+                "lat_0": center_latitude,
+                "lon_0": center_longitude,
+                "zone": int((center_longitude + 180) / 6) + 1,
+            }
+        )
+
+        modflow_epsg = utm_crs.to_authority()[1]
+
         modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid["landsurface/topo/elevation"], 4326, epsg, resolution
+            self.grid["landsurface/topo/elevation"], 4326, modflow_epsg, resolution
         )
         modflow_mask = hydromt.raster.full_from_transform(
             modflow_affine,
@@ -1482,7 +1497,7 @@ class GEBModel(GridModel):
             nodata=0,
             dtype=np.int8,
             name=f"groundwater/modflow/modflow_mask",
-            crs=epsg,
+            crs=modflow_epsg,
             lazy=True,
         )
 
@@ -1492,7 +1507,7 @@ class GEBModel(GridModel):
             4326,
             modflow_affine,
             MODFLOW_shape,
-            epsg,
+            modflow_epsg,
         )
 
         self.set_binary(
@@ -1510,6 +1525,7 @@ class GEBModel(GridModel):
         )
         self.set_MODFLOW_grid(modflow_mask, name=f"groundwater/modflow/modflow_mask")
 
+        # load MERIT
         MERIT = self.data_catalog.get_rasterdataset(
             "merit_hydro",
             variables=["elv"],
@@ -1523,10 +1539,40 @@ class GEBModel(GridModel):
             x=MERIT.coords["x"] + MERIT_x_step / 2,
             y=MERIT.coords["y"] + MERIT_y_step / 2,
         )
-        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method="average")
+        elevation_modflow = MERIT.raster.reproject_like(
+            modflow_mask, method="average"
+        )
 
         self.set_MODFLOW_grid(
             elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
+        )
+
+        # load hydraulic conductivity
+        hydraulic_conductivity = self.data_catalog.get_rasterdataset(
+            "hydraulic_conductivity_pcrglobwb",
+            bbox=self.bounds,
+            buffer=5,
+        )
+        hydraulic_conductivity_modflow = hydraulic_conductivity.raster.reproject_like(
+            modflow_mask, method="average"
+        )
+        self.set_MODFLOW_grid(
+            hydraulic_conductivity_modflow,
+            name=f"groundwater/modflow/hydraulic_conductivity",
+        )
+
+        # load specific yield
+        specific_yield = self.data_catalog.get_rasterdataset(
+            "specific_yield_aquifer_pcrglobwb",
+            bbox=self.bounds,
+            buffer=5,
+        )
+
+        specific_yield_modflow = specific_yield.raster.reproject_like(
+            modflow_mask, method="average"
+        )
+        self.set_MODFLOW_grid(
+            specific_yield_modflow, name=f"groundwater/modflow/specific_yield"
         )
 
     def setup_forcing(
