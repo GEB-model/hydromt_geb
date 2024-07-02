@@ -367,6 +367,10 @@ class GEBModel(GridModel):
             assert "rd_rain" in crop_values  # root depth rainfed crops
             assert "rd_irr" in crop_values  # root depth irrigated crops
             assert (
+                "crop_group_number" in crop_values
+            )  # adaptation level to drought (see WOFOST: https://wofost.readthedocs.io/en/7.2/)
+            assert 5 >= crop_values["crop_group_number"] >= 0
+            assert (
                 crop_values["rd_rain"] >= crop_values["rd_irr"]
             )  # root depth rainfed crops should be larger than irrigated crops
 
@@ -1025,13 +1029,6 @@ class GEBModel(GridModel):
                     self.interpolate(ds, interpolation_method),
                     name=f"soil/{parameter}{soil_layer}",
                 )
-
-        for soil_layer in range(1, 3):
-            ds = soil_ds[f"storageDepth{soil_layer}"]
-            self.set_grid(
-                self.interpolate(ds, interpolation_method),
-                name=f"soil/storage_depth{soil_layer}",
-            )
 
         ds = soil_ds["percolationImp"]
         self.set_grid(
