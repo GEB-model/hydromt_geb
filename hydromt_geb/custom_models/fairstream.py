@@ -1,14 +1,9 @@
 from ..geb import GEBModel as GEBModel
 
-import random
 import numpy as np
 import geopandas as gpd
 import zipfile
 import gzip
-from tqdm import tqdm
-from datetime import date
-import json
-from typing import Union, Any, Dict, Optional
 from pathlib import Path
 import pandas as pd
 from honeybees.library.raster import pixels_to_coords
