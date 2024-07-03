@@ -3915,7 +3915,7 @@ class GEBModel(GridModel):
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
         discount_rate=0.1,
-        replace_fodder=False,
+        reduce_crops=False,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3974,59 +3974,86 @@ class GEBModel(GridModel):
             crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
                 crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
-        if replace_fodder:
-            # Manual replacement of certain crops
-            def replace_crop(
-                crop_calendar_per_farmer, crop_values, replaced_crop_value
-            ):
-                # Find the most common crop value among the given crop_values
-                most_common_value = max(
+
+        # Manual replacement of certain crops
+        def replace_crop(crop_calendar_per_farmer, crop_values, replaced_crop_values):
+            # Find the most common crop value among the given crop_values
+            most_common_value = max(
+                (
                     (
-                        (
-                            value,
-                            np.count_nonzero(
-                                (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
-                            ),
-                        )
-                        for value in crop_values
-                    ),
-                    key=lambda x: x[1],
-                )[0]
+                        value,
+                        np.count_nonzero(
+                            (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
+                        ),
+                    )
+                    for value in crop_values
+                ),
+                key=lambda x: x[1],
+            )[0]
 
-                # Determine if there are multiple cropping versions of this crop and assign it to the most common
-                new_crop_types = crop_calendar_per_farmer[
-                    (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(
-                        axis=1
-                    ),
-                    :,
-                    :,
-                ]
-                unique_rows, counts = np.unique(
-                    new_crop_types, axis=0, return_counts=True
-                )
-                max_index = np.argmax(counts)
-                fodder_replacement = unique_rows[max_index]
+            # Determine if there are multiple cropping versions of this crop and assign it to the most common
+            new_crop_types = crop_calendar_per_farmer[
+                (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(axis=1),
+                :,
+                :,
+            ]
+            unique_rows, counts = np.unique(new_crop_types, axis=0, return_counts=True)
+            max_index = np.argmax(counts)
+            crop_replacement = unique_rows[max_index]
 
+            for replaced_crop in replaced_crop_values:
                 # Check where to be replaced crop is
-                fodder_mask = (
-                    crop_calendar_per_farmer[:, :, 0] == replaced_crop_value
-                ).any(axis=1)
+                crop_mask = (crop_calendar_per_farmer[:, :, 0] == replaced_crop).any(
+                    axis=1
+                )
                 # Replace fodder
-                crop_calendar_per_farmer[fodder_mask] = fodder_replacement
+                crop_calendar_per_farmer[crop_mask] = crop_replacement
 
-                return crop_calendar_per_farmer
+            return crop_calendar_per_farmer
 
-            # Change for fodder
-            crop_values = [3, 4, 5, 6]
-            fodder_value = 24
+        if reduce_crops:
+            # Give fodder a value
+            most_common_check = [3, 4, 5, 6]
+            replaced_value = [24]
             crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, crop_values, fodder_value
+                crop_calendar_per_farmer, most_common_check, replaced_value
             )
-            # Change for casava
-            crop_values = [9]
-            cassava_value = 10
+
+            # Replace the grain crops by one
+            most_common_check = [3, 4, 5, 6]
+            replaced_value = [3, 4, 5, 6]
             crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, crop_values, cassava_value
+                crop_calendar_per_farmer, most_common_check, replaced_value
+            )
+            # Change other annual / misc to one
+            most_common_check = [15, 17, 21, 22, 25]
+            replaced_value = [15, 17, 21, 22, 25]
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, most_common_check, replaced_value
+            )
+            # Change oils to one
+            most_common_check = [7, 8, 14]
+            replaced_value = [7, 8, 14]
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, most_common_check, replaced_value
+            )
+            # Change tubers to one
+            most_common_check = [9, 10]
+            replaced_value = [9, 10]
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, most_common_check, replaced_value
+            )
+            # Reduce sugar crops to one
+            most_common_check = [11, 12]
+            replaced_value = [11, 12]
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, most_common_check, replaced_value
+            )
+            # Change perennial to one
+            most_common_check = [13, 19, 18, 23]
+            replaced_value = [13, 19, 18, 23]
+            crop_calendar_per_farmer = replace_crop(
+                crop_calendar_per_farmer, most_common_check, replaced_value
             )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
