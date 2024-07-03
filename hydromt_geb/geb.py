@@ -432,12 +432,11 @@ class GEBModel(GridModel):
 
     def process_crop_data(
         self,
-        data,
-        project_past_until_year=None,
-        project_future_until_year=None,
-        inter_and_extrapolate=None,
+        crop_prices,
+        project_past_until_year=False,
+        project_future_until_year=False,
     ):
-        if isinstance(data, str):
+        if crop_prices == "FAO_stat":
             crop_data = self.data_catalog.get_dataframe("crop_price")
 
             # Filter and rename necessary columns
@@ -467,13 +466,16 @@ class GEBModel(GridModel):
             # Concatenate all regional data into a single DataFrame with MultiIndex
             data = pd.concat(data, names=["Region_ID", "Year"])
 
-            if inter_and_extrapolate:
-                total_years = data.index.get_level_values("Year").unique()
+            total_years = data.index.get_level_values("Year").unique()
+
+            if project_past_until_year:
                 assert (
                     total_years[0] > project_past_until_year
-                    and total_years[-1] < project_future_until_year
-                ), "Extrapolation targets must not fall inside available data time series"
-                print(f"current available time series is {total_years}")
+                ), f"Extrapolation targets must not fall inside available data time series. Current lower limit is {total_years[0]}"
+            if project_future_until_year:
+                assert (
+                    total_years[-1] < project_future_until_year
+                ), f"Extrapolation targets must not fall inside available data time series. Current upper limit is {total_years[-1]}"
 
             # Filter out columns that contain the word 'meat'
             data = data[
@@ -482,10 +484,13 @@ class GEBModel(GridModel):
 
             data = self.adjust_crops_for_countries(data)
 
-            if inter_and_extrapolate:
-                prices_plus_changes = self.get_changes(data)
-                data = self.inter_and_extrapolate(prices_plus_changes)
+            prices_plus_changes = self.get_changes(data)
+            data = self.inter_and_extrapolate(prices_plus_changes)
 
+            if (
+                project_past_until_year is not None
+                or project_future_until_year is not None
+            ):
                 data = self.process_additional_years(
                     data,
                     total_years=total_years,
@@ -493,10 +498,12 @@ class GEBModel(GridModel):
                     upper_bound=project_future_until_year,
                 )
 
-            crop_data = self.dict["crops/crop_data"]["data"]
+            # Adjust price per tonne to price per kg
+            data /= 1000
 
             # Create a dictionary structure with regions as keys and crops as nested dictionaries
             # This is the required format for crop_farmers.py
+            crop_data = self.dict["crops/crop_data"]["data"]
             formatted_data = {
                 "type": "time_series",
                 "data": {},
@@ -886,7 +893,6 @@ class GEBModel(GridModel):
         crop_prices: Optional[Union[str, int, float]] = 0,
         project_future_until_year: Optional[int] = False,
         project_past_until_year: Optional[int] = False,
-        inter_and_extrapolate: Optional[int] = False,
     ):
         """
         Sets up the crop prices for the model.
@@ -900,10 +906,9 @@ class GEBModel(GridModel):
         """
         self.logger.info(f"Preparing crop prices")
         crop_prices = self.process_crop_data(
-            crop_prices,
+            crop_prices=crop_prices,
             project_future_until_year=project_future_until_year,
             project_past_until_year=project_past_until_year,
-            inter_and_extrapolate=inter_and_extrapolate,
         )
         self.set_dict(crop_prices, name="crops/crop_prices")
         self.set_dict(crop_prices, name="crops/cultivation_costs")
@@ -1620,9 +1625,7 @@ class GEBModel(GridModel):
             x=MERIT.coords["x"] + MERIT_x_step / 2,
             y=MERIT.coords["y"] + MERIT_y_step / 2,
         )
-        elevation_modflow = MERIT.raster.reproject_like(
-            modflow_mask, method="average"
-        )
+        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method="average")
 
         self.set_MODFLOW_grid(
             elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
@@ -4008,7 +4011,7 @@ class GEBModel(GridModel):
                 max_index = np.argmax(counts)
                 fodder_replacement = unique_rows[max_index]
 
-                # Check where fodder is
+                # Check where to be replaced crop is
                 fodder_mask = (
                     crop_calendar_per_farmer[:, :, 0] == replaced_crop_value
                 ).any(axis=1)
