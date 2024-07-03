@@ -364,6 +364,15 @@ class GEBModel(GridModel):
             assert "name" in crop_values
             assert "reference_yield_kg_m2" in crop_values
             assert "is_paddy" in crop_values
+            assert "rd_rain" in crop_values  # root depth rainfed crops
+            assert "rd_irr" in crop_values  # root depth irrigated crops
+            assert (
+                "crop_group_number" in crop_values
+            )  # adaptation level to drought (see WOFOST: https://wofost.readthedocs.io/en/7.2/)
+            assert 5 >= crop_values["crop_group_number"] >= 0
+            assert (
+                crop_values["rd_rain"] >= crop_values["rd_irr"]
+            )  # root depth rainfed crops should be larger than irrigated crops
 
             if type == "GAEZ":
                 crop_values["l_ini"] = crop_values["d1"]
@@ -1222,13 +1231,6 @@ class GEBModel(GridModel):
                     name=f"soil/{parameter}{soil_layer}",
                 )
 
-        for soil_layer in range(1, 3):
-            ds = soil_ds[f"storageDepth{soil_layer}"]
-            self.set_grid(
-                self.interpolate(ds, interpolation_method),
-                name=f"soil/storage_depth{soil_layer}",
-            )
-
         ds = soil_ds["percolationImp"]
         self.set_grid(
             self.interpolate(ds, interpolation_method), name=f"soil/percolation_impeded"
@@ -1281,12 +1283,6 @@ class GEBModel(GridModel):
             land_use_ds = self.data_catalog.get_rasterdataset(
                 f"cwatm_{land_use_type}_5min", bbox=self.bounds, buffer=10
             )
-
-            for parameter in ("maxRootDepth", "rootFraction1"):
-                self.set_grid(
-                    self.interpolate(land_use_ds[parameter], interpolation_method),
-                    name=f"landcover/{land_use_type}/{parameter}_{land_use_type}",
-                )
 
             parameter = f"cropCoefficient{land_use_type_netcdf_name}_10days"
             self.set_forcing(
