@@ -440,9 +440,43 @@ class GEBModel(GridModel):
         self.set_dict(crop_data, name="crops/crop_data")
 
     def process_crop_data(
-        self, data, project_future_until_year=None, inter_and_extrapolate=None
+        self,
+        crop_prices,
+        project_past_until_year=False,
+        project_future_until_year=False,
     ):
-        if isinstance(data, str):
+        """
+        Processes crop price data, performing adjustments, variability determination, and interpolation/extrapolation as needed.
+
+        Parameters
+        ----------
+        crop_prices : str, int, or float
+            If 'FAO_stat', fetches crop price data from FAO statistics. Otherwise, it can be a constant value for crop prices.
+        project_past_until_year : int, optional
+            The year to project past data until. Defaults to False.
+        project_future_until_year : int, optional
+            The year to project future data until. Defaults to False.
+
+        Returns
+        -------
+        dict
+            A dictionary containing processed crop data in a time series format or as a constant value.
+
+        Raises
+        ------
+        ValueError
+            If crop_prices is neither a valid file path nor an integer/float.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Fetches and processes crop data from FAO statistics if crop_prices is 'FAO_stat'.
+        2. Adjusts the data for countries with missing values using PPP conversion rates.
+        3. Determines price variability and performs interpolation/extrapolation of crop prices.
+        4. Formats the processed data into a nested dictionary structure.
+        """
+
+        if crop_prices == "FAO_stat":
             crop_data = self.data_catalog.get_dataframe("crop_price")
 
             # Filter and rename necessary columns
@@ -460,33 +494,56 @@ class GEBModel(GridModel):
                 region_name = region["NAME_0"]
                 region_id = str(region["region_id"])
 
-                # Filter and pivot data for the current region
                 region_crop_data = crop_data[crop_data["Country Code"] == region_name]
                 region_pivot = region_crop_data.pivot_table(
                     index="time", columns="crops", values="Value", aggfunc="first"
                 )
 
+                region_pivot["country_name"] = region_name
                 # Store pivoted data in dictionary with region_id as key
                 data[region_id] = region_pivot
 
             # Concatenate all regional data into a single DataFrame with MultiIndex
             data = pd.concat(data, names=["Region_ID", "Year"])
 
-            if inter_and_extrapolate:
-                prices_plus_changes = self.get_changes(data)
-                data = self.inter_and_extrapolate(prices_plus_changes)
-                total_years = data.index.get_level_values("Year").unique()
+            total_years = data.index.get_level_values("Year").unique()
 
+            if project_past_until_year:
+                assert (
+                    total_years[0] > project_past_until_year
+                ), f"Extrapolation targets must not fall inside available data time series. Current lower limit is {total_years[0]}"
+            if project_future_until_year:
+                assert (
+                    total_years[-1] < project_future_until_year
+                ), f"Extrapolation targets must not fall inside available data time series. Current upper limit is {total_years[-1]}"
+
+            # Filter out columns that contain the word 'meat'
+            data = data[
+                [column for column in data.columns if "meat" not in column.lower()]
+            ]
+
+            data = self.adjust_crops_for_countries(data)
+
+            prices_plus_changes = self.determine_price_variability(data)
+            data = self.inter_and_extrapolate_prices(prices_plus_changes)
+
+            if (
+                project_past_until_year is not None
+                or project_future_until_year is not None
+            ):
                 data = self.process_additional_years(
                     data,
                     total_years=total_years,
-                    lower_bound=1980,
-                    upper_bound=2016,
+                    lower_bound=project_past_until_year,
+                    upper_bound=project_future_until_year,
                 )
 
-            crop_data = self.dict["crops/crop_data"]["data"]
+            # Adjust price per tonne to price per kg
+            data /= 1000
 
             # Create a dictionary structure with regions as keys and crops as nested dictionaries
+            # This is the required format for crop_farmers.py
+            crop_data = self.dict["crops/crop_data"]["data"]
             formatted_data = {
                 "type": "time_series",
                 "data": {},
@@ -495,7 +552,6 @@ class GEBModel(GridModel):
                 .tolist(),  # Extract unique years for the time key
             }
 
-            regions = data.index.get_level_values("Region_ID").unique()
             for _, region in self.geoms["areamaps/regions"].iterrows():
                 region_dict = {}
                 region_id = str(region["region_id"])
@@ -524,7 +580,137 @@ class GEBModel(GridModel):
 
         return data
 
-    def get_changes(self, costs):
+    def adjust_crops_for_countries(self, data):
+        """
+        If there are multiple countries in one selected basin, where one country has prices for a certain crop, but the other does not,
+        this gives issues. This function adjusts crop data for those countries by filling in missing values using data from nearby regions
+        and PPP conversion rates.
+
+        Parameters
+        ----------
+        data : DataFrame
+            A DataFrame containing crop data with a 'country_name' column and indexed by 'Region_ID'. The DataFrame
+            contains crop prices for different regions.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with missing crop data filled in using PPP conversion rates from nearby regions.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Identifies columns where all values are NaN for each country and stores this information.
+        2. For each country and column with missing values, finds a country/region within that study area that has data for that column.
+        3. Uses PPP conversion rates to adjust and fill in missing values for regions without data.
+        4. Drops the 'country_name' column before returning the updated DataFrame.
+        """
+
+        ppp_conversion_rate = self.dict["economics/ppp_conversion_rates"]
+        columns_with_all_nans_by_country = {}
+
+        for country in data["country_name"].unique():
+            # Filter the data for the current country
+            country_data = data[data["country_name"] == country]
+
+            # Group by 'Region_ID' and check each column for NaN values across all years within the region
+            columns_all_nans_by_region = country_data.groupby("Region_ID").apply(
+                lambda x: x.isna().all()
+            )
+
+            # Check for columns where all values are NaN across any region
+            columns_with_missing_values = columns_all_nans_by_region.any(axis=0)
+
+            # Store the result in the dictionary
+            columns_with_all_nans_by_country[country] = columns_with_missing_values[
+                columns_with_missing_values
+            ].index.tolist()
+
+        for (
+            country,
+            columns_with_missing_values,
+        ) in columns_with_all_nans_by_country.items():
+
+            for column in columns_with_missing_values:
+                columns_all_nans_by_region = data.groupby("Region_ID").apply(
+                    lambda x: x.isna().all()
+                )
+
+                # Find a region with available data for this column
+                regions_with_data = columns_all_nans_by_region[
+                    ~columns_all_nans_by_region[column]
+                ].index
+
+                if not regions_with_data.empty:
+                    # Select which region you want to copy data from. TO DO: Change to closest / most similar country
+                    region_with_data = regions_with_data[0]
+
+                    column_data_to_copy = data.loc[region_with_data][column]
+
+                    years_to_convert = column_data_to_copy.index.values
+                    full_years_array = np.array(ppp_conversion_rate["time"], dtype=str)
+                    years_index = np.isin(full_years_array, years_to_convert)
+                    source_conversion_rates = np.array(
+                        ppp_conversion_rate["data"][region_with_data],
+                        dtype=float,
+                    )[years_index]
+
+                    # Find regions that need this data
+                    regions_needing_data = columns_all_nans_by_region[
+                        columns_all_nans_by_region[column]
+                    ].index
+
+                    # Copy data from the region with data to regions without data
+                    for region in regions_needing_data:
+                        values_to_convert = column_data_to_copy.values.copy()
+
+                        target_conversion_rates = np.array(
+                            ppp_conversion_rate["data"][region], dtype=float
+                        )[years_index]
+
+                        converted_values = self.convert_price_using_ppp(
+                            values_to_convert,
+                            source_conversion_rates,
+                            target_conversion_rates,
+                        )
+
+                        data.loc[region, column] = converted_values
+
+        data = data.drop(columns=["country_name"])
+
+        return data
+
+    def convert_price_using_ppp(
+        self, price_source_LCU, ppp_factor_source, ppp_factor_target
+    ):
+        """
+        Convert a price from one country's LCU to another's using PPP conversion factors.
+
+        Parameters:
+        - price_source_LCU (float): Array of the prices in the source country's local currency units (LCU).
+        - ppp_factor_source (float): The PPP conversion factor for the source country.
+        - ppp_factor_target (float): The PPP conversion factor for the target country.
+
+        Returns:
+        - float: The price in the target country's local currency units (LCU).
+        """
+        price_target_LCU = (price_source_LCU / ppp_factor_source) * ppp_factor_target
+        return price_target_LCU
+
+    def determine_price_variability(self, costs):
+        """
+        Determines the price variability of all crops in the region and adds a column that describes this variability.
+
+        Parameters
+        ----------
+        costs : DataFrame
+            A DataFrame containing the cost data for different regions. The DataFrame should be indexed by region IDs.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with a new column 'changes' that contains the average price changes for each region.
+        """
         costs["changes"] = np.nan
         # Determine the average changes of price of all crops in the region and add it to the data
         for _, region in self.geoms["areamaps/regions"].iterrows():
@@ -539,12 +725,114 @@ class GEBModel(GridModel):
 
         return costs
 
-    def inter_and_extrapolate(self, data):
+    def inter_and_extrapolate_prices(self, data):
+        """
+        Interpolates and extrapolates crop prices for different regions based on the given data and predefined crop categories.
+
+        Parameters
+        ----------
+        data : DataFrame
+            A DataFrame containing crop price data for different regions. The DataFrame should be indexed by region IDs
+            and have columns corresponding to different crops.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with interpolated and extrapolated crop prices. Columns for 'others perennial' and 'others annual'
+            crops are also added.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Extracts crop names from the internal crop data dictionary.
+        2. Defines additional crops that fall under 'others perennial' and 'others annual' categories.
+        3. Processes the data to compute average prices for these additional crops.
+        4. Filters and updates the original data with the computed averages.
+        5. Interpolates and extrapolates missing prices for each crop in each region based on the 'changes' column.
+        """
+
         # Extract the crop names from the dictionary and convert them to lowercase
         crop_names = [
             crop["name"].lower()
             for idx, crop in self.dict["crops/crop_data"]["data"].items()
         ]
+
+        # Additional potential crops that fall under the others annual category
+        other_perennial_crops = {
+            "apples",
+            "apricots",
+            "asparagus",
+            "blueberries",
+            "cherries",
+            "currants",
+            "gooseberries",
+            "hop cones",
+            "leeks and other alliaceous vegetables",
+            "other berries and fruits of the genus vaccinium n.e.c.",
+            "other stone fruits",
+            "peaches and nectarines",
+            "pears",
+            "plums and sloes",
+            "raspberries",
+            "sour cherries",
+            "walnuts, in shell",
+            "artichokes",
+            "kiwi fruit",
+            "quinces",
+        }
+
+        other_annual_crops = {
+            "cabbages",
+            "carrots and turnips",
+            "cauliflowers and broccoli",
+            "cucumbers and gherkins",
+            "lettuce and chicory",
+            "lupins",
+            "mushrooms and truffles",
+            "mustard seed",
+            "onions and shallots, dry (excluding dehydrated)",
+            "onions and shallots, green",
+            "other beans, green",
+            "other fruits, n.e.c.",
+            "other vegetables, fresh n.e.c.",
+            "peas, green",
+            "pumpkins, squash and gourds",
+            "shorn wool, greasy, including fleece-washed shorn wool",
+            "spinach",
+            "strawberries",
+            "tomatoes",
+            "triticale",
+            "unmanufactured tobacco",
+            "vetches",
+            "buckwheat",
+            "cantaloupes and other melons",
+            "chillies and peppers, green (capsicum spp. and pimenta spp.)",
+            "green garlic",
+            "linseed",
+            "peas, dry",
+        }
+
+        def process_other_crops(data, other_crops, crop_names):
+            all_crop_names = set(crop_names).union(other_crops)
+
+            other_data = data[
+                [
+                    col
+                    for col in data.columns
+                    if col.lower() in other_crops or col == "changes"
+                ]
+            ]
+            other_data = other_data.drop(columns=["changes"])
+
+            mean_other = other_data.mean(axis=1, skipna=True)
+
+            return mean_other
+
+        # Set the perennial and other annual crops
+        others_perennial_column = process_other_crops(
+            data, other_perennial_crops, crop_names
+        )
+        others_annual_column = process_other_crops(data, other_annual_crops, crop_names)
 
         # Filter the columns of the data DataFrame
         data = data[
@@ -555,6 +843,11 @@ class GEBModel(GridModel):
             ]
         ]
 
+        # Set the perennial and other annual crops
+        data["others perennial"] = others_perennial_column
+        data["others annual"] = others_annual_column
+
+        # Interpolate and extrapolate missing prices for each crop in each region based on the 'changes' column
         for _, region in self.geoms["areamaps/regions"].iterrows():
             region_id = str(region["region_id"])
             region_data = data.loc[region_id]
@@ -700,7 +993,7 @@ class GEBModel(GridModel):
         self,
         crop_prices: Optional[Union[str, int, float]] = 0,
         project_future_until_year: Optional[int] = False,
-        inter_and_extrapolate: Optional[int] = False,
+        project_past_until_year: Optional[int] = False,
     ):
         """
         Sets up the crop prices for the model.
@@ -714,9 +1007,9 @@ class GEBModel(GridModel):
         """
         self.logger.info(f"Preparing crop prices")
         crop_prices = self.process_crop_data(
-            crop_prices,
+            crop_prices=crop_prices,
             project_future_until_year=project_future_until_year,
-            inter_and_extrapolate=inter_and_extrapolate,
+            project_past_until_year=project_past_until_year,
         )
         self.set_dict(crop_prices, name="crops/crop_prices")
         self.set_dict(crop_prices, name="crops/cultivation_costs")
@@ -2864,54 +3157,84 @@ class GEBModel(GridModel):
         lending_rates = self.data_catalog.get_dataframe("wb_lending_rate")
         inflation_rates = self.data_catalog.get_dataframe("wb_inflation_rate")
 
-        lending_rates_dict, inflation_rates_dict = {"data": {}}, {"data": {}}
-        years_lending_rates = [
-            c
-            for c in lending_rates.columns
-            if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000
-        ]
-        lending_rates_dict["time"] = years_lending_rates
+        ppp_conversion_rates = self.data_catalog.get_dataframe("wb_ppp_conversion_rate")
+        lcu_per_usd_conversion_rates = self.data_catalog.get_dataframe(
+            "lcu_per_usd_conversion_rate"
+        )
 
-        years_inflation_rates = [
-            c
-            for c in inflation_rates.columns
-            if c.isnumeric() and len(c) == 4 and int(c) >= 1900 and int(c) <= 3000
-        ]
-        inflation_rates_dict["time"] = years_inflation_rates
+        def filter_and_rename(df, additional_cols):
+            # Select columns: 'Country Name', 'Country Code', and columns containing "YR"
+            columns_to_keep = additional_cols + [
+                col for col in df.columns if "YR" in col
+            ]
+            filtered_df = df[columns_to_keep]
+
+            # Rename columns to just the year or keep the original name for specified columns
+            filtered_df.columns = additional_cols + [
+                col.split(" ")[0]
+                for col in filtered_df.columns
+                if col not in additional_cols
+            ]
+            return filtered_df
+
+        def extract_years(df):
+            # Extract years that are numerically valid between 1900 and 3000
+            return [
+                col
+                for col in df.columns
+                if col.isnumeric() and 1900 <= int(col) <= 3000
+            ]
+
+        # Assuming dataframes for PPP and LCU per USD have been initialized
+        ppp_filtered = filter_and_rename(
+            ppp_conversion_rates, ["Country Name", "Country Code"]
+        )
+        lcu_per_usd_filtered = filter_and_rename(
+            lcu_per_usd_conversion_rates, ["Country Name", "Country Code"]
+        )
+        years_ppp_conversion_rates = extract_years(ppp_filtered)
+        years_lcu_per_usd_conversion_rates = extract_years(lcu_per_usd_filtered)
+
+        ppp_conversion_rates_dict = {"time": years_ppp_conversion_rates, "data": {}}
+        lcu_per_usd_conversion_rates_dict = {
+            "time": years_lcu_per_usd_conversion_rates,
+            "data": {},
+        }
+
+        # Assume lending_rates and inflation_rates are available
+        years_lending_rates = extract_years(lending_rates)
+        years_inflation_rates = extract_years(inflation_rates)
+
+        lending_rates_dict = {"time": years_lending_rates, "data": {}}
+        inflation_rates_dict = {"time": years_inflation_rates, "data": {}}
 
         for _, region in self.geoms["areamaps/regions"].iterrows():
-            region_id = str(
-                region["region_id"]
-            )  # convert to string for json compatibility
+            region_id = str(region["region_id"])
             ISO3 = region["ISO3"]
 
-            lending_rates_country = (
-                lending_rates.loc[
-                    lending_rates["Country Code"] == ISO3, years_lending_rates
-                ]
-                / 100
-                + 1
-            )  # percentage to rate
-            assert (
-                len(lending_rates_country) == 1
-            ), f"Expected one row for {ISO3}, got {len(lending_rates_country)}"
-            lending_rates_dict["data"][region_id] = lending_rates_country.iloc[
-                0
-            ].tolist()
+            # Create a helper to process rates and assert single row data
+            def process_rates(df, rate_cols, convert_percent=False):
+                filtered_data = df.loc[df["Country Code"] == ISO3, rate_cols]
+                assert (
+                    len(filtered_data) == 1
+                ), f"Expected one row for {ISO3}, got {len(filtered_data)}"
+                if convert_percent:
+                    return (filtered_data.iloc[0] / 100 + 1).tolist()
+                return filtered_data.iloc[0].tolist()
 
-            inflation_rates_country = (
-                inflation_rates.loc[
-                    inflation_rates["Country Code"] == ISO3, years_inflation_rates
-                ]
-                / 100
-                + 1
-            )  # percentage to rate
-            assert (
-                len(inflation_rates_country) == 1
-            ), f"Expected one row for {ISO3}, got {len(inflation_rates_country)}"
-            inflation_rates_dict["data"][region_id] = inflation_rates_country.iloc[
-                0
-            ].tolist()
+            # Store data in dictionaries
+            ppp_conversion_rates_dict["data"][region_id] = process_rates(
+                ppp_filtered, years_ppp_conversion_rates
+            )
+            lcu_per_usd_conversion_rates_dict["data"][region_id] = process_rates(
+                lcu_per_usd_filtered, years_lcu_per_usd_conversion_rates
+            )
+            lending_rates_dict["data"][region_id] = process_rates(
+                lending_rates, years_lending_rates, True
+            )
+            inflation_rates_dict["data"][region_id] = process_rates(
+                inflation_rates, years_inflation_rates, True
+            )
 
         if project_future_until_year:
             # convert to pandas dataframe
@@ -2949,6 +3272,11 @@ class GEBModel(GridModel):
 
         self.set_dict(inflation_rates_dict, name="economics/inflation_rates")
         self.set_dict(lending_rates_dict, name="economics/lending_rates")
+        self.set_dict(ppp_conversion_rates_dict, name="economics/ppp_conversion_rates")
+        self.set_dict(
+            lcu_per_usd_conversion_rates_dict,
+            name="economics/lcu_per_usd_conversion_rates",
+        )
 
     def setup_irrigation_sources(self, irrigation_sources):
         self.set_dict(irrigation_sources, name="agents/farmers/irrigation_sources")
@@ -3034,6 +3362,128 @@ class GEBModel(GridModel):
                     )
 
                 prices_dict["data"][region] = prices.tolist()
+
+            # Set the calculated prices in the appropriate dictionary
+            self.set_dict(prices_dict, name=f"economics/{price_type}")
+
+    def setup_well_prices_by_reference_year_global(
+        self,
+        WHY_10: float,
+        WHY_20: float,
+        WHY_30: float,
+        reference_year: int,
+        start_year: int,
+        end_year: int,
+    ):
+        """
+        Sets up the well prices and upkeep prices for the hydrological model based on a reference year.
+
+        Parameters
+        ----------
+        well_price : float
+            The price of a well in the reference year.
+        upkeep_price_per_m2 : float
+            The upkeep price per square meter of a well in the reference year.
+        reference_year : int
+            The reference year for the well prices and upkeep prices.
+        start_year : int
+            The start year for the well prices and upkeep prices.
+        end_year : int
+            The end year for the well prices and upkeep prices.
+
+        Notes
+        -----
+        This method sets up the well prices and upkeep prices for the hydrological model based on a reference year. It first
+        retrieves the inflation rates data from the `economics/inflation_rates` dictionary. It then creates dictionaries to
+        store the well prices and upkeep prices for each region, with the years as the time dimension and the prices as the
+        data dimension.
+
+        The well prices and upkeep prices are calculated by applying the inflation rates to the reference year prices. The
+        resulting prices are stored in the dictionaries with the region ID as the key.
+
+        The resulting well prices and upkeep prices data are set as dictionary with names of the form
+        'economics/well_prices' and 'economics/upkeep_prices_well_per_m2', respectively.
+        """
+        self.logger.info("Setting up well prices by reference year")
+
+        # Retrieve the inflation rates data
+        inflation_rates = self.dict["economics/inflation_rates"]
+        ppp_conversion_rates = self.dict["economics/ppp_conversion_rates"]
+        lcu_per_usd_conversion_rates = self.dict[
+            "economics/lcu_per_usd_conversion_rates"
+        ]
+
+        full_years_array_ppp = np.array(ppp_conversion_rates["time"], dtype=str)
+        years_index_ppp = np.isin(full_years_array_ppp, str(reference_year))
+        full_years_array_lcu = np.array(lcu_per_usd_conversion_rates["time"], dtype=str)
+        years_index_lcu = np.isin(full_years_array_lcu, str(reference_year))
+        source_conversion_rates = 1  # US ppp is 1
+        regions = list(inflation_rates["data"].keys())
+
+        electricity_rates = self.data_catalog.get_dataframe("gcam_electricity_rates")
+        # Create a dictionary to store the various types of prices with their initial reference year values
+        price_types = {
+            "WHY_10": WHY_10,
+            "WHY_20": WHY_20,
+            "WHY_30": WHY_30,
+            "electricity_cost": electricity_rates,
+        }
+
+        # Iterate over each price type and calculate the prices across years for each region
+        for price_type, initial_price in price_types.items():
+            prices_dict = {"time": list(range(start_year, end_year + 1)), "data": {}}
+
+            for _, region in self.geoms["areamaps/regions"].iterrows():
+                region_name = region["NAME_0"]
+                region_id = str(region["region_id"])
+
+                prices = pd.Series(index=range(start_year, end_year + 1))
+
+                if price_type == "electricity_cost":
+                    country_price = initial_price.loc[
+                        initial_price["Country"] == region_name, "Rate"
+                    ].values[0]
+
+                    target_conversion_rates = np.array(
+                        lcu_per_usd_conversion_rates["data"][region_id], dtype=float
+                    )[years_index_lcu]
+
+                    # Conversion is same as with ppp
+                    prices.loc[reference_year] = self.convert_price_using_ppp(
+                        country_price,
+                        source_conversion_rates,
+                        target_conversion_rates,
+                    )
+
+                else:
+                    target_conversion_rates = np.array(
+                        ppp_conversion_rates["data"][region_id], dtype=float
+                    )[years_index_ppp]
+
+                    prices.loc[reference_year] = self.convert_price_using_ppp(
+                        initial_price,
+                        source_conversion_rates,
+                        target_conversion_rates,
+                    )
+
+                # Forward calculation from the reference year
+                for year in range(reference_year + 1, end_year + 1):
+                    prices.loc[year] = (
+                        prices[year - 1]
+                        * inflation_rates["data"][region_id][
+                            inflation_rates["time"].index(str(year))
+                        ]
+                    )
+                # Backward calculation from the reference year
+                for year in range(reference_year - 1, start_year - 1, -1):
+                    prices.loc[year] = (
+                        prices[year + 1]
+                        / inflation_rates["data"][region_id][
+                            inflation_rates["time"].index(str(year + 1))
+                        ]
+                    )
+
+                prices_dict["data"][region_id] = prices.tolist()
 
             # Set the calculated prices in the appropriate dictionary
             self.set_dict(prices_dict, name=f"economics/{price_type}")
@@ -3693,6 +4143,7 @@ class GEBModel(GridModel):
         risk_aversion_standard_deviation=0.5,
         interest_rate=0.05,
         discount_rate=0.1,
+        reduce_crops=False,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -3751,6 +4202,131 @@ class GEBModel(GridModel):
             crop_calendar_per_farmer[farmer_mirca_units == mirca_unit] = (
                 crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
+
+            # Define constants for crop IDs
+            WHEAT = 0
+            MAIZE = 1
+            RICE = 2
+            BARLEY = 3
+            RYE = 4
+            MILLET = 5
+            SORGHUM = 6
+            SOYBEANS = 7
+            SUNFLOWER = 8
+            POTATOES = 9
+            CASSAVA = 10
+            SUGAR_CANE = 11
+            SUGAR_BEETS = 12
+            OIL_PALM = 13
+            RAPESEED = 14
+            GROUNDNUTS = 15
+            PULSES = 16
+            CITRUS = 17
+            DATE_PALM = 18
+            GRAPES = 19
+            COTTON = 20
+            COCOA = 21
+            COFFEE = 22
+            OTHERS_PERENNIAL = 23
+            FODDER_GRASSES = 24
+            OTHERS_ANNUAL = 25
+
+            # Manual replacement of certain crops
+            def replace_crop(
+                crop_calendar_per_farmer, crop_values, replaced_crop_values
+            ):
+                # Find the most common crop value among the given crop_values
+                most_common_value = max(
+                    (
+                        (
+                            value,
+                            np.count_nonzero(
+                                (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
+                            ),
+                        )
+                        for value in crop_values
+                    ),
+                    key=lambda x: x[1],
+                )[0]
+
+                # Determine if there are multiple cropping versions of this crop and assign it to the most common
+                new_crop_types = crop_calendar_per_farmer[
+                    (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(
+                        axis=1
+                    ),
+                    :,
+                    :,
+                ]
+                unique_rows, counts = np.unique(
+                    new_crop_types, axis=0, return_counts=True
+                )
+                max_index = np.argmax(counts)
+                crop_replacement = unique_rows[max_index]
+
+                for replaced_crop in replaced_crop_values:
+                    # Check where to be replaced crop is
+                    crop_mask = (
+                        crop_calendar_per_farmer[:, :, 0] == replaced_crop
+                    ).any(axis=1)
+                    # Replace the crop
+                    crop_calendar_per_farmer[crop_mask] = crop_replacement
+
+                return crop_calendar_per_farmer
+
+            # Reduces certain crops of the same GCAM category to the one that is most common in that region
+            if reduce_crops:
+                # Conversion based on the classification in table S1 by Yoon, J., Voisin, N., Klassert, C., Thurber, T., & Xu, W. (2024).
+                # Representing farmer irrigated crop area adaptation in a large-scale hydrological model. Hydrology and Earth
+                # System Sciences, 28(4), 899–916. https://doi.org/10.5194/hess-28-899-2024
+
+                # Replace fodder with the most common grain crop
+                most_common_check = [BARLEY, RYE, MILLET, SORGHUM]
+                replaced_value = [FODDER_GRASSES]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change the grain crops to one
+                most_common_check = [BARLEY, RYE, MILLET, SORGHUM]
+                replaced_value = [BARLEY, RYE, MILLET, SORGHUM]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change other annual / misc to one
+                most_common_check = [GROUNDNUTS, CITRUS, COCOA, COFFEE, OTHERS_ANNUAL]
+                replaced_value = [GROUNDNUTS, CITRUS, COCOA, COFFEE, OTHERS_ANNUAL]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change oils to one
+                most_common_check = [SOYBEANS, SUNFLOWER, RAPESEED]
+                replaced_value = [SOYBEANS, SUNFLOWER, RAPESEED]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change tubers to one
+                most_common_check = [POTATOES, CASSAVA]
+                replaced_value = [POTATOES, CASSAVA]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Reduce sugar crops to one
+                most_common_check = [SUGAR_CANE, SUGAR_BEETS]
+                replaced_value = [SUGAR_CANE, SUGAR_BEETS]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change perennial to one
+                most_common_check = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
+                replaced_value = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
         assert crop_calendar_per_farmer[:, :, 3].max() == 0
