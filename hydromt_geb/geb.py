@@ -445,6 +445,37 @@ class GEBModel(GridModel):
         project_past_until_year=False,
         project_future_until_year=False,
     ):
+        """
+        Processes crop price data, performing adjustments, variability determination, and interpolation/extrapolation as needed.
+
+        Parameters
+        ----------
+        crop_prices : str, int, or float
+            If 'FAO_stat', fetches crop price data from FAO statistics. Otherwise, it can be a constant value for crop prices.
+        project_past_until_year : int, optional
+            The year to project past data until. Defaults to False.
+        project_future_until_year : int, optional
+            The year to project future data until. Defaults to False.
+
+        Returns
+        -------
+        dict
+            A dictionary containing processed crop data in a time series format or as a constant value.
+
+        Raises
+        ------
+        ValueError
+            If crop_prices is neither a valid file path nor an integer/float.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Fetches and processes crop data from FAO statistics if crop_prices is 'FAO_stat'.
+        2. Adjusts the data for countries with missing values using PPP conversion rates.
+        3. Determines price variability and performs interpolation/extrapolation of crop prices.
+        4. Formats the processed data into a nested dictionary structure.
+        """
+
         if crop_prices == "FAO_stat":
             crop_data = self.data_catalog.get_dataframe("crop_price")
 
@@ -493,8 +524,8 @@ class GEBModel(GridModel):
 
             data = self.adjust_crops_for_countries(data)
 
-            prices_plus_changes = self.get_changes(data)
-            data = self.inter_and_extrapolate(prices_plus_changes)
+            prices_plus_changes = self.determine_price_variability(data)
+            data = self.inter_and_extrapolate_prices(prices_plus_changes)
 
             if (
                 project_past_until_year is not None
@@ -550,9 +581,31 @@ class GEBModel(GridModel):
         return data
 
     def adjust_crops_for_countries(self, data):
-        # If there are multiple countries and one has values for a crop and the other doesnt,
-        # full columns can be filled with NaNs, which gives problems later
-        # Assuming countries are close, we can convert the costs using the PPP
+        """
+        If there are multiple countries in one selected basin, where one country has prices for a certain crop, but the other does not,
+        this gives issues. This function adjusts crop data for those countries by filling in missing values using data from nearby regions
+        and PPP conversion rates.
+
+        Parameters
+        ----------
+        data : DataFrame
+            A DataFrame containing crop data with a 'country_name' column and indexed by 'Region_ID'. The DataFrame
+            contains crop prices for different regions.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with missing crop data filled in using PPP conversion rates from nearby regions.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Identifies columns where all values are NaN for each country and stores this information.
+        2. For each country and column with missing values, finds a country/region within that study area that has data for that column.
+        3. Uses PPP conversion rates to adjust and fill in missing values for regions without data.
+        4. Drops the 'country_name' column before returning the updated DataFrame.
+        """
+
         ppp_conversion_rate = self.dict["economics/ppp_conversion_rates"]
         columns_with_all_nans_by_country = {}
 
@@ -589,7 +642,7 @@ class GEBModel(GridModel):
                 ].index
 
                 if not regions_with_data.empty:
-                    # Select which region you want to copy data from. Change to closest
+                    # Select which region you want to copy data from. TO DO: Change to closest / most similar country
                     region_with_data = regions_with_data[0]
 
                     column_data_to_copy = data.loc[region_with_data][column]
@@ -644,7 +697,20 @@ class GEBModel(GridModel):
         price_target_LCU = (price_source_LCU / ppp_factor_source) * ppp_factor_target
         return price_target_LCU
 
-    def get_changes(self, costs):
+    def determine_price_variability(self, costs):
+        """
+        Determines the price variability of all crops in the region and adds a column that describes this variability.
+
+        Parameters
+        ----------
+        costs : DataFrame
+            A DataFrame containing the cost data for different regions. The DataFrame should be indexed by region IDs.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with a new column 'changes' that contains the average price changes for each region.
+        """
         costs["changes"] = np.nan
         # Determine the average changes of price of all crops in the region and add it to the data
         for _, region in self.geoms["areamaps/regions"].iterrows():
@@ -659,7 +725,32 @@ class GEBModel(GridModel):
 
         return costs
 
-    def inter_and_extrapolate(self, data):
+    def inter_and_extrapolate_prices(self, data):
+        """
+        Interpolates and extrapolates crop prices for different regions based on the given data and predefined crop categories.
+
+        Parameters
+        ----------
+        data : DataFrame
+            A DataFrame containing crop price data for different regions. The DataFrame should be indexed by region IDs
+            and have columns corresponding to different crops.
+
+        Returns
+        -------
+        DataFrame
+            The updated DataFrame with interpolated and extrapolated crop prices. Columns for 'others perennial' and 'others annual'
+            crops are also added.
+
+        Notes
+        -----
+        The function performs the following steps:
+        1. Extracts crop names from the internal crop data dictionary.
+        2. Defines additional crops that fall under 'others perennial' and 'others annual' categories.
+        3. Processes the data to compute average prices for these additional crops.
+        4. Filters and updates the original data with the computed averages.
+        5. Interpolates and extrapolates missing prices for each crop in each region based on the 'changes' column.
+        """
+
         # Extract the crop names from the dictionary and convert them to lowercase
         crop_names = [
             crop["name"].lower()
@@ -756,6 +847,7 @@ class GEBModel(GridModel):
         data["others perennial"] = others_perennial_column
         data["others annual"] = others_annual_column
 
+        # Interpolate and extrapolate missing prices for each crop in each region based on the 'changes' column
         for _, region in self.geoms["areamaps/regions"].iterrows():
             region_id = str(region["region_id"])
             region_data = data.loc[region_id]
@@ -4111,86 +4203,130 @@ class GEBModel(GridModel):
                 crop_calendar_per_farmer_mirca_unit[:, :, [0, 2, 3, 4]]
             )
 
-        # Manual replacement of certain crops
-        def replace_crop(crop_calendar_per_farmer, crop_values, replaced_crop_values):
-            # Find the most common crop value among the given crop_values
-            most_common_value = max(
-                (
+            # Define constants for crop IDs
+            WHEAT = 0
+            MAIZE = 1
+            RICE = 2
+            BARLEY = 3
+            RYE = 4
+            MILLET = 5
+            SORGHUM = 6
+            SOYBEANS = 7
+            SUNFLOWER = 8
+            POTATOES = 9
+            CASSAVA = 10
+            SUGAR_CANE = 11
+            SUGAR_BEETS = 12
+            OIL_PALM = 13
+            RAPESEED = 14
+            GROUNDNUTS = 15
+            PULSES = 16
+            CITRUS = 17
+            DATE_PALM = 18
+            GRAPES = 19
+            COTTON = 20
+            COCOA = 21
+            COFFEE = 22
+            OTHERS_PERENNIAL = 23
+            FODDER_GRASSES = 24
+            OTHERS_ANNUAL = 25
+
+            # Manual replacement of certain crops
+            def replace_crop(
+                crop_calendar_per_farmer, crop_values, replaced_crop_values
+            ):
+                # Find the most common crop value among the given crop_values
+                most_common_value = max(
                     (
-                        value,
-                        np.count_nonzero(
-                            (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
-                        ),
-                    )
-                    for value in crop_values
-                ),
-                key=lambda x: x[1],
-            )[0]
+                        (
+                            value,
+                            np.count_nonzero(
+                                (crop_calendar_per_farmer[:, :, 0] == value).any(axis=1)
+                            ),
+                        )
+                        for value in crop_values
+                    ),
+                    key=lambda x: x[1],
+                )[0]
 
-            # Determine if there are multiple cropping versions of this crop and assign it to the most common
-            new_crop_types = crop_calendar_per_farmer[
-                (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(axis=1),
-                :,
-                :,
-            ]
-            unique_rows, counts = np.unique(new_crop_types, axis=0, return_counts=True)
-            max_index = np.argmax(counts)
-            crop_replacement = unique_rows[max_index]
-
-            for replaced_crop in replaced_crop_values:
-                # Check where to be replaced crop is
-                crop_mask = (crop_calendar_per_farmer[:, :, 0] == replaced_crop).any(
-                    axis=1
+                # Determine if there are multiple cropping versions of this crop and assign it to the most common
+                new_crop_types = crop_calendar_per_farmer[
+                    (crop_calendar_per_farmer[:, :, 0] == most_common_value).any(
+                        axis=1
+                    ),
+                    :,
+                    :,
+                ]
+                unique_rows, counts = np.unique(
+                    new_crop_types, axis=0, return_counts=True
                 )
-                # Replace fodder
-                crop_calendar_per_farmer[crop_mask] = crop_replacement
+                max_index = np.argmax(counts)
+                crop_replacement = unique_rows[max_index]
 
-            return crop_calendar_per_farmer
+                for replaced_crop in replaced_crop_values:
+                    # Check where to be replaced crop is
+                    crop_mask = (
+                        crop_calendar_per_farmer[:, :, 0] == replaced_crop
+                    ).any(axis=1)
+                    # Replace the crop
+                    crop_calendar_per_farmer[crop_mask] = crop_replacement
 
-        if reduce_crops:
-            # Give fodder a value
-            most_common_check = [3, 4, 5, 6]
-            replaced_value = [24]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
+                return crop_calendar_per_farmer
 
-            # Change the grain crops to one
-            most_common_check = [3, 4, 5, 6]
-            replaced_value = [3, 4, 5, 6]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
-            # Change other annual / misc to one
-            most_common_check = [15, 17, 21, 22, 25]
-            replaced_value = [15, 17, 21, 22, 25]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
-            # Change oils to one
-            most_common_check = [7, 8, 14]
-            replaced_value = [7, 8, 14]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
-            # Change tubers to one
-            most_common_check = [9, 10]
-            replaced_value = [9, 10]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
-            # Reduce sugar crops to one
-            most_common_check = [11, 12]
-            replaced_value = [11, 12]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
-            # Change perennial to one
-            most_common_check = [13, 19, 18, 23]
-            replaced_value = [13, 19, 18, 23]
-            crop_calendar_per_farmer = replace_crop(
-                crop_calendar_per_farmer, most_common_check, replaced_value
-            )
+            # Reduces certain crops of the same GCAM category to the one that is most common in that region
+            if reduce_crops:
+                # Conversion based on the classification in table S1 by Yoon, J., Voisin, N., Klassert, C., Thurber, T., & Xu, W. (2024).
+                # Representing farmer irrigated crop area adaptation in a large-scale hydrological model. Hydrology and Earth
+                # System Sciences, 28(4), 899–916. https://doi.org/10.5194/hess-28-899-2024
+
+                # Replace fodder with the most common grain crop
+                most_common_check = [BARLEY, RYE, MILLET, SORGHUM]
+                replaced_value = [FODDER_GRASSES]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change the grain crops to one
+                most_common_check = [BARLEY, RYE, MILLET, SORGHUM]
+                replaced_value = [BARLEY, RYE, MILLET, SORGHUM]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change other annual / misc to one
+                most_common_check = [GROUNDNUTS, CITRUS, COCOA, COFFEE, OTHERS_ANNUAL]
+                replaced_value = [GROUNDNUTS, CITRUS, COCOA, COFFEE, OTHERS_ANNUAL]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change oils to one
+                most_common_check = [SOYBEANS, SUNFLOWER, RAPESEED]
+                replaced_value = [SOYBEANS, SUNFLOWER, RAPESEED]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change tubers to one
+                most_common_check = [POTATOES, CASSAVA]
+                replaced_value = [POTATOES, CASSAVA]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Reduce sugar crops to one
+                most_common_check = [SUGAR_CANE, SUGAR_BEETS]
+                replaced_value = [SUGAR_CANE, SUGAR_BEETS]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+                # Change perennial to one
+                most_common_check = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
+                replaced_value = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
+                crop_calendar_per_farmer = replace_crop(
+                    crop_calendar_per_farmer, most_common_check, replaced_value
+                )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
         assert crop_calendar_per_farmer[:, :, 3].max() == 0
