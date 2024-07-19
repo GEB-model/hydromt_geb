@@ -1747,6 +1747,18 @@ class GEBModel(GridModel):
             specific_yield_modflow, name=f"groundwater/modflow/specific_yield"
         )
 
+        # load aquifer classification from why_map and write it as a grid
+        why_map = self.data_catalog.get_rasterdataset(
+            "why_map",
+            bbox=self.bounds,
+            buffer=5,
+        )
+
+        why_map.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
+        why_map.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
+
+        self.set_grid(self.interpolate(why_map, "nearest"), name="groundwater/why_map")
+
     def setup_forcing(
         self,
         starttime: date,
@@ -3423,9 +3435,9 @@ class GEBModel(GridModel):
         electricity_rates = self.data_catalog.get_dataframe("gcam_electricity_rates")
         # Create a dictionary to store the various types of prices with their initial reference year values
         price_types = {
-            "WHY_10": WHY_10,
-            "WHY_20": WHY_20,
-            "WHY_30": WHY_30,
+            "why_10": WHY_10,
+            "why_20": WHY_20,
+            "why_30": WHY_30,
             "electricity_cost": electricity_rates,
         }
 
