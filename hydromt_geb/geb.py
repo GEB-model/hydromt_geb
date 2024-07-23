@@ -1747,6 +1747,42 @@ class GEBModel(GridModel):
             specific_yield_modflow, name=f"groundwater/modflow/specific_yield"
         )
 
+        # Load in the starting groundwater depth
+        region_continent = np.unique(self.geoms["areamaps/regions"]["CONTINENT"])
+        assert (
+            np.size(region_continent) == 1
+        )  # Transcontinental basins should not be possible
+
+        if (
+            np.unique(self.geoms["areamaps/regions"]["CONTINENT"])[0] == "Asia"
+            or np.unique(self.geoms["areamaps/regions"]["CONTINENT"])[0] == "Europe"
+        ):
+            region_continent = "Eurasia"
+        else:
+            region_continent = region_continent[0]
+
+        initial_depth = self.data_catalog.get_rasterdataset(
+            f"initial_groundwater_depth_{region_continent}", bbox=self.bounds, buffer=5
+        )
+        initial_depth_modflow = initial_depth.raster.reproject_like(
+            modflow_mask, method="average"
+        )
+        initial_depth_modflow = initial_depth_modflow.isel(time=0)
+        initial_depth_modflow = initial_depth_modflow["WTD"] * -1
+        self.set_MODFLOW_grid(
+            initial_depth_modflow, name="groundwater/modflow/initial_groundwater_depth"
+        )
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        initial_depth_modflow.plot()
+        output_dir = os.path.join("plot", "testing")
+        os.makedirs(output_dir, exist_ok=True)
+        file_name = "water_depth.png"
+        plt.savefig(os.path.join(output_dir, file_name), dpi=300)
+        plt.close()
         # load aquifer classification from why_map and write it as a grid
         why_map = self.data_catalog.get_rasterdataset(
             "why_map",
@@ -1756,8 +1792,9 @@ class GEBModel(GridModel):
 
         why_map.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
         why_map.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
+        why_interpolated = self.interpolate(why_map, "nearest").compute()
 
-        self.set_grid(self.interpolate(why_map, "nearest"), name="groundwater/why_map")
+        self.set_grid(why_interpolated, name="groundwater/why_map")
 
     def setup_forcing(
         self,
@@ -4286,6 +4323,7 @@ class GEBModel(GridModel):
                 return crop_calendar_per_farmer
 
             # Reduces certain crops of the same GCAM category to the one that is most common in that region
+            # First line checks which crop is most common, second denotes which crops will be replaced by the most common one
             if reduce_crops:
                 # Conversion based on the classification in table S1 by Yoon, J., Voisin, N., Klassert, C., Thurber, T., & Xu, W. (2024).
                 # Representing farmer irrigated crop area adaptation in a large-scale hydrological model. Hydrology and Earth
