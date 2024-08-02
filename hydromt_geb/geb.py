@@ -241,6 +241,10 @@ class GEBModel(GridModel):
                 f"Region for grid must of kind [basin, subbasin], kind {kind} not understood."
             )
 
+        self.logger.info(
+            f"Approximate basin size in km2: {round(geom.to_crs(epsg=3857).area.sum() / 1e6, 2)}"
+        )
+
         # Add region and grid to model
         self.set_geoms(geom, name="areamaps/region")
 
