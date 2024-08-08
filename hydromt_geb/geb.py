@@ -419,6 +419,7 @@ class GEBModel(GridModel):
     def setup_crops_from_source(
         self,
         source: Union[str, None] = "MIRCA2000",
+        crop_specifier: Union[str, None] = None,
     ):
         """
         Sets up the crops data for the model.
@@ -428,15 +429,26 @@ class GEBModel(GridModel):
         assert source in (
             "MIRCA2000",
         ), f"crop_variables_source {source} not understood, must be 'MIRCA2000'"
-
-        crop_data = {
-            "data": (
-                self.data_catalog.get_dataframe("MIRCA2000_crop_data")
-                .set_index("id")
-                .to_dict(orient="index")
-            ),
-            "type": "MIRCA2000",
-        }
+        if crop_specifier is None:
+            crop_data = {
+                "data": (
+                    self.data_catalog.get_dataframe("MIRCA2000_crop_data")
+                    .set_index("id")
+                    .to_dict(orient="index")
+                ),
+                "type": "MIRCA2000",
+            }
+        else:
+            crop_data = {
+                "data": (
+                    self.data_catalog.get_dataframe(
+                        f"MIRCA2000_crop_data_{crop_specifier}"
+                    )
+                    .set_index("id")
+                    .to_dict(orient="index")
+                ),
+                "type": "MIRCA2000",
+            }
         self.set_dict(crop_data, name="crops/crop_data")
 
     def process_crop_data(
@@ -560,6 +572,10 @@ class GEBModel(GridModel):
                 # Ensuring all crops are present according to the crop_data keys
                 for crop_id, crop_info in crop_data.items():
                     crop_name = crop_info["name"]
+
+                    if crop_name.endswith("_flood") or crop_name.endswith("_drought"):
+                        crop_name = crop_name.rsplit("_", 1)[0]
+
                     if crop_name in region_data.columns:
                         region_dict[str(crop_id)] = region_data[crop_name].to_list()
                     else:
@@ -968,26 +984,26 @@ class GEBModel(GridModel):
 
         return costs
 
-    def setup_cultivation_costs(
-        self,
-        cultivation_costs: Optional[Union[str, int, float]] = 0,
-        project_future_until_year: Optional[int] = False,
-    ):
-        """
-        Sets up the cultivation costs for the model.
+    # def setup_cultivation_costs(
+    #     self,
+    #     cultivation_costs: Optional[Union[str, int, float]] = 0,
+    #     project_future_until_year: Optional[int] = False,
+    # ):
+    #     """
+    #     Sets up the cultivation costs for the model.
 
-        Parameters
-        ----------
-        cultivation_costs : str or int or float, optional
-            The file path or integer of cultivation costs. If a file path is provided, the file is loaded and parsed as JSON.
-            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
-            IDs and their cultivation costs. If .
-        """
-        self.logger.info(f"Preparing cultivation costs")
-        cultivation_costs = self.process_crop_data(
-            cultivation_costs, project_future_until_year=project_future_until_year
-        )
-        self.set_dict(cultivation_costs, name="crops/cultivation_costs")
+    #     Parameters
+    #     ----------
+    #     cultivation_costs : str or int or float, optional
+    #         The file path or integer of cultivation costs. If a file path is provided, the file is loaded and parsed as JSON.
+    #         The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+    #         IDs and their cultivation costs. If .
+    #     """
+    #     self.logger.info(f"Preparing cultivation costs")
+    #     cultivation_costs = self.process_crop_data(
+    #         cultivation_costs, project_future_until_year=project_future_until_year
+    #     )
+    #     self.set_dict(cultivation_costs, name="crops/cultivation_costs")
 
     def setup_crop_prices(
         self,
@@ -2854,6 +2870,7 @@ class GEBModel(GridModel):
         self,
         calibration_period_start: date = date(1981, 1, 1),
         calibration_period_end: date = date(2010, 1, 1),
+        window: int = 6,
     ):
         """
         Sets up the Standardized Precipitation Evapotranspiration Index (SPEI). Note that
@@ -2913,7 +2930,7 @@ class GEBModel(GridModel):
             cal_start=calibration_period_start,
             cal_end=calibration_period_end,
             freq="MS",
-            window=1,
+            window=window,
             dist="gamma",
             method="APP",
             fitkwargs={
@@ -4193,6 +4210,7 @@ class GEBModel(GridModel):
         interest_rate=0.05,
         discount_rate=0.1,
         reduce_crops=False,
+        replace_base=False,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -4279,6 +4297,16 @@ class GEBModel(GridModel):
             OTHERS_PERENNIAL = 23
             FODDER_GRASSES = 24
             OTHERS_ANNUAL = 25
+            WHEAT_DROUGHT = 26
+            WHEAT_FLOOD = 27
+            MAIZE_DROUGHT = 28
+            MAIZE_FLOOD = 29
+            RICE_DROUGHT = 30
+            RICE_FLOOD = 31
+            SOYBEANS_DROUGHT = 32
+            SOYBEANS_FLOOD = 33
+            POTATOES_DROUGHT = 34
+            POTATOES_FLOOD = 35
 
             # Manual replacement of certain crops
             def replace_crop(
@@ -4319,6 +4347,39 @@ class GEBModel(GridModel):
                     ).any(axis=1)
                     # Replace the crop
                     crop_calendar_per_farmer[crop_mask] = crop_replacement
+
+                return crop_calendar_per_farmer
+
+            def insert_other_variant_crop(
+                crop_calendar_per_farmer, base_crops, resistant_crops
+            ):
+                # find crop rotation mask
+                base_crop_rotation_mask = (
+                    crop_calendar_per_farmer[:, :, 0] == base_crops
+                ).any(axis=1)
+
+                # Find the indices of the crops to be replaced
+                indices = np.where(base_crop_rotation_mask)[0]
+
+                # Shuffle the indices to randomize the selection
+                np.random.shuffle(indices)
+
+                # Determine the number of crops for each category (stay same, first resistant, last resistant)
+                n = len(indices)
+                n_same = n // 3
+                n_first_resistant = (n // 3) + (
+                    n % 3 > 0
+                )  # Ensuring we account for rounding issues
+                n_last_resistant = (n // 3) + (n % 3 > 1)
+
+                # Assign the new values
+                crop_calendar_per_farmer[indices[:n_same], 0, 0] = base_crops
+                crop_calendar_per_farmer[
+                    indices[n_same : n_same + n_first_resistant], 0, 0
+                ] = resistant_crops[0]
+                crop_calendar_per_farmer[
+                    indices[n_same + n_first_resistant :], 0, 0
+                ] = resistant_crops[1]
 
                 return crop_calendar_per_farmer
 
@@ -4376,6 +4437,42 @@ class GEBModel(GridModel):
                 replaced_value = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
                 crop_calendar_per_farmer = replace_crop(
                     crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+            if replace_base:
+                base_crops = [WHEAT]
+                resistant_crops = [WHEAT_DROUGHT, WHEAT_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [MAIZE]
+                resistant_crops = [MAIZE_DROUGHT, MAIZE_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [RICE]
+                resistant_crops = [RICE_DROUGHT, RICE_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [SOYBEANS]
+                resistant_crops = [SOYBEANS_DROUGHT, SOYBEANS_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [POTATOES]
+                resistant_crops = [POTATOES_DROUGHT, POTATOES_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
                 )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
