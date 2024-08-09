@@ -1613,7 +1613,7 @@ class GEBModel(GridModel):
 
         # load hydraulic conductivity
         hydraulic_conductivity = self.data_catalog.get_rasterdataset(
-            "hydraulic_conductivity_pcrglobwb",
+            "hydraulic_conductivity_globgm",
             bbox=self.bounds,
             buffer=0,
         ).rename({"lon": "x", "lat": "y"})
@@ -1624,7 +1624,7 @@ class GEBModel(GridModel):
 
         # load specific yield
         specific_yield = self.data_catalog.get_rasterdataset(
-            "specific_yield_aquifer_pcrglobwb",
+            "specific_yield_aquifer_globgm",
             bbox=self.bounds,
             buffer=0,
         ).rename({"lon": "x", "lat": "y"})
@@ -1632,6 +1632,50 @@ class GEBModel(GridModel):
         assert specific_yield.shape == self.grid.raster.shape
 
         self.set_grid(specific_yield, name="groundwater/specific_yield")
+
+        # load initial water table depth
+        water_table_depth = self.data_catalog.get_rasterdataset(
+            "water_table_depth_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        )
+        water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
+        assert water_table_depth.shape == self.grid.raster.shape
+
+        self.set_grid(water_table_depth, name="groundwater/initial_water_table_depth")
+
+        # load recession coefficient
+        recession_coefficient = self.data_catalog.get_rasterdataset(
+            "recession_coefficient_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        recession_coefficient = self.snap_to_grid(recession_coefficient, self.grid)
+        assert recession_coefficient.shape == self.grid.raster.shape
+
+        self.set_grid(recession_coefficient, name="groundwater/recession_coefficient")
+
+        # load bottom layer
+        confined_layer = self.data_catalog.get_rasterdataset(
+            "thickness_confined_layer_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        confined_layer = self.snap_to_grid(confined_layer, self.grid)
+        assert confined_layer.shape == self.grid.raster.shape
+
+        self.set_grid(confined_layer, name="groundwater/confined_layer_thickness")
+
+        # load total thickness
+        total_thickness = self.data_catalog.get_rasterdataset(
+            "total_groundwater_thickness_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        total_thickness = self.snap_to_grid(total_thickness, self.grid)
+        assert total_thickness.shape == self.grid.raster.shape
+
+        self.set_grid(total_thickness, name="groundwater/total_thickness")
 
     def setup_forcing(
         self,
