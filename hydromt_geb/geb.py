@@ -62,9 +62,6 @@ from isimip_client.client import ISIMIPClient
 from .workflows import (
     repeat_grid,
     clip_with_grid,
-    get_modflow_transform_and_shape,
-    create_indices,
-    create_modflow_basin,
     pad_xy,
     create_farms,
     get_farm_distribution,
@@ -115,7 +112,6 @@ class GEBModel(GridModel):
         self._subgrid = None
         self._region_subgrid = None
         self._MERIT_grid = None
-        self._MODFLOW_grid = None
 
         self.table = {}
         self.binary = {}
@@ -131,7 +127,6 @@ class GEBModel(GridModel):
             "subgrid": {},
             "region_subgrid": {},
             "MERIT_grid": {},
-            "MODFLOW_grid": {},
         }
         self.is_updated = {
             "forcing": {},
@@ -143,7 +138,6 @@ class GEBModel(GridModel):
             "subgrid": {},
             "region_subgrid": {},
             "MERIT_grid": {},
-            "MODFLOW_grid": {},
         }
 
     @property
@@ -172,15 +166,6 @@ class GEBModel(GridModel):
             if self._read:
                 self.read_MERIT_grid()
         return self._MERIT_grid
-
-    @property
-    def MODFLOW_grid(self):
-        """Model static gridded data as xarray.Dataset."""
-        if self._MODFLOW_grid is None:
-            self._MODFLOW_grid = xr.Dataset()
-            if self._read:
-                self.read_MODFLOW_grid()
-        return self._MODFLOW_grid
 
     def setup_grid(
         self,
@@ -240,6 +225,10 @@ class GEBModel(GridModel):
             raise ValueError(
                 f"Region for grid must of kind [basin, subbasin], kind {kind} not understood."
             )
+
+        self.logger.info(
+            f"Approximate basin size in km2: {round(geom.to_crs(epsg=3857).area.sum() / 1e6, 2)}"
+        )
 
         # Add region and grid to model
         self.set_geoms(geom, name="areamaps/region")
@@ -1632,136 +1621,77 @@ class GEBModel(GridModel):
             endtime,
         )
 
-    def setup_modflow(self, resolution: float):
+    def setup_modflow(self):
         """
         Sets up the MODFLOW grid for GEB.
-
-        Parameters
-        ----------
-        resolution : float
-            The resolution of the model grid in meters.
-
-        Notes
-        -----
-        This method sets up the MODFLOW grid for GEB. These grids don't match because one is based on
-        a geographic coordinate reference system and the other is based on a projected coordinate reference system. Therefore,
-        this function creates a projected MODFLOW grid and then calculates the intersection between the model grid and the MODFLOW
-        grid.
-
-        It first retrieves the MODFLOW mask from the `get_modflow_transform_and_shape` function, which calculates the affine
-        transform and shape of the MODFLOW grid based on the resolution and EPSG code of the model grid. The MODFLOW mask is
-        created using the `full_from_transform` method of the `raster` object, which creates a binary grid with the same affine
-        transform and shape as the MODFLOW grid.
-
-        The method then creates an intersection between the model grid and the MODFLOW grid using the `create_indices`
-        function. The resulting indices are used to match cells between the model grid and the MODFLOW grid. The indices
-        are saved for use in the model.
-
-        Finally, the elevation data for the MODFLOW grid is retrieved from the MERIT dataset and reprojected to the MODFLOW
-        grid using the `reproject_like` method of the `raster` object. The resulting elevation grid is set as a grid in the
-        model with the name 'groundwater/modflow/modflow_elevation'.
         """
         self.logger.info("Setting up MODFLOW")
 
-        center_longitude = self.bounds[2] - (self.bounds[2] - self.bounds[0]) / 2
-        center_latitude = self.bounds[3] - (self.bounds[3] - self.bounds[1]) / 2
-
-        utm_crs = CRS.from_dict(
-            {
-                "proj": "utm",
-                "ellps": "WGS84",
-                "lat_0": center_latitude,
-                "lon_0": center_longitude,
-                "zone": int((center_longitude + 180) / 6) + 1,
-            }
-        )
-
-        modflow_epsg = utm_crs.to_authority()[1]
-
-        modflow_affine, MODFLOW_shape = get_modflow_transform_and_shape(
-            self.grid["landsurface/topo/elevation"], 4326, modflow_epsg, resolution
-        )
-        modflow_mask = hydromt.raster.full_from_transform(
-            modflow_affine,
-            MODFLOW_shape,
-            nodata=0,
-            dtype=np.int8,
-            name=f"groundwater/modflow/modflow_mask",
-            crs=modflow_epsg,
-            lazy=True,
-        )
-
-        intersection = create_indices(
-            self.grid["landsurface/topo/elevation"].raster.transform,
-            self.grid["landsurface/topo/elevation"].raster.shape,
-            4326,
-            modflow_affine,
-            MODFLOW_shape,
-            modflow_epsg,
-        )
-
-        self.set_binary(
-            intersection["y_modflow"], name=f"groundwater/modflow/y_modflow"
-        )
-        self.set_binary(
-            intersection["x_modflow"], name=f"groundwater/modflow/x_modflow"
-        )
-        self.set_binary(intersection["y_hydro"], name=f"groundwater/modflow/y_hydro")
-        self.set_binary(intersection["x_hydro"], name=f"groundwater/modflow/x_hydro")
-        self.set_binary(intersection["area"], name=f"groundwater/modflow/area")
-
-        modflow_mask.data = create_modflow_basin(
-            self.grid["landsurface/topo/elevation"], intersection, MODFLOW_shape
-        )
-        self.set_MODFLOW_grid(modflow_mask, name=f"groundwater/modflow/modflow_mask")
-
-        # load MERIT
-        MERIT = self.data_catalog.get_rasterdataset(
-            "merit_hydro",
-            variables=["elv"],
-            bbox=self.bounds,
-            buffer=50,
-            provider=self.data_provider,
-        )
-        MERIT_x_step = MERIT.coords["x"][1] - MERIT.coords["x"][0]
-        MERIT_y_step = MERIT.coords["y"][0] - MERIT.coords["y"][1]
-        MERIT = MERIT.assign_coords(
-            x=MERIT.coords["x"] + MERIT_x_step / 2,
-            y=MERIT.coords["y"] + MERIT_y_step / 2,
-        )
-        elevation_modflow = MERIT.raster.reproject_like(modflow_mask, method="average")
-
-        self.set_MODFLOW_grid(
-            elevation_modflow, name=f"groundwater/modflow/modflow_elevation"
-        )
-
         # load hydraulic conductivity
         hydraulic_conductivity = self.data_catalog.get_rasterdataset(
-            "hydraulic_conductivity_pcrglobwb",
+            "hydraulic_conductivity_globgm",
             bbox=self.bounds,
-            buffer=5,
-        )
-        hydraulic_conductivity_modflow = hydraulic_conductivity.raster.reproject_like(
-            modflow_mask, method="average"
-        )
-        self.set_MODFLOW_grid(
-            hydraulic_conductivity_modflow,
-            name=f"groundwater/modflow/hydraulic_conductivity",
-        )
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        hydraulic_conductivity = self.snap_to_grid(hydraulic_conductivity, self.grid)
+        assert hydraulic_conductivity.shape == self.grid.raster.shape
+
+        self.set_grid(hydraulic_conductivity, name="groundwater/hydraulic_conductivity")
 
         # load specific yield
         specific_yield = self.data_catalog.get_rasterdataset(
-            "specific_yield_aquifer_pcrglobwb",
+            "specific_yield_aquifer_globgm",
             bbox=self.bounds,
-            buffer=5,
-        )
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        specific_yield = self.snap_to_grid(specific_yield, self.grid)
+        assert specific_yield.shape == self.grid.raster.shape
 
-        specific_yield_modflow = specific_yield.raster.reproject_like(
-            modflow_mask, method="average"
+        self.set_grid(specific_yield, name="groundwater/specific_yield")
+
+        # load initial water table depth
+        water_table_depth = self.data_catalog.get_rasterdataset(
+            "water_table_depth_globgm",
+            bbox=self.bounds,
+            buffer=0,
         )
-        self.set_MODFLOW_grid(
-            specific_yield_modflow, name=f"groundwater/modflow/specific_yield"
-        )
+        water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
+        assert water_table_depth.shape == self.grid.raster.shape
+
+        self.set_grid(water_table_depth, name="groundwater/initial_water_table_depth")
+
+        # load recession coefficient
+        recession_coefficient = self.data_catalog.get_rasterdataset(
+            "recession_coefficient_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        recession_coefficient = self.snap_to_grid(recession_coefficient, self.grid)
+        assert recession_coefficient.shape == self.grid.raster.shape
+
+        self.set_grid(recession_coefficient, name="groundwater/recession_coefficient")
+
+        # load bottom layer
+        confined_layer = self.data_catalog.get_rasterdataset(
+            "thickness_confined_layer_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        confined_layer = self.snap_to_grid(confined_layer, self.grid)
+        assert confined_layer.shape == self.grid.raster.shape
+
+        self.set_grid(confined_layer, name="groundwater/confined_layer_thickness")
+
+        # load total thickness
+        total_thickness = self.data_catalog.get_rasterdataset(
+            "total_groundwater_thickness_globgm",
+            bbox=self.bounds,
+            buffer=0,
+        ).rename({"lon": "x", "lat": "y"})
+        total_thickness = self.snap_to_grid(total_thickness, self.grid)
+        assert total_thickness.shape == self.grid.raster.shape
+
+        self.set_grid(total_thickness, name="groundwater/total_thickness")
 
         # Load in the starting groundwater depth
         region_continent = np.unique(self.geoms["areamaps/regions"]["CONTINENT"])
@@ -2154,10 +2084,22 @@ class GEBModel(GridModel):
 
         ds = xr.open_mfdataset(
             files,
-            chunks={"time": 1, "latitude": XY_CHUNKSIZE, "longitude": XY_CHUNKSIZE},
+            chunks={
+                "valid_time": 1,
+                "latitude": XY_CHUNKSIZE,
+                "longitude": XY_CHUNKSIZE,
+            },
             compat="equals",  # all values and dimensions must be the same,
             combine_attrs="drop_conflicts",  # drop conflicting attributes
         ).rio.set_crs(4326)
+
+        assert "valid_time" in ds.dims
+        assert "latitude" in ds.dims
+        assert "longitude" in ds.dims
+
+        # rename valid_time to time
+        ds = ds.rename({"valid_time": "time"})
+
         # remove first time step.
         # This is an accumulation from the previous day and thus cannot be calculated
         ds = ds.isel(time=slice(1, None))
@@ -5192,17 +5134,6 @@ class GEBModel(GridModel):
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
 
-    def write_MODFLOW_grid(self):
-        self._assert_write_mode
-        for var, grid in self.MODFLOW_grid.items():
-            if self.is_updated["MODFLOW_grid"][var]["updated"]:
-                self.logger.info(f"Writing {var}")
-                self.model_structure["MODFLOW_grid"][var] = var + ".tif"
-                self.is_updated["MODFLOW_grid"][var]["filename"] = var + ".tif"
-                fp = Path(self.root, var + ".tif")
-                fp.parent.mkdir(parents=True, exist_ok=True)
-                grid.rio.to_raster(fp)
-
     def write_forcing_to_netcdf(
         self,
         var,
@@ -5418,7 +5349,6 @@ class GEBModel(GridModel):
         self.write_subgrid()
         self.write_region_subgrid()
         self.write_MERIT_grid()
-        self.write_MODFLOW_grid()
 
         self.write_forcing()
 
@@ -5496,11 +5426,6 @@ class GEBModel(GridModel):
             data = self.read_netcdf(fn, name=name)
             self.set_MERIT_grid(data, name=name, update=False)
 
-    def read_MODFLOW_grid(self) -> None:
-        for name, fn in self.model_structure["MODFLOW_grid"].items():
-            data = self.read_netcdf(fn, name=name)
-            self.set_MODFLOW_grid(data, name=name, update=False)
-
     def read_forcing(self) -> None:
         self.read_model_structure()
         for name, fn in self.model_structure["forcing"].items():
@@ -5528,7 +5453,6 @@ class GEBModel(GridModel):
         self.read_subgrid()
         self.read_region_subgrid()
         self.read_MERIT_grid()
-        self.read_MODFLOW_grid()
 
         self.read_forcing()
 
@@ -5634,12 +5558,6 @@ class GEBModel(GridModel):
     ) -> None:
         self.is_updated["MERIT_grid"][name] = {"updated": update}
         self._set_grid(self.MERIT_grid, data, name=name)
-
-    def set_MODFLOW_grid(
-        self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
-    ) -> None:
-        self.is_updated["MODFLOW_grid"][name] = {"updated": update}
-        self._set_grid(self.MODFLOW_grid, data, name=name)
 
     def set_alternate_root(self, root, mode):
         relative_path = Path(os.path.relpath(Path(self.root), root.resolve()))
