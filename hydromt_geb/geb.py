@@ -16,7 +16,6 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
-from pyproj import CRS
 
 import numpy as np
 import pandas as pd
@@ -1302,9 +1301,15 @@ class GEBModel(GridModel):
         """
 
         self.logger.info("Setting up soil parameters")
-        hydraulic_conductivity, lambda_, thetas, thetafc, thetawp, thetar = (
-            load_soilgrids(self.data_catalog, self.grid, self.region)
-        )
+        (
+            hydraulic_conductivity,
+            lambda_,
+            thetas,
+            thetafc,
+            thetawp,
+            thetar,
+            soil_layer_height,
+        ) = load_soilgrids(self.data_catalog, self.grid, self.region)
 
         self.set_grid(hydraulic_conductivity, name="soil/ksat")
         self.set_grid(lambda_, name="soil/lambda")
@@ -1312,6 +1317,7 @@ class GEBModel(GridModel):
         self.set_grid(thetafc, name="soil/thetafc")
         self.set_grid(thetawp, name="soil/thetawp")
         self.set_grid(thetar, name="soil/thetar")
+        self.set_grid(soil_layer_height, name="soil/soil_layer_height")
 
         soil_ds = self.data_catalog.get_rasterdataset(
             "cwatm_soil_5min", bbox=self.bounds, buffer=10

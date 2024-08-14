@@ -1,6 +1,4 @@
 # --------------------------------------------------------------------------------
-# Author: Jens de Bruijn
-#
 # Description:
 # This file contains code that has been adapted from an original source available
 # in a public repository under the GNU General Public License. The original code
@@ -530,4 +528,22 @@ def load_soilgrids(data_catalog, grid, region):
     lambda_ = np.exp(lambda_log)
     lambda_ = interpolate_soil_layers(lambda_)
 
-    return hydraulic_conductivity, lambda_, thetas, thetafc, thetawp, thetar
+    soil_layer_height = xr.DataArray(
+        np.zeros(hydraulic_conductivity.shape, dtype=np.float32),
+        dims=hydraulic_conductivity.dims,
+        coords=hydraulic_conductivity.coords,
+    )
+    for layer, height in enumerate((0.05, 0.10, 0.15, 0.30, 0.40, 1.00)):
+        soil_layer_height[layer] = height
+
+    assert (soil_layer_height.sum(axis=0) == 2.0).all()
+
+    return (
+        hydraulic_conductivity,
+        lambda_,
+        thetas,
+        thetafc,
+        thetawp,
+        thetar,
+        soil_layer_height,
+    )
