@@ -3,8 +3,7 @@
 # in a public repository under the GNU General Public License. The original code
 # has been modified to fit the specific needs of this project.
 #
-# Original Source:
-# Repository: https://github.com/Deltares/hydromt_wflow/
+# Original source repository: https://github.com/Deltares/hydromt_wflow/
 # Files:
 # - https://github.com/Deltares/hydromt_wflow/blob/main/hydromt_wflow/workflows/ptf.py
 # - https://github.com/Deltares/hydromt_wflow/blob/main/hydromt_wflow/workflows/soilgrids.py
@@ -432,6 +431,13 @@ def load_soilgrids(data_catalog, grid, region):
     ds = xr.merge(ds, join="exact")
     ds = ds.raster.mask_nodata()  # set all nodata values to nan
 
+    total = ds["sand"] + ds["clay"] + ds["silt"]
+    assert total.min() >= 99.8
+    assert total.max() <= 100.2
+
+    assert ds["phh2o"].min() >= 4
+    assert ds["phh2o"].max() <= 9
+
     # the top 30 cm is considered as top soil (https://www.fao.org/uploads/media/Harm-World-Soil-DBv7cv_1.pdf)
     is_top_soil = np.zeros_like(ds["sand"], dtype=bool)
     is_top_soil[0:3] = True
@@ -520,12 +526,18 @@ def load_soilgrids(data_catalog, grid, region):
     hydraulic_conductivity = np.exp(hydraulic_conductivity_log)
     hydraulic_conductivity = interpolate_soil_layers(hydraulic_conductivity)
 
+    assert hydraulic_conductivity.min() >= 1e-7
+    assert hydraulic_conductivity.max() <= 1
+
     # same for pore_size_index lambda
     lambda_ = get_pore_size_index(ds)
     lambda_log = np.log(lambda_)
     lambda_log = lambda_log.raster.reproject_like(grid, method="average")
     lambda_ = np.exp(lambda_log)
     lambda_ = interpolate_soil_layers(lambda_)
+
+    assert lambda_.min() >= 0.1
+    assert lambda_.max() <= 1
 
     soil_layer_height = xr.DataArray(
         np.zeros(hydraulic_conductivity.shape, dtype=np.float32),
