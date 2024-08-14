@@ -1323,10 +1323,6 @@ class GEBModel(GridModel):
             "cwatm_soil_5min", bbox=self.bounds, buffer=10
         )
 
-        ds = soil_ds["percolationImp"]
-        self.set_grid(
-            self.interpolate(ds, interpolation_method), name=f"soil/percolation_impeded"
-        )
         ds = soil_ds["cropgrp"]
         self.set_grid(self.interpolate(ds, interpolation_method), name=f"soil/cropgrp")
 
