@@ -446,6 +446,14 @@ def load_soilgrids(data_catalog, grid, region):
     )
     ds["is_top_soil"] = is_top_soil
 
+    depth_to_bedrock = data_catalog.get_rasterdataset(
+        "soilgrids_2017_BDTICM", geom=region
+    )
+    depth_to_bedrock = depth_to_bedrock.raster.mask_nodata()
+    depth_to_bedrock = depth_to_bedrock.raster.reproject_like(
+        grid, method="bilinear"
+    ).raster.interpolate_na("nearest")
+
     ds["thetas"] = xr.apply_ufunc(
         thetas_toth,
         ds["phh2o"],
@@ -548,6 +556,10 @@ def load_soilgrids(data_catalog, grid, region):
         soil_layer_height[layer] = height
 
     assert (soil_layer_height.sum(axis=0) == 2.0).all()
+    if (soil_layer_height.sum(axis=0) > depth_to_bedrock).any():
+        raise ValueError(
+            "Soil layer height exceeds depth to bedrock, must be implemented"
+        )
 
     return (
         hydraulic_conductivity,
