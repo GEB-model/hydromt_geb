@@ -68,8 +68,8 @@ from .workflows import (
     calculate_cell_area,
     fetch_and_save,
     bounds_are_within,
+    load_soilgrids,
 )
-from .workflows.general import project_to_future
 from .workflows.farmers import get_farm_locations
 from .workflows.population import generate_locations
 from .workflows.crop_calendars import parse_MIRCA2000_crop_calendar
@@ -1300,17 +1300,22 @@ class GEBModel(GridModel):
         form 'soil/storage_depth{soil_layer}'. The percolation impeded and crop group data are set as attributes of the model
         with names 'soil/percolation_impeded' and 'soil/cropgrp', respectively.
         """
+
         self.logger.info("Setting up soil parameters")
+        hydraulic_conductivity, lambda_, thetas, thetafc, thetawp, thetar = (
+            load_soilgrids(self.data_catalog, self.grid, self.region)
+        )
+
+        self.set_grid(hydraulic_conductivity, name="soil/ksat")
+        self.set_grid(lambda_, name="soil/lambda")
+        self.set_grid(thetas, name="soil/thetas")
+        self.set_grid(thetafc, name="soil/thetafc")
+        self.set_grid(thetawp, name="soil/thetawp")
+        self.set_grid(thetar, name="soil/thetar")
+
         soil_ds = self.data_catalog.get_rasterdataset(
             "cwatm_soil_5min", bbox=self.bounds, buffer=10
         )
-        for parameter in ("alpha", "ksat", "lambda", "thetar", "thetas"):
-            for soil_layer in range(1, 4):
-                ds = soil_ds[f"{parameter}{soil_layer}_5min"]
-                self.set_grid(
-                    self.interpolate(ds, interpolation_method),
-                    name=f"soil/{parameter}{soil_layer}",
-                )
 
         ds = soil_ds["percolationImp"]
         self.set_grid(
