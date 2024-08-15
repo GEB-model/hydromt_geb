@@ -2778,13 +2778,19 @@ class GEBModel(GridModel):
         assert np.array_equal(
             self.forcing["climate/pr"].y, self.forcing["climate/tasmax"].y
         )
-        assert self.forcing[
+        if not self.forcing[
             "climate/pr"
         ].time.min().dt.date <= calibration_period_start and self.forcing[
             "climate/pr"
         ].time.max().dt.date >= calibration_period_end - timedelta(
             days=1
-        ), "water data does not cover the entire calibration period"
+        ):
+            forcing_start_date = self.forcing["climate/pr"].time.min().dt.date.item()
+            forcing_end_date = self.forcing["climate/pr"].time.max().dt.date.item()
+            raise AssertionError(
+                f"water data does not cover the entire calibration period, forcing data covers from {forcing_start_date} to {forcing_end_date}, "
+                f"while requested calibration period is from {calibration_period_start} to {calibration_period_end}"
+            )
 
         pet = xci.potential_evapotranspiration(
             tasmin=self.forcing["climate/tasmin"],
