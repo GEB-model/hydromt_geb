@@ -558,13 +558,15 @@ class GEBModel(GridModel):
 
             data = formatted_data.copy()
 
-        elif isinstance(data, (int, float)):
+        elif isinstance(crop_prices, (int, float)):
             data = {
                 "type": "constant",
-                "data": data,
+                "data": crop_prices,
             }
         else:
-            raise ValueError(f"must be a file path or an integer, got {type(data)}")
+            raise ValueError(
+                f"must be a file path or an integer, got {type(crop_prices)}"
+            )
 
         return data
 
@@ -1000,7 +1002,6 @@ class GEBModel(GridModel):
             project_past_until_year=project_past_until_year,
         )
         self.set_dict(crop_prices, name="crops/crop_prices")
-        self.set_dict(crop_prices, name="crops/cultivation_costs")
 
     def setup_mannings(self) -> None:
         """
@@ -1500,11 +1501,22 @@ class GEBModel(GridModel):
                 self.grid.raster.coords,
                 nodata=-1,
                 dtype=np.int32,
-                name="areamaps/sub_grid_mask",
+                name="routing/lakesreservoirs/command_areas",
                 crs=self.grid.raster.crs,
                 lazy=True,
             )
+            subcommand_areas = hydromt.raster.full(
+                self.subgrid.raster.coords,
+                nodata=-1,
+                dtype=np.int32,
+                name="routing/lakesreservoirs/subcommand_areas",
+                crs=self.subgrid.raster.crs,
+                lazy=True,
+            )
             self.set_grid(command_areas, name="routing/lakesreservoirs/command_areas")
+            self.set_subgrid(
+                subcommand_areas, name="routing/lakesreservoirs/subcommand_areas"
+            )
             waterbodies["relative_area_in_region"] = 1
 
         if custom_reservoir_capacity:
@@ -1553,13 +1565,21 @@ class GEBModel(GridModel):
             )
             if accessor:
                 ds_future = getattr(ds_future, accessor)
+            ds_future = ds_future.sel(
+                time=slice(ds_historic.time[-1] + 1, ds_future.time[-1])
+            )
+
             ds = xr.concat([ds_historic, ds_future], dim="time")
+            # assert dataset in monotonicically increasing
+            assert (ds.time.diff("time") == 1).all(), "not all years are there"
+
             ds["time"] = pd.date_range(
                 start=datetime(1901, 1, 1)
-                + relativedelta(months=int(ds.time[0].data.item())),
+                + relativedelta(years=int(ds.time[0].data.item())),
                 periods=len(ds.time),
                 freq="AS",
             )
+
             assert (ds.time.dt.year.diff("time") == 1).all(), "not all years are there"
             ds = ds.sel(time=slice(starttime, endtime))
             ds.name = name
@@ -4372,7 +4392,6 @@ class GEBModel(GridModel):
         return None
 
     def setup_assets(self, feature_types):
-        import osm_flex.download
         import osm_flex.extract
 
         if isinstance(feature_types, str):
@@ -4417,7 +4436,7 @@ class GEBModel(GridModel):
                     features,
                     self.geoms["areamaps/region"],
                     how="inner",
-                    op="intersects",
+                    predicate="intersects",
                 )
                 all_features[feature_type].append(features)
 
