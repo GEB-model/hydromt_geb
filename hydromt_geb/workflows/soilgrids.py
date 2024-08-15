@@ -265,7 +265,7 @@ def thetar_brakensiek(sand, clay, thetas):
     )
 
 
-def thetas_toth(ph, bdod, clay, silt, is_top_soil):
+def thetas_toth(soc, bdod, clay, silt, is_top_soil):
     """
     Determine saturated water content [m3/m3].
 
@@ -276,8 +276,6 @@ def thetas_toth(ph, bdod, clay, silt, is_top_soil):
 
     Parameters
     ----------
-    ph: float
-        pH [-].
     bdod : float
         bulk density [g /cm3].
     sand: float
@@ -293,21 +291,39 @@ def thetas_toth(ph, bdod, clay, silt, is_top_soil):
         saturated water content [cm3/cm3].
 
     """
+
+    # this is an alternative version of the thetas_toth function
+    # which also requires the ph value as input
+    # thetas = (
+    #     0.5653
+    #     - 0.07918 * bdod**2
+    #     + 0.001671 * ph**2
+    #     + 0.0005438 * clay
+    #     + 0.001065 * silt
+    #     + 0.06836 * is_top_soil
+    #     - 0.00001382 * clay * ph**2
+    #     - 0.00001270 * silt * clay
+    #     - 0.0004784 * bdod**2 * ph**2
+    #     - 0.0002836 * silt * bdod**2
+    #     + 0.0004158 * clay * bdod**2
+    #     - 0.01686 * is_top_soil * bdod**2
+    #     - 0.0003541 * silt
+    #     - 0.0003152 * is_top_soil * ph**2
+    # )
+
     thetas = (
-        0.5653
-        - 0.07918 * bdod**2
-        + 0.001671 * ph**2
-        + 0.0005438 * clay
-        + 0.001065 * silt
-        + 0.06836 * is_top_soil
-        - 0.00001382 * clay * ph**2
-        - 0.00001270 * silt * clay
-        - 0.0004784 * bdod**2 * ph**2
-        - 0.0002836 * silt * bdod**2
-        + 0.0004158 * clay * bdod**2
-        - 0.01686 * is_top_soil * bdod**2
-        - 0.0003541 * silt
-        - 0.0003152 * is_top_soil * ph**2
+        0.6819
+        - 0.06480 * (1 / (soc + 1))
+        - 0.11900 * bdod**2
+        - 0.02668 * is_top_soil
+        + 0.001489 * clay
+        + 0.0008031 * silt
+        + 0.02321 * (1 / (soc + 1)) * bdod**2
+        + 0.01908 * bdod**2 * is_top_soil
+        - 0.0011090 * clay * is_top_soil
+        - 0.00002315 * silt * clay
+        - 0.0001197 * silt * bdod**2
+        - 0.0001068 * clay * bdod**2
     )
 
     return thetas
@@ -397,10 +413,11 @@ def get_bubble_pressure(clay, sand, thetas):
         - 0.61745089 * clay * thetas
         - 0.00001282 * sand**2 * clay
         + 0.00895359 * clay**2 * thetas
-        - 0.0072472 * sand**2 * thetas
+        - 0.00072472 * sand**2 * thetas
         + 0.0000054 * sand * clay**2
         + 0.00143598 * sand**2 * thetas**2
         - 0.00855375 * clay**2 * thetas**2
+        + 0.50028060 * thetas**2 * clay
     )
     return bubbling_pressure
 
@@ -413,7 +430,7 @@ def interpolate_soil_layers(ds):
 
 
 def load_soilgrids(data_catalog, grid, region):
-    variables = ["phh2o", "bdod", "clay", "silt", "sand", "soc"]
+    variables = ["bdod", "clay", "silt", "sand", "soc"]
     layers = ["0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm", "100-200cm"]
 
     ds = []
@@ -435,9 +452,6 @@ def load_soilgrids(data_catalog, grid, region):
     assert total.min() >= 99.8
     assert total.max() <= 100.2
 
-    assert ds["phh2o"].min() >= 4
-    assert ds["phh2o"].max() <= 9
-
     # the top 30 cm is considered as top soil (https://www.fao.org/uploads/media/Harm-World-Soil-DBv7cv_1.pdf)
     is_top_soil = np.zeros_like(ds["sand"], dtype=bool)
     is_top_soil[0:3] = True
@@ -456,7 +470,7 @@ def load_soilgrids(data_catalog, grid, region):
 
     ds["thetas"] = xr.apply_ufunc(
         thetas_toth,
-        ds["phh2o"],
+        ds["soc"],
         ds["bdod"],
         ds["clay"],
         ds["silt"],
@@ -472,37 +486,37 @@ def load_soilgrids(data_catalog, grid, region):
     assert (thetas >= 0).all()
     assert (thetas <= 1).all()
 
-    thetafc = xr.apply_ufunc(
-        thetafc_toth,
-        ds["soc"],
-        ds["clay"],
-        ds["silt"],
-        dask="parallelized",
-        output_dtypes=[float],
-        keep_attrs=True,
-    )
-    thetafc = thetafc.raster.reproject_like(grid, method="average")
-    thetafc = interpolate_soil_layers(thetafc)
+    # thetafc = xr.apply_ufunc(
+    #     thetafc_toth,
+    #     ds["soc"],
+    #     ds["clay"],
+    #     ds["silt"],
+    #     dask="parallelized",
+    #     output_dtypes=[float],
+    #     keep_attrs=True,
+    # )
+    # thetafc = thetafc.raster.reproject_like(grid, method="average")
+    # thetafc = interpolate_soil_layers(thetafc)
 
-    assert thetafc.notnull().all()
-    assert (thetafc >= 0).all()
-    assert (thetafc < thetas).all()
+    # assert thetafc.notnull().all()
+    # assert (thetafc >= 0).all()
+    # assert (thetafc < thetas).all()
 
-    ds["thetawp"] = xr.apply_ufunc(
-        thetawp_toth,
-        ds["soc"],
-        ds["clay"],
-        ds["silt"],
-        dask="parallelized",
-        output_dtypes=[float],
-        keep_attrs=True,
-    )
-    thetawp = ds["thetawp"].raster.reproject_like(grid, method="average")
-    thetawp = interpolate_soil_layers(thetawp)
+    # ds["thetawp"] = xr.apply_ufunc(
+    #     thetawp_toth,
+    #     ds["soc"],
+    #     ds["clay"],
+    #     ds["silt"],
+    #     dask="parallelized",
+    #     output_dtypes=[float],
+    #     keep_attrs=True,
+    # )
+    # thetawp = ds["thetawp"].raster.reproject_like(grid, method="average")
+    # thetawp = interpolate_soil_layers(thetawp)
 
-    assert thetawp.notnull().all()
-    assert (thetawp >= 0).all()
-    assert (thetawp < thetafc).all()
+    # assert thetawp.notnull().all()
+    # assert (thetawp >= 0).all()
+    # assert (thetawp < thetafc).all()
 
     ds["thetar"] = xr.apply_ufunc(
         thetar_brakensiek,
@@ -518,7 +532,18 @@ def load_soilgrids(data_catalog, grid, region):
 
     assert thetar.notnull().all()
     assert (thetar >= 0).all()
-    assert (thetar < thetawp).all()
+    assert (thetar < thetas).all()
+
+    ds["bubbling_pressure_cm"] = get_bubble_pressure(
+        ds["clay"], ds["sand"], ds["thetas"]
+    )
+    bubbling_pressure_cm = ds["bubbling_pressure_cm"].raster.reproject_like(
+        grid, method="average"
+    )
+    bubbling_pressure_cm = interpolate_soil_layers(bubbling_pressure_cm)
+
+    assert (bubbling_pressure_cm > 0).all()
+    assert (bubbling_pressure_cm < 1000).all()
 
     hydraulic_conductivity = get_hydraulic_conductivity(ds, "brakensiek")
     # Hydraulic conductivity (K) values can vary over several orders of magnitude within
@@ -544,7 +569,7 @@ def load_soilgrids(data_catalog, grid, region):
     lambda_ = np.exp(lambda_log)
     lambda_ = interpolate_soil_layers(lambda_)
 
-    assert lambda_.min() >= 0.1
+    assert lambda_.min() >= 0.01
     assert lambda_.max() <= 1
 
     soil_layer_height = xr.DataArray(
@@ -563,10 +588,9 @@ def load_soilgrids(data_catalog, grid, region):
 
     return (
         hydraulic_conductivity,
+        bubbling_pressure_cm,
         lambda_,
         thetas,
-        thetafc,
-        thetawp,
         thetar,
         soil_layer_height,
     )

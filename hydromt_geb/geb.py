@@ -1274,14 +1274,12 @@ class GEBModel(GridModel):
         standard_deviation.data = np.std(elevation_per_cell, axis=(2, 3))
         self.set_grid(standard_deviation, standard_deviation.name)
 
-    def setup_soil_parameters(self, interpolation_method="nearest") -> None:
+    def setup_soil_parameters(self) -> None:
         """
         Sets up the soil parameters for the model.
 
         Parameters
         ----------
-        interpolation_method : str, optional
-            The interpolation method to use when interpolating the soil parameters. Default is 'nearest'.
 
         Notes
         -----
@@ -1303,19 +1301,17 @@ class GEBModel(GridModel):
         self.logger.info("Setting up soil parameters")
         (
             hydraulic_conductivity,
+            bubbling_pressure_cm,
             lambda_,
             thetas,
-            thetafc,
-            thetawp,
             thetar,
             soil_layer_height,
         ) = load_soilgrids(self.data_catalog, self.grid, self.region)
 
         self.set_grid(hydraulic_conductivity, name="soil/ksat")
+        self.set_grid(bubbling_pressure_cm, name="soil/bubbling_pressure_cm")
         self.set_grid(lambda_, name="soil/lambda")
         self.set_grid(thetas, name="soil/thetas")
-        self.set_grid(thetafc, name="soil/thetafc")
-        self.set_grid(thetawp, name="soil/thetawp")
         self.set_grid(thetar, name="soil/thetar")
         self.set_grid(soil_layer_height, name="soil/soil_layer_height")
 
@@ -1324,7 +1320,7 @@ class GEBModel(GridModel):
         )
 
         ds = soil_ds["cropgrp"]
-        self.set_grid(self.interpolate(ds, interpolation_method), name=f"soil/cropgrp")
+        self.set_grid(self.interpolate(ds, "linear"), name=f"soil/cropgrp")
 
     def setup_land_use_parameters(self, interpolation_method="nearest") -> None:
         """
