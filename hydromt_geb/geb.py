@@ -16,7 +16,7 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
-
+import pyrosm
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -1983,54 +1983,63 @@ class GEBModel(GridModel):
 
                 c = cdsapi.Client()
 
-                try:
-                    c.retrieve(
-                        "reanalysis-era5-land",
-                        {
-                            "product_type": "reanalysis",
-                            "format": "netcdf",
-                            "variable": [
-                                variable,
-                            ],
-                            "date": f"{year}-01-01/{year}-12-31",
-                            "time": [
-                                "00:00",
-                                "01:00",
-                                "02:00",
-                                "03:00",
-                                "04:00",
-                                "05:00",
-                                "06:00",
-                                "07:00",
-                                "08:00",
-                                "09:00",
-                                "10:00",
-                                "11:00",
-                                "12:00",
-                                "13:00",
-                                "14:00",
-                                "15:00",
-                                "16:00",
-                                "17:00",
-                                "18:00",
-                                "19:00",
-                                "20:00",
-                                "21:00",
-                                "22:00",
-                                "23:00",
-                            ],
-                            "area": (
-                                ymax,
-                                xmin,
-                                ymin,
-                                xmax,
-                            ),  # North, West, South, East
-                        },
-                        output_fn,
-                    )
-                except Exception as e:
-                    print(e)
-                    raise
+                max_retries = 3
+                retries = 0
+                while retries < max_retries:
+                    try:
+                        c.retrieve(
+                            "reanalysis-era5-land",
+                            {
+                                "product_type": "reanalysis",
+                                "format": "netcdf",
+                                "variable": [
+                                    variable,
+                                ],
+                                "date": f"{year}-01-01/{year}-12-31",
+                                "time": [
+                                    "00:00",
+                                    "01:00",
+                                    "02:00",
+                                    "03:00",
+                                    "04:00",
+                                    "05:00",
+                                    "06:00",
+                                    "07:00",
+                                    "08:00",
+                                    "09:00",
+                                    "10:00",
+                                    "11:00",
+                                    "12:00",
+                                    "13:00",
+                                    "14:00",
+                                    "15:00",
+                                    "16:00",
+                                    "17:00",
+                                    "18:00",
+                                    "19:00",
+                                    "20:00",
+                                    "21:00",
+                                    "22:00",
+                                    "23:00",
+                                ],
+                                "area": (
+                                    ymax,
+                                    xmin,
+                                    ymin,
+                                    xmax,
+                                ),  # North, West, South, East
+                            },
+                            output_fn,
+                        )
+                        break
+                    except Exception as e:
+                        print(
+                            f"Download failed. Retrying... ({retries+1}/{max_retries})"
+                        )
+                        print(e)
+                        retries += 1
+                if retries == max_retries:
+                    raise Exception("Download failed after maximum retries.")
             return output_fn
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -4392,7 +4401,6 @@ class GEBModel(GridModel):
         return None
 
     def setup_assets(self, feature_types):
-        import osm_flex.extract
 
         if isinstance(feature_types, str):
             feature_types = [feature_types]
@@ -4428,10 +4436,15 @@ class GEBModel(GridModel):
             filepath = OSM_data_dir / url.split("/")[-1]
             fetch_and_save(url, filepath, overwrite=False)
             for feature_type in feature_types:
+                assert (
+                    feature_type == "buildings"
+                ), f"Only buildings are supported for now, not {feature_type}"
+
                 if feature_type not in all_features:
                     all_features[feature_type] = []
-                features = osm_flex.extract.extract_cis(filepath, feature_type)
-                # features = features.clip(self.geoms["areamaps/region"])
+
+                osm = pyrosm.OSM(str(filepath), list(self.bounds))
+                features = osm.get_buildings()
                 features = gpd.sjoin(
                     features,
                     self.geoms["areamaps/region"],
