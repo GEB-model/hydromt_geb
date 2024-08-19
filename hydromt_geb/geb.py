@@ -2,7 +2,7 @@ from tqdm import tqdm
 from pathlib import Path
 import hydromt.workflows
 from datetime import date, datetime, timedelta
-from typing import Union, Any, Dict, List, Optional
+from typing import Union, Dict, List, Optional
 import logging
 import os
 import math
@@ -16,7 +16,6 @@ import json
 from urllib.parse import urlparse
 import concurrent.futures
 from hydromt.exceptions import NoDataException
-import pyrosm
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -1633,6 +1632,13 @@ class GEBModel(GridModel):
         Sets up the MODFLOW grid for GEB.
         """
         self.logger.info("Setting up MODFLOW")
+
+        # load digital elevation model that was used for globgm
+        dem_globgm = self.data_catalog.get_rasterdataset(
+            "dem_globgm", bbox=self.bounds, buffer=0, variables=["dem_average"]
+        ).rename({"lon": "x", "lat": "y"})
+        dem_globgm = self.snap_to_grid(dem_globgm, self.grid)
+        assert dem_globgm.shape == self.grid.raster.shape
 
         # load hydraulic conductivity
         hydraulic_conductivity = self.data_catalog.get_rasterdataset(
@@ -4443,14 +4449,13 @@ class GEBModel(GridModel):
                 if feature_type not in all_features:
                     all_features[feature_type] = []
 
-                osm = pyrosm.OSM(str(filepath), list(self.bounds))
-                features = osm.get_buildings()
-                features = gpd.sjoin(
-                    features,
-                    self.geoms["areamaps/region"],
-                    how="inner",
-                    predicate="intersects",
+                features = gpd.read_file(
+                    filepath,
+                    mask=self.geoms["areamaps/region"],
+                    layer="multipolygons",
+                    use_arrow=True,
                 )
+                features[features["building"] != None]
                 all_features[feature_type].append(features)
 
         for feature_type in feature_types:
