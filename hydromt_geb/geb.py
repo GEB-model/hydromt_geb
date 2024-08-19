@@ -115,7 +115,7 @@ class GEBModel(GridModel):
         self.binary = {}
         self.dict = {}
 
-        self.model_structure = {
+        self.files = {
             "forcing": {},
             "geoms": {},
             "grid": {},
@@ -254,7 +254,7 @@ class GEBModel(GridModel):
 
         self.set_grid(ldd, name="routing/kinematic/ldd")
         self.set_grid(hydrography["uparea"], name="routing/kinematic/upstream_area")
-        self.set_grid(hydrography["elevtn"], name="landsurface/topo/elevation")
+        self.set_grid(hydrography["elevtn"], name="routing/kinematic/outflow_elevation")
         self.set_grid(
             xr.where(
                 hydrography["rivlen_ds"] != -9999,
@@ -1024,7 +1024,7 @@ class GEBModel(GridModel):
             "routing/kinematic/upstream_area"
         ]
         a = xr.where(a < 1, a, 1, keep_attrs=True)
-        b = self.grid["landsurface/topo/elevation"] / 2000
+        b = self.grid["routing/kinematic/outflow_elevation"] / 2000
         b = xr.where(b < 1, b, 1, keep_attrs=True)
 
         mannings = hydromt.raster.full(
@@ -1170,7 +1170,7 @@ class GEBModel(GridModel):
         channel_ratio.data = channel_ratio_data
         self.set_grid(channel_ratio, channel_ratio.name)
 
-    def setup_elevation_STD(self) -> None:
+    def setup_elevation(self) -> None:
         """
         Sets up the standard deviation of elevation for the model.
 
@@ -1252,7 +1252,7 @@ class GEBModel(GridModel):
             name="landsurface/topo/subgrid_elevation",
         )
 
-        elevation_per_cell = (
+        elevation_per_subgrid_cell = (
             high_res_elevation_data.values.reshape(
                 high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
             )
@@ -1263,6 +1263,16 @@ class GEBModel(GridModel):
         elevation_per_cell = high_res_elevation_data.values.reshape(
             high_res_elevation_data.shape[0] // scaling, scaling, -1, scaling
         ).swapaxes(1, 2)
+
+        elevation = hydromt.raster.full(
+            self.grid.raster.coords,
+            nodata=np.nan,
+            dtype=np.float32,
+            name="landsurface/topo/elevation",
+            lazy=True,
+        )
+        elevation.data = np.mean(elevation_per_cell, axis=(2, 3))
+        self.set_grid(elevation, elevation.name)
 
         standard_deviation = hydromt.raster.full(
             self.grid.raster.coords,
@@ -1627,18 +1637,43 @@ class GEBModel(GridModel):
             endtime,
         )
 
-    def setup_modflow(self):
+    def setup_groundwater(self):
         """
         Sets up the MODFLOW grid for GEB.
         """
         self.logger.info("Setting up MODFLOW")
 
         # load digital elevation model that was used for globgm
-        dem_globgm = self.data_catalog.get_rasterdataset(
-            "dem_globgm", bbox=self.bounds, buffer=0, variables=["dem_average"]
-        ).rename({"lon": "x", "lat": "y"})
+        dem_globgm = (
+            self.data_catalog.get_rasterdataset(
+                "dem_globgm",
+                geom=self.geoms["areamaps/region"],
+                buffer=0,
+                variables=["dem_average"],
+            )
+            .rename({"lon": "x", "lat": "y"})
+            .compute()
+        )
         dem_globgm = self.snap_to_grid(dem_globgm, self.grid)
         assert dem_globgm.shape == self.grid.raster.shape
+
+        dem = self.grid["landsurface/topo/elevation"].raster.mask_nodata()
+
+        # heads
+        head_lower_layer = self.data_catalog.get_rasterdataset(
+            "head_lower_globgm", bbox=self.bounds, buffer=0
+        )
+        head_lower_layer = self.snap_to_grid(head_lower_layer, self.grid)
+        head_lower_layer = head_lower_layer - dem_globgm + dem
+        assert head_lower_layer.shape == self.grid.raster.shape
+        self.set_grid(head_lower_layer, name="groundwater/head_lower_layer")
+
+        head_upper_layer = self.data_catalog.get_rasterdataset(
+            "head_upper_globgm", bbox=self.bounds, buffer=0
+        )
+        head_upper_layer = self.snap_to_grid(head_upper_layer, self.grid)
+        head_upper_layer = head_upper_layer - dem_globgm + dem
+        assert head_upper_layer.shape == self.grid.raster.shape
 
         # load hydraulic conductivity
         hydraulic_conductivity = self.data_catalog.get_rasterdataset(
@@ -1661,17 +1696,6 @@ class GEBModel(GridModel):
         assert specific_yield.shape == self.grid.raster.shape
 
         self.set_grid(specific_yield, name="groundwater/specific_yield")
-
-        # load initial water table depth
-        water_table_depth = self.data_catalog.get_rasterdataset(
-            "water_table_depth_globgm",
-            bbox=self.bounds,
-            buffer=0,
-        )
-        water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
-        assert water_table_depth.shape == self.grid.raster.shape
-
-        self.set_grid(water_table_depth, name="groundwater/initial_water_table_depth")
 
         # load recession coefficient
         recession_coefficient = self.data_catalog.get_rasterdataset(
@@ -4994,7 +5018,7 @@ class GEBModel(GridModel):
         for var, grid in self.grid.items():
             if self.is_updated["grid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure["grid"][var] = var + ".tif"
+                self.files["grid"][var] = var + ".tif"
                 self.is_updated["grid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
@@ -5005,7 +5029,7 @@ class GEBModel(GridModel):
         for var, grid in self.subgrid.items():
             if self.is_updated["subgrid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure["subgrid"][var] = var + ".tif"
+                self.files["subgrid"][var] = var + ".tif"
                 self.is_updated["subgrid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
@@ -5016,7 +5040,7 @@ class GEBModel(GridModel):
         for var, grid in self.region_subgrid.items():
             if self.is_updated["region_subgrid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure["region_subgrid"][var] = var + ".tif"
+                self.files["region_subgrid"][var] = var + ".tif"
                 self.is_updated["region_subgrid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
@@ -5027,7 +5051,7 @@ class GEBModel(GridModel):
         for var, grid in self.MERIT_grid.items():
             if self.is_updated["MERIT_grid"][var]["updated"]:
                 self.logger.info(f"Writing {var}")
-                self.model_structure["MERIT_grid"][var] = var + ".tif"
+                self.files["MERIT_grid"][var] = var + ".tif"
                 self.is_updated["MERIT_grid"][var]["filename"] = var + ".tif"
                 fp = Path(self.root, var + ".tif")
                 fp.parent.mkdir(parents=True, exist_ok=True)
@@ -5044,7 +5068,7 @@ class GEBModel(GridModel):
     ) -> None:
         self.logger.info(f"Write {var}")
         fn = var + ".nc"
-        self.model_structure["forcing"][var] = fn
+        self.files["forcing"][var] = fn
         self.is_updated["forcing"][var]["filename"] = fn
 
         if is_spatial_dataset:
@@ -5152,7 +5176,7 @@ class GEBModel(GridModel):
                 if self.is_updated["table"][name]["updated"]:
                     fn = os.path.join(name + ".csv")
                     self.logger.debug(f"Writing file {fn}")
-                    self.model_structure["table"][name] = fn
+                    self.files["table"][name] = fn
                     self.is_updated["table"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     fp = Path(self.root, fn)
@@ -5168,7 +5192,7 @@ class GEBModel(GridModel):
                 if self.is_updated["binary"][name]["updated"]:
                     fn = os.path.join(name + ".npz")
                     self.logger.debug(f"Writing file {fn}")
-                    self.model_structure["binary"][name] = fn
+                    self.files["binary"][name] = fn
                     self.is_updated["binary"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     fp = Path(self.root, fn)
@@ -5186,7 +5210,7 @@ class GEBModel(GridModel):
             for name, data in self.dict.items():
                 if self.is_updated["dict"][name]["updated"]:
                     fn = os.path.join(name + ".json")
-                    self.model_structure["dict"][name] = fn
+                    self.files["dict"][name] = fn
                     self.is_updated["dict"][name]["filename"] = fn
                     self.logger.debug(f"Writing file {fn}")
                     output_path = Path(self.root) / fn
@@ -5215,7 +5239,7 @@ class GEBModel(GridModel):
             for name, gdf in self._geoms.items():
                 if self.is_updated["geoms"][name]["updated"]:
                     self.logger.debug(f"Writing file {fn.format(name=name)}")
-                    self.model_structure["geoms"][name] = fn.format(name=name)
+                    self.files["geoms"][name] = fn.format(name=name)
                     _fn = os.path.join(self.root, fn.format(name=name))
                     if not os.path.isdir(os.path.dirname(_fn)):
                         os.makedirs(os.path.dirname(_fn))
@@ -5234,9 +5258,9 @@ class GEBModel(GridModel):
         self.is_updated["dict"][name] = {"updated": update}
         self.dict[name] = data
 
-    def write_model_structure(self):
-        with open(Path(self.root, "model_structure.json"), "w") as f:
-            json.dump(self.model_structure, f, indent=4, cls=PathEncoder)
+    def write_files(self):
+        with open(Path(self.root, "files.json"), "w") as f:
+            json.dump(self.files, f, indent=4, cls=PathEncoder)
 
     def write(self):
         self.write_geoms()
@@ -5251,37 +5275,35 @@ class GEBModel(GridModel):
 
         self.write_forcing()
 
-        self.write_model_structure()
+        self.write_files()
 
-    def read_model_structure(self):
-        model_structure_is_empty = all(
-            len(v) == 0 for v in self.model_structure.values()
-        )
-        if model_structure_is_empty:
-            with open(Path(self.root, "model_structure.json"), "r") as f:
-                self.model_structure = json.load(f)
+    def read_files(self):
+        files_is_empty = all(len(v) == 0 for v in self.files.values())
+        if files_is_empty:
+            with open(Path(self.root, "files.json"), "r") as f:
+                self.files = json.load(f)
 
     def read_geoms(self):
-        self.read_model_structure()
-        for name, fn in self.model_structure["geoms"].items():
+        self.read_files()
+        for name, fn in self.files["geoms"].items():
             geom = gpd.read_file(Path(self.root, fn))
             self.set_geoms(geom, name=name, update=False)
 
     def read_binary(self):
-        self.read_model_structure()
-        for name, fn in self.model_structure["binary"].items():
+        self.read_files()
+        for name, fn in self.files["binary"].items():
             binary = np.load(Path(self.root, fn))["data"]
             self.set_binary(binary, name=name, update=False)
 
     def read_table(self):
-        self.read_model_structure()
-        for name, fn in self.model_structure["table"].items():
+        self.read_files()
+        for name, fn in self.files["table"].items():
             table = pd.read_csv(Path(self.root, fn))
             self.set_table(table, name=name, update=False)
 
     def read_dict(self):
-        self.read_model_structure()
-        for name, fn in self.model_structure["dict"].items():
+        self.read_files()
+        for name, fn in self.files["dict"].items():
             with open(Path(self.root, fn), "r") as f:
                 d = json.load(f)
             self.set_dict(d, name=name, update=False)
@@ -5306,28 +5328,28 @@ class GEBModel(GridModel):
             return da
 
     def read_grid(self) -> None:
-        for name, fn in self.model_structure["grid"].items():
+        for name, fn in self.files["grid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_grid(data, name=name, update=False)
 
     def read_subgrid(self) -> None:
-        for name, fn in self.model_structure["subgrid"].items():
+        for name, fn in self.files["subgrid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_subgrid(data, name=name, update=False)
 
     def read_region_subgrid(self) -> None:
-        for name, fn in self.model_structure["region_subgrid"].items():
+        for name, fn in self.files["region_subgrid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_region_subgrid(data, name=name, update=False)
 
     def read_MERIT_grid(self) -> None:
-        for name, fn in self.model_structure["MERIT_grid"].items():
+        for name, fn in self.files["MERIT_grid"].items():
             data = self.read_netcdf(fn, name=name)
             self.set_MERIT_grid(data, name=name, update=False)
 
     def read_forcing(self) -> None:
-        self.read_model_structure()
-        for name, fn in self.model_structure["forcing"].items():
+        self.read_files()
+        for name, fn in self.files["forcing"].items():
             with xr.open_dataset(
                 Path(self.root) / fn,
                 chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
@@ -5341,7 +5363,7 @@ class GEBModel(GridModel):
                     self.set_forcing(ds, name=name, update=False, split_dataset=False)
 
     def read(self):
-        self.read_model_structure()
+        self.read_files()
 
         self.read_geoms()
         self.read_binary()
@@ -5460,7 +5482,7 @@ class GEBModel(GridModel):
 
     def set_alternate_root(self, root, mode):
         relative_path = Path(os.path.relpath(Path(self.root), root.resolve()))
-        for data in self.model_structure.values():
+        for data in self.files.values():
             for name, fn in data.items():
                 data[name] = relative_path / fn
         super().set_root(root, mode)
