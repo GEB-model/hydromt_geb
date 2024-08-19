@@ -51,9 +51,6 @@ os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
 from affine import Affine
 import geopandas as gpd
 
-# use pyogrio for substantial speedup reading and writing vector data
-gpd.options.io_engine = "pyogrio"
-
 from calendar import monthrange
 from isimip_client.client import ISIMIPClient
 
@@ -229,7 +226,7 @@ class GEBModel(GridModel):
         )
 
         # Add region and grid to model
-        self.set_geoms(geom, name="areamaps/region")
+        self.set_geoms(geom, name="region")
 
         hydrography = hydrography.raster.clip_geom(geom, mask=True)
 
@@ -1419,7 +1416,7 @@ class GEBModel(GridModel):
         try:
             waterbodies = self.data_catalog.get_geodataframe(
                 "hydro_lakes",
-                geom=self.geoms["areamaps/region"],
+                geom=self.region,
                 predicate="intersects",
                 variables=[
                     "waterbody_id",
@@ -1647,7 +1644,7 @@ class GEBModel(GridModel):
         dem_globgm = (
             self.data_catalog.get_rasterdataset(
                 "dem_globgm",
-                geom=self.geoms["areamaps/region"],
+                geom=self.region,
                 buffer=0,
                 variables=["dem_average"],
             )
@@ -2948,14 +2945,13 @@ class GEBModel(GridModel):
         self.logger.info(f"Preparing regions and land use data.")
         regions = self.data_catalog.get_geodataframe(
             region_database,
-            # geom=self.geoms["areamaps/region"],
-            bbox=self.grid.raster.bounds,
+            geom=self.region,
             predicate="intersects",
         ).rename(columns={unique_region_id: "region_id", ISO3_column: "ISO3"})
 
         assert bounds_are_within(
-            self.geoms["areamaps/region"].total_bounds,
-            regions.to_crs(self.geoms["areamaps/region"].crs).total_bounds,
+            self.region.total_bounds,
+            regions.to_crs(self.region.crs).total_bounds,
         )
         assert np.issubdtype(
             regions["region_id"].dtype, np.integer
@@ -4475,7 +4471,7 @@ class GEBModel(GridModel):
 
                 features = gpd.read_file(
                     filepath,
-                    mask=self.geoms["areamaps/region"],
+                    mask=self.region,
                     layer="multipolygons",
                     use_arrow=True,
                 )
@@ -4788,7 +4784,7 @@ class GEBModel(GridModel):
         # hydrobasins
         hydrobasins = self.data_catalog.get_geodataframe(
             "hydrobasins_8",
-            geom=self.geoms["areamaps/region"],
+            geom=self.region,
             predicate="intersects",
         )
         self.set_geoms(hydrobasins, name="SFINCS/hydrobasins")
