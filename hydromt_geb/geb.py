@@ -2082,14 +2082,14 @@ class GEBModel(GridModel):
         # for a infenitesimal loss in accuracy
         ds = ds.assign_coords(
             latitude=np.linspace(
-                ds["latitude"][0],
-                ds["latitude"][-1],
+                ds["latitude"][0].item(),
+                ds["latitude"][-1].item(),
                 ds["latitude"].size,
                 endpoint=True,
             ),
             longitude=np.linspace(
-                ds["longitude"][0],
-                ds["longitude"][-1],
+                ds["longitude"][0].item(),
+                ds["longitude"][-1].item(),
                 ds["longitude"].size,
                 endpoint=True,
             ),
