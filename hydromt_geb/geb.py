@@ -25,6 +25,7 @@ import xarray as xr
 from dask.diagnostics import ProgressBar
 import xclim.indices as xci
 from dateutil.relativedelta import relativedelta
+from contextlib import contextmanager
 
 from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
@@ -70,6 +71,19 @@ from .workflows.population import generate_locations
 from .workflows.crop_calendars import parse_MIRCA2000_crop_calendar
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def suppress_logging_warning(logger):
+    """
+    A context manager to suppress logging warning messages temporarily.
+    """
+    current_level = logger.getEffectiveLevel()
+    logger.setLevel(logging.ERROR)  # Set level to ERROR to suppress WARNING messages
+    try:
+        yield
+    finally:
+        logger.setLevel(current_level)  # Restore the original logging level
 
 
 class PathEncoder(json.JSONEncoder):
@@ -123,17 +137,7 @@ class GEBModel(GridModel):
             "region_subgrid": {},
             "MERIT_grid": {},
         }
-        self.is_updated = {
-            "forcing": {},
-            "geoms": {},
-            "grid": {},
-            "dict": {},
-            "table": {},
-            "binary": {},
-            "subgrid": {},
-            "region_subgrid": {},
-            "MERIT_grid": {},
-        }
+        self.is_updated = self.files.copy()
 
     @property
     def subgrid(self):
@@ -2440,7 +2444,7 @@ class GEBModel(GridModel):
                     hurs.name = "hurs"
                     hurs.to_netcdf(fn)
                 else:
-                    hurs = xr.open_dataset(fn, chunks={"time": 1})["hurs"]
+                    hurs = xr.open_dataset(fn)["hurs"]
                 # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
@@ -4700,14 +4704,7 @@ class GEBModel(GridModel):
                 download_path / Path(urlparse(response["file_url"]).path.split("/")[-1])
             ).unlink()
 
-        datasets = [
-            xr.open_dataset(
-                download_path / file,
-                chunks={"time": 1, "lat": XY_CHUNKSIZE, "lon": XY_CHUNKSIZE},
-                lock=False,
-            )
-            for file in parse_files
-        ]
+        datasets = [xr.open_dataset(download_path / file) for file in parse_files]
         for dataset in datasets:
             assert "lat" in dataset.coords and "lon" in dataset.coords
 
@@ -5070,11 +5067,8 @@ class GEBModel(GridModel):
         if is_spatial_dataset:
             forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
 
-        # create temporary file path
-        with tempfile.TemporaryDirectory(dir=".") as tmpdirname:
-            # write netcdf to temporary file
-            fp_temp = Path(tmpdirname, "tempfile.nc")
-            fp_temp.parent.mkdir(parents=True, exist_ok=True)
+        # write netcdf to temporary file
+        with tempfile.NamedTemporaryFile("w", suffix=".nc") as tmp_file:
             if "time" in forcing.dims:
                 with ProgressBar(dt=10):  # print progress bar every 10 seconds
                     assert (
@@ -5097,7 +5091,7 @@ class GEBModel(GridModel):
                         # )
                         chunksizes, chunksizes_tuple = None, None
                     forcing.to_netcdf(
-                        fp_temp,
+                        tmp_file.name,
                         mode="w",
                         engine="netcdf4",
                         encoding={
@@ -5113,12 +5107,8 @@ class GEBModel(GridModel):
                     fp = Path(self.root, fn)
                     fp.parent.mkdir(parents=True, exist_ok=True)
 
-                    shutil.move(fp_temp, fp)
-                return xr.open_dataset(
-                    fp,
-                    chunks=chunksizes,
-                    lock=False,
-                )[forcing.name]
+                    shutil.move(tmp_file.name, fp)
+                return xr.open_dataset(fp, lock=False)[forcing.name]
             else:
                 if isinstance(forcing, xr.DataArray):
                     name = forcing.name
@@ -5133,7 +5123,7 @@ class GEBModel(GridModel):
                 else:
                     raise ValueError("forcing must be a DataArray or Dataset")
                 forcing.to_netcdf(
-                    fp_temp,
+                    tmp_file.name,
                     mode="w",
                     encoding=encoding,
                 )
@@ -5142,14 +5132,9 @@ class GEBModel(GridModel):
                 fp = Path(self.root, fn)
                 fp.parent.mkdir(parents=True, exist_ok=True)
 
-                shutil.move(fp_temp, fp)
+                shutil.move(tmp_file.name, fp)
 
-                ds = xr.open_dataset(
-                    fp,
-                    chunks={"y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
-                    lock=False,
-                    engine="netcdf4",
-                )
+                ds = xr.open_dataset(fp, lock=False)
                 if isinstance(forcing, xr.DataArray):
                     return ds[name]
                 else:
@@ -5346,11 +5331,7 @@ class GEBModel(GridModel):
     def read_forcing(self) -> None:
         self.read_files()
         for name, fn in self.files["forcing"].items():
-            with xr.open_dataset(
-                Path(self.root) / fn,
-                chunks={"time": 1, "y": XY_CHUNKSIZE, "x": XY_CHUNKSIZE},
-                lock=False,
-            ) as ds:
+            with xr.open_dataset(Path(self.root) / fn, lock=False) as ds:
                 data_vars = set(ds.data_vars)
                 data_vars.discard("spatial_ref")
                 if len(data_vars) == 1:
@@ -5359,19 +5340,20 @@ class GEBModel(GridModel):
                     self.set_forcing(ds, name=name, update=False, split_dataset=False)
 
     def read(self):
-        self.read_files()
+        with suppress_logging_warning(self.logger):
+            self.read_files()
 
-        self.read_geoms()
-        self.read_binary()
-        self.read_table()
-        self.read_dict()
+            self.read_geoms()
+            self.read_binary()
+            self.read_table()
+            self.read_dict()
 
-        self.read_grid()
-        self.read_subgrid()
-        self.read_region_subgrid()
-        self.read_MERIT_grid()
+            self.read_grid()
+            self.read_subgrid()
+            self.read_region_subgrid()
+            self.read_MERIT_grid()
 
-        self.read_forcing()
+            self.read_forcing()
 
     def set_geoms(self, geoms, name, update=True):
         self.is_updated["geoms"][name] = {"updated": update}
@@ -5456,7 +5438,7 @@ class GEBModel(GridModel):
         self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
     ) -> None:
         self.is_updated["grid"][name] = {"updated": update}
-        super().set_grid(data, name=name)
+        self._set_grid(self.grid, data, name=name)
 
     def set_subgrid(
         self, data: Union[xr.DataArray, xr.Dataset, np.ndarray], name: str, update=True
