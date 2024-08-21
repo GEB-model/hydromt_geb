@@ -16,7 +16,7 @@ from pgmpy.estimators import BayesianEstimator
 from pgmpy.sampling import BayesianModelSampling
 from pgmpy.factors.discrete import State
 
-from pgmpy.estimators import PC, HillClimbSearch, ExhaustiveSearch
+from pgmpy.estimators import HillClimbSearch
 
 from scipy.stats import chi2_contingency
 
@@ -767,7 +767,7 @@ class fairSTREAMModel(GEBModel):
 
         n_farmers = self.binary["agents/farmers/id"].size
 
-        household_head_age = self.binary["agents/farmers/age_household_head"]
+        # household_head_age = self.binary["agents/farmers/age_household_head"]
         farms = self.subgrid["agents/farmers/farms"]
         farm_ids, farm_size_n_cells = np.unique(farms, return_counts=True)
         farm_size_n_cells = farm_size_n_cells[farm_ids != -1]
