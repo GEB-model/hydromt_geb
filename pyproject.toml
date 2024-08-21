@@ -37,8 +37,9 @@ classifiers = [
 dynamic = ['version', 'description']
 
 [project.optional-dependencies]
-tests = [
-    "pytest"
+dev = [
+    "pytest",
+    "ruff",
 ]
 doc = [
 ]
