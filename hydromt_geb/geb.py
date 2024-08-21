@@ -27,6 +27,7 @@ import xclim.indices as xci
 from dateutil.relativedelta import relativedelta
 from contextlib import contextmanager
 from calendar import monthrange
+from numcodecs import Blosc
 
 from hydromt.models.model_grid import GridModel
 from hydromt.data_catalog import DataCatalog
@@ -65,6 +66,9 @@ else:
 os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
 
 logger = logging.getLogger(__name__)
+# Define the compressor using Blosc (e.g., Zstandard compression)
+
+compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 
 
 @contextmanager
@@ -1638,9 +1642,9 @@ class GEBModel(GridModel):
         """
         self.logger.info("Setting up MODFLOW")
 
-        aquifer_top_elevation = self.grid[
-            "landsurface/topo/elevation"
-        ].raster.mask_nodata()
+        aquifer_top_elevation = (
+            self.grid["landsurface/topo/elevation"].raster.mask_nodata().compute()
+        )
         self.set_grid(aquifer_top_elevation, name="groundwater/aquifer_top_elevation")
 
         # load total thickness
@@ -1683,28 +1687,37 @@ class GEBModel(GridModel):
             [aquifer_top_elevation, bottom_top_layer, bottom_bottom_layer],
             dim="boundary",
             compat="equals",
-        )
+        ).compute()
 
         self.set_grid(
             layer_boundary_elevation, name="groundwater/layer_boundary_elevation"
         )
 
         # load digital elevation model that was used for globgm
-        dem_globgm = self.data_catalog.get_rasterdataset(
-            "dem_globgm",
-            geom=self.region,
-            buffer=0,
-            variables=["dem_average"],
-        ).rename({"lon": "x", "lat": "y"})
+        dem_globgm = (
+            self.data_catalog.get_rasterdataset(
+                "dem_globgm",
+                geom=self.region,
+                buffer=0,
+                variables=["dem_average"],
+            )
+            .rename({"lon": "x", "lat": "y"})
+            .compute()
+        )
         dem_globgm = self.snap_to_grid(dem_globgm, self.grid)
         assert dem_globgm.shape == self.grid.raster.shape
 
         dem = self.grid["landsurface/topo/elevation"].raster.mask_nodata()
 
+        water_table_depth = self.data_catalog.get_rasterdataset(
+            "water_table_depth_globgm", bbox=self.bounds, buffer=0
+        ).compute()
+        water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
+
         # heads
         head_upper_layer = self.data_catalog.get_rasterdataset(
             "head_upper_globgm", bbox=self.bounds, buffer=0
-        )
+        ).compute()
         head_upper_layer = head_upper_layer.raster.mask_nodata()
         head_upper_layer = self.snap_to_grid(head_upper_layer, self.grid)
         head_upper_layer = head_upper_layer - dem_globgm + dem
@@ -1712,17 +1725,23 @@ class GEBModel(GridModel):
 
         head_lower_layer = self.data_catalog.get_rasterdataset(
             "head_lower_globgm", bbox=self.bounds, buffer=0
-        )
+        ).compute()
         head_lower_layer = head_lower_layer.raster.mask_nodata()
-        head_lower_layer = self.snap_to_grid(head_lower_layer, self.grid)
-        head_lower_layer = head_lower_layer - dem_globgm + dem
+        head_lower_layer = self.snap_to_grid(head_lower_layer, self.grid).compute()
+        head_lower_layer = (head_lower_layer - dem_globgm + dem).compute()
+        # TODO: Make sure head in lower layer is not lower than topography, but why is this needed?
+        head_lower_layer = xr.where(
+            head_lower_layer < layer_boundary_elevation[-1],
+            layer_boundary_elevation[-1],
+            head_lower_layer,
+        )
         assert head_lower_layer.shape == self.grid.raster.shape
 
         # combine upper and lower layer head in one dataarray
-        head = xr.concat(
+        heads = xr.concat(
             [head_upper_layer, head_lower_layer], dim="layer", compat="equals"
         )
-        self.set_grid(head, name="groundwater/head")
+        self.set_grid(heads, name="groundwater/heads")
 
         # load hydraulic conductivity
         hydraulic_conductivity = self.data_catalog.get_rasterdataset(
@@ -2469,7 +2488,7 @@ class GEBModel(GridModel):
         hurs_ds_30sec, hurs_time = [], []
         for year in tqdm(range(start_year, end_year + 1)):
             for month in range(1, 13):
-                fn = chelsa_folder / f"hurs_{year}_{month:02d}.nc"
+                fn = chelsa_folder / f"hurs_{year}_{month:02d}.zarr"
                 if not fn.exists():
                     hurs = self.data_catalog.get_rasterdataset(
                         f"CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}",
@@ -2478,7 +2497,7 @@ class GEBModel(GridModel):
                     )
                     del hurs.attrs["_FillValue"]
                     hurs.name = "hurs"
-                    hurs.to_netcdf(fn)
+                    hurs.to_zarr(fn)
                 else:
                     hurs = xr.open_dataset(fn, chunks={})["hurs"]
                 # assert hasattr(hurs, "spatial_ref")
@@ -5088,7 +5107,7 @@ class GEBModel(GridModel):
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 grid.rio.to_raster(fp)
 
-    def write_forcing_to_netcdf(
+    def write_forcing_to_zarr(
         self,
         var,
         forcing,
@@ -5098,15 +5117,16 @@ class GEBModel(GridModel):
         is_spatial_dataset=True,
     ) -> None:
         self.logger.info(f"Write {var}")
-        fn = var + ".nc"
-        self.files["forcing"][var] = fn
-        self.is_updated["forcing"][var]["filename"] = fn
+        destination = var + ".zarr"
+        shutil.rmtree(destination, ignore_errors=True)
+        self.files["forcing"][var] = destination
+        self.is_updated["forcing"][var]["filename"] = destination
 
         if is_spatial_dataset:
             forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
 
         # write netcdf to temporary file
-        with tempfile.NamedTemporaryFile("w", suffix=".nc") as tmp_file:
+        with tempfile.TemporaryDirectory() as tmp_dir:
             if "time" in forcing.dims:
                 with ProgressBar(dt=10):  # print progress bar every 10 seconds
                     assert (
@@ -5121,56 +5141,49 @@ class GEBModel(GridModel):
                             "y": min(forcing.y.size, y_chunksize),
                             "x": min(forcing.x.size, x_chunksize),
                         }
-                        chunksizes_tuple = tuple(chunksizes.values())
-                    else:
-                        # chunksizes = (
-                        #     min(forcing.time.size, time_chunksize),
-                        #     forcing[forcing.dims[1]].size,
-                        # )
-                        chunksizes, chunksizes_tuple = None, None
-                    forcing.to_netcdf(
-                        tmp_file.name,
+                        forcing = forcing.chunk(chunksizes)
+
+                    forcing.to_zarr(
+                        tmp_dir,
                         mode="w",
-                        engine="netcdf4",
                         encoding={
                             forcing.name: {
-                                "chunksizes": chunksizes_tuple,
-                                "zlib": True,
-                                "complevel": 9,
+                                "compressor": compressor,
+                                "chunks": (chunksizes[dim] for dim in forcing.dims),
                             }
                         },
                     )
 
                     # move file to final location
-                    fp = Path(self.root, fn)
+                    fp = Path(self.root, destination)
                     fp.parent.mkdir(parents=True, exist_ok=True)
 
-                    shutil.move(tmp_file.name, fp)
-                return xr.open_dataset(fp, lock=False, chunks={})[forcing.name]
+                    shutil.move(tmp_dir, fp)
+                return xr.open_dataset(fp, chunks={})[forcing.name]
             else:
                 if isinstance(forcing, xr.DataArray):
                     name = forcing.name
-                    encoding = {forcing.name: {"zlib": True, "complevel": 9}}
+                    encoding = {forcing.name: {"compressor": compressor}}
                 elif isinstance(forcing, xr.Dataset):
                     assert (
                         len(forcing.data_vars) > 1
                     ), "forcing must have more than one variable or name must be set"
                     encoding = {
-                        var: {"zlib": True, "complevel": 9} for var in forcing.data_vars
+                        var: {"compressor": compressor} for var in forcing.data_vars
                     }
                 else:
                     raise ValueError("forcing must be a DataArray or Dataset")
-                forcing.to_netcdf(
-                    tmp_file.name,
+                forcing.to_zarr(
+                    tmp_dir,
                     mode="w",
                     encoding=encoding,
                 )
 
                 # move file to final location
-                fp = Path(self.root, fn)
+                fp = Path(self.root, destination)
                 fp.parent.mkdir(parents=True, exist_ok=True)
 
-                shutil.move(tmp_file.name, fp)
+                shutil.move(tmp_dir, fp)
 
                 ds = xr.open_dataset(fp, lock=False, chunks={})
                 if isinstance(forcing, xr.DataArray):
@@ -5183,7 +5196,7 @@ class GEBModel(GridModel):
         for var in self.forcing:
             forcing = self.forcing[var]
             if self.is_updated["forcing"][var]["updated"]:
-                self.write_forcing_to_netcdf(var, forcing)
+                self.write_forcing_to_zarr(var, forcing)
 
     def write_table(self):
         if len(self.table) == 0:
@@ -5368,7 +5381,7 @@ class GEBModel(GridModel):
     def read_forcing(self) -> None:
         self.read_files()
         for name, fn in self.files["forcing"].items():
-            with xr.open_dataset(Path(self.root) / fn, lock=False, chunks={}) as ds:
+            with xr.open_dataset(Path(self.root) / fn, chunks={}) as ds:
                 data_vars = set(ds.data_vars)
                 data_vars.discard("spatial_ref")
                 if len(data_vars) == 1:
@@ -5413,7 +5426,7 @@ class GEBModel(GridModel):
             assert data.name == name.split("/")[-1]
         self.is_updated["forcing"][name] = {"updated": update}
         if update and write:
-            data = self.write_forcing_to_netcdf(
+            data = self.write_forcing_to_zarr(
                 name,
                 data,
                 x_chunksize=x_chunksize,
