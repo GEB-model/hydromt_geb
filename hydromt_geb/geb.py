@@ -2865,11 +2865,20 @@ class GEBModel(GridModel):
         self,
         calibration_period_start: date = date(1981, 1, 1),
         calibration_period_end: date = date(2010, 1, 1),
+        memory_mb: int = 1000,
     ):
         """
         Sets up the Standardized Precipitation Evapotranspiration Index (SPEI). Note that
         due to the sliding window, the SPEI data will be shorter than the original data. When
         a sliding window of 12 months is used, the SPEI data will be shorter by 11 months.
+
+        Also sets up the Generalized Extreme Value (GEV) parameters for the SPEI data, being
+        the c shape (ξ), loc location (μ), and scale (σ) parameters.
+
+        The chunks for the climate data are optimized for reading the data in xy-direction. However,
+        for the SPEI calculation, the data is needs to be read in time direction. Therefore, we
+        create an intermediate temporary file of the water balance wher chunks are in an intermediate
+        size between the xy and time chunks.
 
         Parameters
         ----------
@@ -2916,52 +2925,86 @@ class GEBModel(GridModel):
 
         water_budget.attrs = {"units": "kg m-2 s-1"}
 
-        water_budget_flattened = water_budget.values.flatten()
+        max_cells_loaded_in_memory = (
+            memory_mb * 1024 * 1024 / 8  # 8 bytes per float
+        )  # in number of elements
 
-        fit_kwargs_estimate = xci.stats._fit_start(
-            x=water_budget_flattened, dist="gamma"
+        block_edge_size_time = (
+            max_cells_loaded_in_memory / water_budget.time.size
+        ) ** 0.5
+        block_edge_size_xy = max_cells_loaded_in_memory / (
+            water_budget.x.size * water_budget.y.size
         )
 
-        # Compute the SPEI
-        spei = xci.standardized_precipitation_evapotranspiration_index(
-            wb=water_budget,
-            cal_start=calibration_period_start,
-            cal_end=calibration_period_end,
-            freq="MS",
-            window=1,
-            dist="gamma",
-            method="APP",
-            fitkwargs={
-                "floc": fit_kwargs_estimate[1]["loc"],
-                "scale": fit_kwargs_estimate[1]["scale"],
-            },
-        )
-        # remove all nan values as a result of the sliding window
-        spei.attrs = {
-            "units": "-",
-            "long_name": "Standard Precipitation Evapotranspiration Index",
-            "name": "spei",
-        }
-        spei.name = "spei"
+        # round up to avoid very small chunks at edges
+        block_edge_size = math.ceil(min(block_edge_size_time, block_edge_size_xy))
 
-        self.set_forcing(spei, name="climate/spei")
+        water_budget.name = "water_budget"
+        chunks = {dim: block_edge_size for dim in water_budget.dims}
+        water_budget = water_budget.chunk(chunks)
 
-    def setup_GEV(self):
-        self.logger.info("calculating GEV parameters...")
+        with tempfile.TemporaryDirectory(suffix=".zarr") as tmp_water_budget_dir:
+            print("Exporting temporary water budget to zarr")
+            with ProgressBar(dt=10):
+                water_budget.to_zarr(
+                    tmp_water_budget_dir,
+                    mode="w",
+                    encoding={"water_budget": {"chunks": chunks.values()}},
+                )
 
-        # invert the values and take the max
-        SPEI_changed = self.forcing["climate/spei"] * -1
+            water_budget = xr.open_zarr(tmp_water_budget_dir, chunks={})["water_budget"]
 
-        # Group the data by year and find the maximum monthly sum for each year
-        SPEI_yearly_max = SPEI_changed.groupby("time.year").max(dim="time")
-        SPEI_yearly_max = SPEI_yearly_max.rename({"year": "time"}).chunk({"time": -1})
+            # Compute the SPEI
+            SPEI = xci.standardized_precipitation_evapotranspiration_index(
+                wb=water_budget,
+                cal_start=calibration_period_start,
+                cal_end=calibration_period_end,
+                freq="MS",
+                window=1,
+                dist="gamma",
+                method="ML",
+            )
 
-        GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme").compute()
-        GEV.name = "gev"
+            # remove all nan values as a result of the sliding window
+            SPEI.attrs = {
+                "units": "-",
+                "long_name": "Standard Precipitation Evapotranspiration Index",
+                "name": "spei",
+            }
+            SPEI.name = "spei"
 
-        self.set_grid(GEV.sel(dparams="c"), name="climate/gev_c")
-        self.set_grid(GEV.sel(dparams="loc"), name="climate/gev_loc")
-        self.set_grid(GEV.sel(dparams="scale"), name="climate/gev_scale")
+            with tempfile.TemporaryDirectory(suffix=".zarr") as tmp_spei_dir:
+                print("Exporting temporary SPEI to zarr")
+                with ProgressBar(dt=10):
+                    SPEI.to_zarr(
+                        tmp_spei_dir,
+                        mode="w",
+                        encoding={"spei": {"chunks": chunks.values()}},
+                    )
+
+                SPEI = xr.open_zarr(tmp_spei_dir, chunks={})["spei"]
+
+                self.set_forcing(SPEI, name="climate/spei")
+
+                self.logger.info("calculating GEV parameters...")
+
+                # invert the values and take the max
+                inverted_SPEI = SPEI * -1
+
+                # Group the data by year and find the maximum monthly sum for each year
+                SPEI_yearly_max = inverted_SPEI.groupby("time.year").max(dim="time")
+                SPEI_yearly_max = (
+                    SPEI_yearly_max.rename({"year": "time"})
+                    .chunk({"time": -1})
+                    .compute()
+                )
+
+                GEV = xci.stats.fit(SPEI_yearly_max, dist="genextreme").compute()
+                GEV.name = "gev"
+
+                self.set_grid(GEV.sel(dparams="c"), name="climate/gev_c")
+                self.set_grid(GEV.sel(dparams="loc"), name="climate/gev_loc")
+                self.set_grid(GEV.sel(dparams="scale"), name="climate/gev_scale")
 
     def setup_regions_and_land_use(
         self,
