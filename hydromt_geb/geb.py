@@ -1672,22 +1672,38 @@ class GEBModel(GridModel):
         confining_layer = self.snap_to_grid(confining_layer, self.grid)
         assert confining_layer.shape == self.grid.raster.shape
 
-        # make sure that total thickness is at least 50 m thicker than confining layer
-        total_thickness = np.maximum(total_thickness, confining_layer + 50)
-        # thickness of layer 2 is based on the predefined confiningLayerThickness
-        bottom_top_layer = aquifer_top_elevation - confining_layer
-        # make sure that the minimum thickness of layer 2 is at least 0.1 m
-        thickness_top_layer = np.maximum(0.1, aquifer_top_elevation - bottom_top_layer)
-        bottom_top_layer = aquifer_top_elevation - thickness_top_layer
-        # thickness of layer 1 is at least 5.0 m
-        thickness_bottom_layer = np.maximum(5.0, total_thickness - thickness_top_layer)
-        bottom_bottom_layer = bottom_top_layer - thickness_bottom_layer
+        if not (confining_layer == 0).all():  # two-layer-model
+            two_layers = True
+        else:
+            two_layers = False
 
-        layer_boundary_elevation = xr.concat(
-            [aquifer_top_elevation, bottom_top_layer, bottom_bottom_layer],
-            dim="boundary",
-            compat="equals",
-        ).compute()
+        if two_layers:
+            # make sure that total thickness is at least 50 m thicker than confining layer
+            total_thickness = np.maximum(total_thickness, confining_layer + 50)
+            # thickness of layer 2 is based on the predefined confiningLayerThickness
+            bottom_top_layer = aquifer_top_elevation - confining_layer
+            # make sure that the minimum thickness of layer 2 is at least 0.1 m
+            thickness_top_layer = np.maximum(
+                0.1, aquifer_top_elevation - bottom_top_layer
+            )
+            bottom_top_layer = aquifer_top_elevation - thickness_top_layer
+            # thickness of layer 1 is at least 5.0 m
+            thickness_bottom_layer = np.maximum(
+                5.0, total_thickness - thickness_top_layer
+            )
+            bottom_bottom_layer = bottom_top_layer - thickness_bottom_layer
+
+            layer_boundary_elevation = xr.concat(
+                [aquifer_top_elevation, bottom_top_layer, bottom_bottom_layer],
+                dim="boundary",
+                compat="equals",
+            ).compute()
+        else:
+            layer_boundary_elevation = xr.concat(
+                [aquifer_top_elevation, aquifer_top_elevation - total_thickness],
+                dim="boundary",
+                compat="equals",
+            ).compute()
 
         self.set_grid(
             layer_boundary_elevation, name="groundwater/layer_boundary_elevation"
@@ -1723,6 +1739,10 @@ class GEBModel(GridModel):
         head_upper_layer = head_upper_layer - dem_globgm + dem
         assert head_upper_layer.shape == self.grid.raster.shape
 
+        # assert concistency of datasets. If one layer, this layer should be all nan
+        if not two_layers:
+            assert np.isnan(head_upper_layer).all()
+
         head_lower_layer = self.data_catalog.get_rasterdataset(
             "head_lower_globgm", bbox=self.bounds, buffer=0
         ).compute()
@@ -1737,10 +1757,14 @@ class GEBModel(GridModel):
         )
         assert head_lower_layer.shape == self.grid.raster.shape
 
-        # combine upper and lower layer head in one dataarray
-        heads = xr.concat(
-            [head_upper_layer, head_lower_layer], dim="layer", compat="equals"
-        )
+        if two_layers:
+            # combine upper and lower layer head in one dataarray
+            heads = xr.concat(
+                [head_upper_layer, head_lower_layer], dim="layer", compat="equals"
+            )
+        else:
+            heads = head_upper_layer.expand_dims(layer=["upper"])
+
         self.set_grid(heads, name="groundwater/heads")
 
         # load hydraulic conductivity
@@ -1752,11 +1776,14 @@ class GEBModel(GridModel):
         hydraulic_conductivity = self.snap_to_grid(hydraulic_conductivity, self.grid)
         assert hydraulic_conductivity.shape == self.grid.raster.shape
 
-        hydraulic_conductivity = xr.concat(
-            [hydraulic_conductivity, hydraulic_conductivity],
-            dim="layer",
-            compat="equals",
-        )
+        if two_layers:
+            hydraulic_conductivity = xr.concat(
+                [hydraulic_conductivity, hydraulic_conductivity],
+                dim="layer",
+                compat="equals",
+            )
+        else:
+            hydraulic_conductivity = hydraulic_conductivity.expand_dims(layer=["upper"])
         self.set_grid(hydraulic_conductivity, name="groundwater/hydraulic_conductivity")
 
         # load specific yield
@@ -1768,21 +1795,24 @@ class GEBModel(GridModel):
         specific_yield = self.snap_to_grid(specific_yield, self.grid)
         assert specific_yield.shape == self.grid.raster.shape
 
-        specific_yield = xr.concat(
-            [specific_yield, specific_yield], dim="layer", compat="equals"
-        )
+        if two_layers:
+            specific_yield = xr.concat(
+                [specific_yield, specific_yield], dim="layer", compat="equals"
+            )
+        else:
+            specific_yield = specific_yield.expand_dims(layer=["upper"])
         self.set_grid(specific_yield, name="groundwater/specific_yield")
 
-        # load recession coefficient
-        recession_coefficient = self.data_catalog.get_rasterdataset(
-            "recession_coefficient_globgm",
-            bbox=self.bounds,
-            buffer=0,
-        ).rename({"lon": "x", "lat": "y"})
-        recession_coefficient = self.snap_to_grid(recession_coefficient, self.grid)
-        assert recession_coefficient.shape == self.grid.raster.shape
+        # # load recession coefficient
+        # recession_coefficient = self.data_catalog.get_rasterdataset(
+        #     "recession_coefficient_globgm",
+        #     bbox=self.bounds,
+        #     buffer=0,
+        # ).rename({"lon": "x", "lat": "y"})
+        # recession_coefficient = self.snap_to_grid(recession_coefficient, self.grid)
+        # assert recession_coefficient.shape == self.grid.raster.shape
 
-        self.set_grid(recession_coefficient, name="groundwater/recession_coefficient")
+        # self.set_grid(recession_coefficient, name="groundwater/recession_coefficient")
 
     def setup_forcing(
         self,
@@ -1857,6 +1887,10 @@ class GEBModel(GridModel):
                 ]
                 self.setup_1800arcsec_variables_isimip(
                     forcing, variables, starttime, endtime, ssp=ssp
+                )
+            else:
+                raise ValueError(
+                    "Only 30 arcsec and 1800 arcsec resolution is supported for ISIMIP data"
                 )
         elif data_source == "era5":
             # # Create a thread pool and map the set_forcing function to the variables
@@ -2963,7 +2997,7 @@ class GEBModel(GridModel):
                 window=1,
                 dist="gamma",
                 method="ML",
-            )
+            ).chunk(chunks)
 
             # remove all nan values as a result of the sliding window
             SPEI.attrs = {
@@ -5106,6 +5140,38 @@ class GEBModel(GridModel):
         )
         return None
 
+    def setup_discharge_observations(self, files):
+        discharge_data = []
+        for i, file in enumerate(files):
+            filename = file["filename"]
+            longitude, latitude = file["longitude"], file["latitude"]
+            data = pd.read_csv(filename, index_col=0, parse_dates=True)
+
+            # assert data has one column
+            assert data.shape[1] == 1
+
+            discharge_data.append(
+                xr.DataArray(
+                    np.expand_dims(data.iloc[:, 0].values, 0),
+                    dims=["pixel", "time"],
+                    coords={
+                        "time": data.index.values,
+                        "pixel": [i],
+                        "longitude": ("pixel", [longitude]),
+                        "latitude": ("pixel", [latitude]),
+                    },
+                )
+            )
+        discharge_data = xr.concat(discharge_data, dim="pixel")
+        discharge_data.name = "discharge"
+        self.set_forcing(
+            discharge_data,
+            name="observations/discharge",
+            split_dataset=False,
+            is_spatial_dataset=False,
+            time_chunksize=1e99,  # no chunking
+        )
+
     def write_grid(self):
         self._assert_write_mode
         for var, grid in self.grid.items():
@@ -5172,9 +5238,6 @@ class GEBModel(GridModel):
         with tempfile.TemporaryDirectory() as tmp_dir:
             if "time" in forcing.dims:
                 with ProgressBar(dt=10):  # print progress bar every 10 seconds
-                    assert (
-                        forcing.dims[0] == "time"
-                    ), "time dimension must be first, otherwise xarray will not chunk correctly"
                     if is_spatial_dataset:
                         assert (
                             forcing.dims[1] == "y" and forcing.dims[2] == "x"
@@ -5185,6 +5248,9 @@ class GEBModel(GridModel):
                             "x": min(forcing.x.size, x_chunksize),
                         }
                         forcing = forcing.chunk(chunksizes)
+                    else:
+                        chunksizes = {"time": min(forcing.time.size, time_chunksize)}
+                        forcing = forcing.chunk(chunksizes)
 
                     forcing.to_zarr(
                         tmp_dir,
@@ -5192,7 +5258,12 @@ class GEBModel(GridModel):
                         encoding={
                             forcing.name: {
                                 "compressor": compressor,
-                                "chunks": (chunksizes[dim] for dim in forcing.dims),
+                                "chunks": (
+                                    chunksizes[dim]
+                                    if dim in chunksizes
+                                    else getattr(forcing, dim).size
+                                    for dim in forcing.dims
+                                ),
                             }
                         },
                     )
