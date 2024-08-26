@@ -5141,6 +5141,8 @@ class GEBModel(GridModel):
         return None
 
     def setup_discharge_observations(self, files):
+        transform = self.grid.raster.transform
+
         discharge_data = []
         for i, file in enumerate(files):
             filename = file["filename"]
@@ -5150,6 +5152,10 @@ class GEBModel(GridModel):
             # assert data has one column
             assert data.shape[1] == 1
 
+            px, py = ~transform * (longitude, latitude)
+            px = math.floor(px)
+            py = math.floor(py)
+
             discharge_data.append(
                 xr.DataArray(
                     np.expand_dims(data.iloc[:, 0].values, 0),
@@ -5157,8 +5163,8 @@ class GEBModel(GridModel):
                     coords={
                         "time": data.index.values,
                         "pixel": [i],
-                        "longitude": ("pixel", [longitude]),
-                        "latitude": ("pixel", [latitude]),
+                        "px": ("pixel", [px]),
+                        "py": ("pixel", [py]),
                     },
                 )
             )
