@@ -5232,10 +5232,14 @@ class GEBModel(GridModel):
         is_spatial_dataset=True,
     ) -> None:
         self.logger.info(f"Write {var}")
+
         destination = var + ".zarr"
-        shutil.rmtree(destination, ignore_errors=True)
         self.files["forcing"][var] = destination
         self.is_updated["forcing"][var]["filename"] = destination
+
+        dst_dir = Path(self.root, destination)
+        shutil.rmtree(dst_dir, ignore_errors=True)
+        dst_dir.parent.mkdir(parents=True, exist_ok=True)
 
         if is_spatial_dataset:
             forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
@@ -5275,11 +5279,8 @@ class GEBModel(GridModel):
                     )
 
                     # move file to final location
-                    fp = Path(self.root, destination)
-                    fp.parent.mkdir(parents=True, exist_ok=True)
-
-                    shutil.move(tmp_dir, fp)
-                return xr.open_dataset(fp, chunks={})[forcing.name]
+                    shutil.move(tmp_dir, dst_dir)
+                return xr.open_dataset(dst_dir, chunks={})[forcing.name]
             else:
                 if isinstance(forcing, xr.DataArray):
                     name = forcing.name
@@ -5300,12 +5301,9 @@ class GEBModel(GridModel):
                 )
 
                 # move file to final location
-                fp = Path(self.root, destination)
-                fp.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(tmp_dir, dst_dir)
 
-                shutil.move(tmp_dir, fp)
-
-                ds = xr.open_dataset(fp, lock=False, chunks={})
+                ds = xr.open_dataset(dst_dir, chunks={})
                 if isinstance(forcing, xr.DataArray):
                     return ds[name]
                 else:
