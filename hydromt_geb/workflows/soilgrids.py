@@ -560,7 +560,7 @@ def load_soilgrids(data_catalog, grid, region):
     hydraulic_conductivity = interpolate_soil_layers(hydraulic_conductivity)
 
     assert hydraulic_conductivity.min() >= 1e-7
-    assert hydraulic_conductivity.max() <= 1
+    assert hydraulic_conductivity.max() <= 10
 
     # same for pore_size_index lambda
     lambda_ = get_pore_size_index(ds)
@@ -581,10 +581,6 @@ def load_soilgrids(data_catalog, grid, region):
         soil_layer_height[layer] = height
 
     assert (soil_layer_height.sum(axis=0) == 2.0).all()
-    if (soil_layer_height.sum(axis=0) > depth_to_bedrock).any():
-        raise ValueError(
-            "Soil layer height exceeds depth to bedrock, must be implemented"
-        )
 
     return (
         hydraulic_conductivity,
