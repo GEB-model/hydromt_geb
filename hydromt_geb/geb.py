@@ -415,6 +415,7 @@ class GEBModel(GridModel):
     def setup_crops_from_source(
         self,
         source: Union[str, None] = "MIRCA2000",
+        crop_specifier: Union[str, None] = None,
     ):
         """
         Sets up the crops data for the model.
@@ -424,15 +425,26 @@ class GEBModel(GridModel):
         assert source in (
             "MIRCA2000",
         ), f"crop_variables_source {source} not understood, must be 'MIRCA2000'"
-
-        crop_data = {
-            "data": (
-                self.data_catalog.get_dataframe("MIRCA2000_crop_data")
-                .set_index("id")
-                .to_dict(orient="index")
-            ),
-            "type": "MIRCA2000",
-        }
+        if crop_specifier is None:
+            crop_data = {
+                "data": (
+                    self.data_catalog.get_dataframe("MIRCA2000_crop_data")
+                    .set_index("id")
+                    .to_dict(orient="index")
+                ),
+                "type": "MIRCA2000",
+            }
+        else:
+            crop_data = {
+                "data": (
+                    self.data_catalog.get_dataframe(
+                        f"MIRCA2000_crop_data_{crop_specifier}"
+                    )
+                    .set_index("id")
+                    .to_dict(orient="index")
+                ),
+                "type": "MIRCA2000",
+            }
         self.set_dict(crop_data, name="crops/crop_data")
 
     def process_crop_data(
@@ -556,6 +568,10 @@ class GEBModel(GridModel):
                 # Ensuring all crops are present according to the crop_data keys
                 for crop_id, crop_info in crop_data.items():
                     crop_name = crop_info["name"]
+
+                    if crop_name.endswith("_flood") or crop_name.endswith("_drought"):
+                        crop_name = crop_name.rsplit("_", 1)[0]
+
                     if crop_name in region_data.columns:
                         region_dict[str(crop_id)] = region_data[crop_name].to_list()
                     else:
@@ -997,26 +1013,26 @@ class GEBModel(GridModel):
 
         return costs
 
-    def setup_cultivation_costs(
-        self,
-        cultivation_costs: Optional[Union[str, int, float]] = 0,
-        project_future_until_year: Optional[int] = False,
-    ):
-        """
-        Sets up the cultivation costs for the model in monetary unit per m2.
+    # def setup_cultivation_costs(
+    #     self,
+    #     cultivation_costs: Optional[Union[str, int, float]] = 0,
+    #     project_future_until_year: Optional[int] = False,
+    # ):
+    #     """
+    #     Sets up the cultivation costs for the model.
 
-        Parameters
-        ----------
-        cultivation_costs : str or int or float, optional
-            The file path or integer of cultivation costs. If a file path is provided, the file is loaded and parsed as JSON.
-            The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
-            IDs and their cultivation costs. If .
-        """
-        self.logger.info("Preparing cultivation costs")
-        cultivation_costs = self.process_crop_data(
-            cultivation_costs, project_future_until_year=project_future_until_year
-        )
-        self.set_dict(cultivation_costs, name="crops/cultivation_costs")
+    #     Parameters
+    #     ----------
+    #     cultivation_costs : str or int or float, optional
+    #         The file path or integer of cultivation costs. If a file path is provided, the file is loaded and parsed as JSON.
+    #         The dictionary should have a 'time' key with a list of time steps, and a 'crops' key with a dictionary of crop
+    #         IDs and their cultivation costs. If .
+    #     """
+    #     self.logger.info(f"Preparing cultivation costs")
+    #     cultivation_costs = self.process_crop_data(
+    #         cultivation_costs, project_future_until_year=project_future_until_year
+    #     )
+    #     self.set_dict(cultivation_costs, name="crops/cultivation_costs")
 
     def setup_crop_prices(
         self,
@@ -1837,16 +1853,51 @@ class GEBModel(GridModel):
             specific_yield = specific_yield.expand_dims(layer=["upper"])
         self.set_grid(specific_yield, name="groundwater/specific_yield")
 
-        # # load recession coefficient
-        # recession_coefficient = self.data_catalog.get_rasterdataset(
-        #     "recession_coefficient_globgm",
-        #     bbox=self.bounds,
-        #     buffer=0,
-        # ).rename({"lon": "x", "lat": "y"})
-        # recession_coefficient = self.snap_to_grid(recession_coefficient, self.grid)
-        # assert recession_coefficient.shape == self.grid.raster.shape
+        # Load in the starting groundwater depth
+        region_continent = np.unique(self.geoms["areamaps/regions"]["CONTINENT"])
+        assert (
+            np.size(region_continent) == 1
+        )  # Transcontinental basins should not be possible
 
-        # self.set_grid(recession_coefficient, name="groundwater/recession_coefficient")
+        if (
+            np.unique(self.geoms["areamaps/regions"]["CONTINENT"])[0] == "Asia"
+            or np.unique(self.geoms["areamaps/regions"]["CONTINENT"])[0] == "Europe"
+        ):
+            region_continent = "Eurasia"
+        else:
+            region_continent = region_continent[0]
+
+        initial_depth = self.data_catalog.get_rasterdataset(
+            f"initial_groundwater_depth_{region_continent}", bbox=self.bounds, buffer=0
+        ).rename({"lon": "x", "lat": "y"})
+
+        initial_depth_static = initial_depth.isel(time=0)
+        initial_depth_static_reprojected = initial_depth_static.raster.reproject_like(
+            self.grid, method="average"
+        )
+
+        initial_depth_modflow = self.snap_to_grid(
+            initial_depth_static_reprojected, self.grid
+        )
+
+        initial_depth_modflow = initial_depth_modflow["WTD"] * -1
+        self.set_grid(
+            initial_depth_modflow, name="groundwater/initial_water_table_depth"
+        )
+        assert initial_depth_modflow.shape == self.grid.raster.shape
+
+        # load aquifer classification from why_map and write it as a grid
+        why_map = self.data_catalog.get_rasterdataset(
+            "why_map",
+            bbox=self.bounds,
+            buffer=5,
+        )
+
+        why_map.x.attrs = {"long_name": "longitude", "units": "degrees_east"}
+        why_map.y.attrs = {"long_name": "latitude", "units": "degrees_north"}
+        why_interpolated = self.interpolate(why_map, "nearest").compute()
+
+        self.set_grid(why_interpolated, name="groundwater/why_map")
 
     def setup_forcing(
         self,
@@ -2381,12 +2432,9 @@ class GEBModel(GridModel):
                     )
                 )
             if (
-                (
-                    endtime.year < first_year_future_climate
-                    or starttime.year < first_year_future_climate
-                )
-                and ssp != "picontrol"
-            ):  # isimip cutoff date between historic and future climate
+                endtime.year < first_year_future_climate
+                or starttime.year < first_year_future_climate
+            ) and ssp != "picontrol":  # isimip cutoff date between historic and future climate
                 ds = self.download_isimip(
                     product="InputData",
                     simulation_round="ISIMIP3b",
@@ -2983,7 +3031,9 @@ class GEBModel(GridModel):
             "climate/pr"
         ].time.min().dt.date <= calibration_period_start and self.forcing[
             "climate/pr"
-        ].time.max().dt.date >= calibration_period_end - timedelta(days=1):
+        ].time.max().dt.date >= calibration_period_end - timedelta(
+            days=1
+        ):
             forcing_start_date = self.forcing["climate/pr"].time.min().dt.date.item()
             forcing_end_date = self.forcing["climate/pr"].time.max().dt.date.item()
             raise AssertionError(
@@ -3605,9 +3655,9 @@ class GEBModel(GridModel):
         electricity_rates = self.data_catalog.get_dataframe("gcam_electricity_rates")
         # Create a dictionary to store the various types of prices with their initial reference year values
         price_types = {
-            "WHY_10": WHY_10,
-            "WHY_20": WHY_20,
-            "WHY_30": WHY_30,
+            "why_10": WHY_10,
+            "why_20": WHY_20,
+            "why_30": WHY_30,
             "electricity_cost": electricity_rates,
         }
 
@@ -3735,9 +3785,9 @@ class GEBModel(GridModel):
                     ]
                 )
 
-            drip_irrigation_prices_dict["data"][region] = (
-                drip_irrigation_prices.tolist()
-            )
+            drip_irrigation_prices_dict["data"][
+                region
+            ] = drip_irrigation_prices.tolist()
 
         self.set_dict(
             drip_irrigation_prices_dict, name="economics/drip_irrigation_prices"
@@ -4328,6 +4378,7 @@ class GEBModel(GridModel):
         interest_rate=0.05,
         discount_rate=0.1,
         reduce_crops=False,
+        replace_base=False,
     ):
         n_farmers = self.binary["agents/farmers/id"].size
 
@@ -4414,6 +4465,16 @@ class GEBModel(GridModel):
             OTHERS_PERENNIAL = 23
             FODDER_GRASSES = 24
             OTHERS_ANNUAL = 25
+            WHEAT_DROUGHT = 26
+            WHEAT_FLOOD = 27
+            MAIZE_DROUGHT = 28
+            MAIZE_FLOOD = 29
+            RICE_DROUGHT = 30
+            RICE_FLOOD = 31
+            SOYBEANS_DROUGHT = 32
+            SOYBEANS_FLOOD = 33
+            POTATOES_DROUGHT = 34
+            POTATOES_FLOOD = 35
 
             # Manual replacement of certain crops
             def replace_crop(
@@ -4457,7 +4518,41 @@ class GEBModel(GridModel):
 
                 return crop_calendar_per_farmer
 
+            def insert_other_variant_crop(
+                crop_calendar_per_farmer, base_crops, resistant_crops
+            ):
+                # find crop rotation mask
+                base_crop_rotation_mask = (
+                    crop_calendar_per_farmer[:, :, 0] == base_crops
+                ).any(axis=1)
+
+                # Find the indices of the crops to be replaced
+                indices = np.where(base_crop_rotation_mask)[0]
+
+                # Shuffle the indices to randomize the selection
+                np.random.shuffle(indices)
+
+                # Determine the number of crops for each category (stay same, first resistant, last resistant)
+                n = len(indices)
+                n_same = n // 3
+                n_first_resistant = (n // 3) + (
+                    n % 3 > 0
+                )  # Ensuring we account for rounding issues
+                n_last_resistant = (n // 3) + (n % 3 > 1)
+
+                # Assign the new values
+                crop_calendar_per_farmer[indices[:n_same], 0, 0] = base_crops
+                crop_calendar_per_farmer[
+                    indices[n_same : n_same + n_first_resistant], 0, 0
+                ] = resistant_crops[0]
+                crop_calendar_per_farmer[
+                    indices[n_same + n_first_resistant :], 0, 0
+                ] = resistant_crops[1]
+
+                return crop_calendar_per_farmer
+
             # Reduces certain crops of the same GCAM category to the one that is most common in that region
+            # First line checks which crop is most common, second denotes which crops will be replaced by the most common one
             if reduce_crops:
                 # Conversion based on the classification in table S1 by Yoon, J., Voisin, N., Klassert, C., Thurber, T., & Xu, W. (2024).
                 # Representing farmer irrigated crop area adaptation in a large-scale hydrological model. Hydrology and Earth
@@ -4510,6 +4605,42 @@ class GEBModel(GridModel):
                 replaced_value = [OIL_PALM, GRAPES, DATE_PALM, OTHERS_PERENNIAL]
                 crop_calendar_per_farmer = replace_crop(
                     crop_calendar_per_farmer, most_common_check, replaced_value
+                )
+
+            if replace_base:
+                base_crops = [WHEAT]
+                resistant_crops = [WHEAT_DROUGHT, WHEAT_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [MAIZE]
+                resistant_crops = [MAIZE_DROUGHT, MAIZE_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [RICE]
+                resistant_crops = [RICE_DROUGHT, RICE_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [SOYBEANS]
+                resistant_crops = [SOYBEANS_DROUGHT, SOYBEANS_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
+                )
+
+                base_crops = [POTATOES]
+                resistant_crops = [POTATOES_DROUGHT, POTATOES_FLOOD]
+
+                crop_calendar_per_farmer = insert_other_variant_crop(
+                    crop_calendar_per_farmer, base_crops, resistant_crops
                 )
 
         self.set_binary(crop_calendar_per_farmer, name="agents/farmers/crop_calendar")
@@ -4754,9 +4885,7 @@ class GEBModel(GridModel):
 
         if variable == "orog":
             assert len(files) == 1
-            filename = files[
-                0
-            ][
+            filename = files[0][
                 "name"
             ]  # global should be included due to error in ISIMIP API .replace('_global', '')
             parse_files = [filename]
@@ -5313,9 +5442,11 @@ class GEBModel(GridModel):
                             forcing.name: {
                                 "compressor": compressor,
                                 "chunks": (
-                                    chunksizes[dim]
-                                    if dim in chunksizes
-                                    else getattr(forcing, dim).size
+                                    (
+                                        chunksizes[dim]
+                                        if dim in chunksizes
+                                        else getattr(forcing, dim).size
+                                    )
                                     for dim in forcing.dims
                                 ),
                             }
