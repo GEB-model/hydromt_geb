@@ -1,4 +1,6 @@
-# file based on github/gitignore
+# Custom
+.ruff_cache
+.benchmarks
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

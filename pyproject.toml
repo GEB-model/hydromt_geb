@@ -17,16 +17,17 @@ dependencies = [
     "openpyxl>=3.1.2",
     "isimip-client>=1.0.1",
     "xclim>=0.44.0",
-    "pyogrio>=0.7",
-    "osm-flex>=1.1.1",
+    "pyogrio>=0.9.0",
     "cdsapi>=0.7.0",
-    "rioxarray==0.15.1",
+    "rioxarray",
+    "geopandas>=1.0.0",
+    "honeybees",
 ]
 requires-python = ">=3.11"
 readme = "README.md"
 classifiers = [
     # https://pypi.python.org/pypi?%3Aaction=list_classifiers
-    "Development Status :: 1 - Beta",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Hydrology",
@@ -36,8 +37,9 @@ classifiers = [
 dynamic = ['version', 'description']
 
 [project.optional-dependencies]
-tests = [
-    "pytest"
+dev = [
+    "pytest",
+    "ruff",
 ]
 doc = [
 ]

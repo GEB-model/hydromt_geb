@@ -16,7 +16,7 @@ from pgmpy.estimators import BayesianEstimator
 from pgmpy.sampling import BayesianModelSampling
 from pgmpy.factors.discrete import State
 
-from pgmpy.estimators import PC, HillClimbSearch, ExhaustiveSearch
+from pgmpy.estimators import HillClimbSearch
 
 from scipy.stats import chi2_contingency
 
@@ -472,10 +472,10 @@ class fairSTREAMModel(GEBModel):
 
         # GLOPOP-S uses the GDL regions. So we need to get the GDL region for each farmer using their location
         GDL_regions = self.data_catalog.get_geodataframe(
-            "GDL_regions_v4", geom=self.geoms["areamaps/region"], variables=["GDLcode"]
+            "GDL_regions_v4", geom=self.region, variables=["GDLcode"]
         )
         GDL_region_per_farmer = gpd.sjoin(
-            locations, GDL_regions, how="left", op="within"
+            locations, GDL_regions, how="left", predicate="within"
         )
 
         # ensure that each farmer has a region
@@ -767,7 +767,7 @@ class fairSTREAMModel(GEBModel):
 
         n_farmers = self.binary["agents/farmers/id"].size
 
-        household_head_age = self.binary["agents/farmers/age_household_head"]
+        # household_head_age = self.binary["agents/farmers/age_household_head"]
         farms = self.subgrid["agents/farmers/farms"]
         farm_ids, farm_size_n_cells = np.unique(farms, return_counts=True)
         farm_size_n_cells = farm_size_n_cells[farm_ids != -1]

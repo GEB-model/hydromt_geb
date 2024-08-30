@@ -28,7 +28,7 @@ def create_farms_numba(cultivated_land, ids, farm_sizes):
 
     farm_id = ids[current_farm_counter]
     farm_size = farm_sizes[current_farm_counter]
-    farms = np.where(cultivated_land == True, -1, -2).astype(np.int32)
+    farms = np.where(cultivated_land, -1, -2).astype(np.int32)
     ysize, xsize = farms.shape
     for y in range(farms.shape[0]):
         for x in range(farms.shape[1]):
