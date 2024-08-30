@@ -566,6 +566,40 @@ class GEBModel(GridModel):
 
             data = formatted_data.copy()
 
+        # data is a file path
+        elif isinstance(crop_prices, str):
+            crop_prices = Path(crop_prices)
+            if not crop_prices.exists():
+                raise ValueError(f"file {crop_prices.resolve()} does not exist")
+            with open(crop_prices) as f:
+                data = json.load(f)
+            data = pd.DataFrame(
+                {
+                    crop_id: data["crops"][crop_data["name"]]
+                    for crop_id, crop_data in self.dict["crops/crop_data"][
+                        "data"
+                    ].items()
+                },
+                index=pd.to_datetime(data["time"]),
+            )
+            data = data.reindex(
+                columns=pd.MultiIndex.from_product(
+                    [
+                        self.geoms["areamaps/regions"]["region_id"],
+                        data.columns,
+                    ]
+                ),
+                level=1,
+            )
+            data = {
+                "type": "time_series",
+                "time": data.index.tolist(),
+                "data": {
+                    str(region_id): data[region_id].to_dict(orient="list")
+                    for region_id in self.geoms["areamaps/regions"]["region_id"]
+                },
+            }
+
         elif isinstance(crop_prices, (int, float)):
             data = {
                 "type": "constant",
@@ -969,7 +1003,7 @@ class GEBModel(GridModel):
         project_future_until_year: Optional[int] = False,
     ):
         """
-        Sets up the cultivation costs for the model.
+        Sets up the cultivation costs for the model in monetary unit per m2.
 
         Parameters
         ----------
@@ -1894,9 +1928,6 @@ class GEBModel(GridModel):
                 )
         elif data_source == "era5":
             # # Create a thread pool and map the set_forcing function to the variables
-            # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = [executor.submit(self.download_ERA, variable, starttime, endtime) for variable in variables]
-
             # # Wait for all threads to complete
             # concurrent.futures.wait(futures)
             DEM = self.grid["landsurface/topo/elevation"]
@@ -2085,8 +2116,9 @@ class GEBModel(GridModel):
         download_path = Path(self.root).parent / "preprocessing" / "climate" / "ERA5"
         download_path.mkdir(parents=True, exist_ok=True)
 
-        def download(year):
-            output_fn = download_path / f"{variable}_{year}.nc"
+        def download(start_and_end_year):
+            start_year, end_year = start_and_end_year
+            output_fn = download_path / f"{variable}_{start_year}_{end_year}.nc"
             if output_fn.exists():
                 self.logger.info(f"ERA5 data already downloaded to {output_fn}")
             else:
@@ -2112,7 +2144,7 @@ class GEBModel(GridModel):
                                 "variable": [
                                     variable,
                                 ],
-                                "date": f"{year}-01-01/{year}-12-31",
+                                "date": f"{start_year}-01-01/{end_year}-12-31",
                                 "time": [
                                     "00:00",
                                     "01:00",
@@ -2160,7 +2192,18 @@ class GEBModel(GridModel):
             return output_fn
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            years = range(starttime.year, endtime.year + 1)
+            multiple_years = 5
+
+            range_start = starttime.year - starttime.year % 5
+            range_end = endtime.year - endtime.year % 5 + 5
+            years = []
+            for year in range(range_start, range_end, multiple_years):
+                years.append(
+                    (
+                        max(year, starttime.year),
+                        min(year + multiple_years - 1, endtime.year),
+                    )
+                )
             files = list(executor.map(download, years))
 
         if download_only:
@@ -2168,11 +2211,11 @@ class GEBModel(GridModel):
 
         ds = xr.open_mfdataset(
             files,
-            chunks={
-                "valid_time": 1,
-                "latitude": XY_CHUNKSIZE,
-                "longitude": XY_CHUNKSIZE,
-            },
+            # chunks={
+            #     "valid_time": 1,
+            #     "latitude": XY_CHUNKSIZE,
+            #     "longitude": XY_CHUNKSIZE,
+            # },
             compat="equals",  # all values and dimensions must be the same,
             combine_attrs="drop_conflicts",  # drop conflicting attributes
         ).rio.set_crs(4326)
@@ -2522,7 +2565,7 @@ class GEBModel(GridModel):
         hurs_ds_30sec, hurs_time = [], []
         for year in tqdm(range(start_year, end_year + 1)):
             for month in range(1, 13):
-                fn = chelsa_folder / f"hurs_{year}_{month:02d}.zarr"
+                fn = chelsa_folder / f"hurs_{year}_{month:02d}.zarr.zip"
                 if not fn.exists():
                     hurs = self.data_catalog.get_rasterdataset(
                         f"CHELSA-BIOCLIM+_monthly_hurs_{month:02d}_{year}",
@@ -2533,7 +2576,7 @@ class GEBModel(GridModel):
                     hurs.name = "hurs"
                     hurs.to_zarr(fn)
                 else:
-                    hurs = xr.open_dataset(fn, chunks={})["hurs"]
+                    hurs = xr.open_dataset(fn, chunks={}, engine="zarr")["hurs"]
                 # assert hasattr(hurs, "spatial_ref")
                 hurs_ds_30sec.append(hurs)
                 hurs_time.append(f"{year}-{month:02d}")
@@ -2975,18 +3018,18 @@ class GEBModel(GridModel):
 
         water_budget.name = "water_budget"
         chunks = {dim: block_edge_size for dim in water_budget.dims}
-        water_budget = water_budget.chunk(chunks)
-
-        with tempfile.TemporaryDirectory(suffix=".zarr") as tmp_water_budget_dir:
+        with tempfile.NamedTemporaryFile(suffix=".zarr.zip") as tmp_water_budget_file:
             print("Exporting temporary water budget to zarr")
             with ProgressBar(dt=10):
                 water_budget.to_zarr(
-                    tmp_water_budget_dir,
+                    tmp_water_budget_file.name,
                     mode="w",
                     encoding={"water_budget": {"chunks": chunks.values()}},
                 )
 
-            water_budget = xr.open_zarr(tmp_water_budget_dir, chunks={})["water_budget"]
+            water_budget = xr.open_zarr(tmp_water_budget_file.name, chunks={})[
+                "water_budget"
+            ]
 
             # Compute the SPEI
             SPEI = xci.standardized_precipitation_evapotranspiration_index(
@@ -2997,7 +3040,7 @@ class GEBModel(GridModel):
                 window=1,
                 dist="gamma",
                 method="ML",
-            ).chunk(chunks)
+            )
 
             # remove all nan values as a result of the sliding window
             SPEI.attrs = {
@@ -3007,16 +3050,16 @@ class GEBModel(GridModel):
             }
             SPEI.name = "spei"
 
-            with tempfile.TemporaryDirectory(suffix=".zarr") as tmp_spei_dir:
+            with tempfile.NamedTemporaryFile(suffix=".zarr.zip") as tmp_spei_file:
                 print("Exporting temporary SPEI to zarr")
                 with ProgressBar(dt=10):
                     SPEI.to_zarr(
-                        tmp_spei_dir,
+                        tmp_spei_file.name,
                         mode="w",
                         encoding={"spei": {"chunks": chunks.values()}},
                     )
 
-                SPEI = xr.open_zarr(tmp_spei_dir, chunks={})["spei"]
+                SPEI = xr.open_zarr(tmp_spei_file.name, chunks={})["spei"]
 
                 self.set_forcing(SPEI, name="climate/spei")
 
@@ -5233,19 +5276,20 @@ class GEBModel(GridModel):
     ) -> None:
         self.logger.info(f"Write {var}")
 
-        destination = var + ".zarr"
+        destination = var + ".zarr.zip"
         self.files["forcing"][var] = destination
         self.is_updated["forcing"][var]["filename"] = destination
 
-        dst_dir = Path(self.root, destination)
-        shutil.rmtree(dst_dir, ignore_errors=True)
-        dst_dir.parent.mkdir(parents=True, exist_ok=True)
+        dst_file = Path(self.root, destination)
+        if dst_file.exists():
+            dst_file.unlink()
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
 
         if is_spatial_dataset:
             forcing = forcing.rio.write_crs(self.crs).rio.write_coordinate_system()
 
         # write netcdf to temporary file
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with tempfile.NamedTemporaryFile(suffix=".zarr.zip") as tmp_file:
             if "time" in forcing.dims:
                 with ProgressBar(dt=10):  # print progress bar every 10 seconds
                     if is_spatial_dataset:
@@ -5257,13 +5301,13 @@ class GEBModel(GridModel):
                             "y": min(forcing.y.size, y_chunksize),
                             "x": min(forcing.x.size, x_chunksize),
                         }
-                        forcing = forcing.chunk(chunksizes)
+                        # forcing = forcing.chunk(chunksizes)
                     else:
                         chunksizes = {"time": min(forcing.time.size, time_chunksize)}
-                        forcing = forcing.chunk(chunksizes)
+                        # forcing = forcing.chunk(chunksizes)
 
                     forcing.to_zarr(
-                        tmp_dir,
+                        tmp_file.name,
                         mode="w",
                         encoding={
                             forcing.name: {
@@ -5279,8 +5323,8 @@ class GEBModel(GridModel):
                     )
 
                     # move file to final location
-                    shutil.move(tmp_dir, dst_dir)
-                return xr.open_dataset(dst_dir, chunks={})[forcing.name]
+                    shutil.move(tmp_file.name, dst_file)
+                return xr.open_dataset(dst_file, chunks={}, engine="zarr")[forcing.name]
             else:
                 if isinstance(forcing, xr.DataArray):
                     name = forcing.name
@@ -5295,15 +5339,15 @@ class GEBModel(GridModel):
                 else:
                     raise ValueError("forcing must be a DataArray or Dataset")
                 forcing.to_zarr(
-                    tmp_dir,
+                    tmp_file.name,
                     mode="w",
                     encoding=encoding,
                 )
 
                 # move file to final location
-                shutil.move(tmp_dir, dst_dir)
+                shutil.move(tmp_file.name, dst_file)
 
-                ds = xr.open_dataset(dst_dir, chunks={})
+                ds = xr.open_dataset(dst_file, chunks={}, engine="zarr")
                 if isinstance(forcing, xr.DataArray):
                     return ds[name]
                 else:
@@ -5499,7 +5543,7 @@ class GEBModel(GridModel):
     def read_forcing(self) -> None:
         self.read_files()
         for name, fn in self.files["forcing"].items():
-            with xr.open_dataset(Path(self.root) / fn, chunks={}) as ds:
+            with xr.open_dataset(Path(self.root) / fn, chunks={}, engine="zarr") as ds:
                 data_vars = set(ds.data_vars)
                 data_vars.discard("spatial_ref")
                 if len(data_vars) == 1:
