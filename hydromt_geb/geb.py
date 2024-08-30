@@ -1649,16 +1649,16 @@ class GEBModel(GridModel):
 
         self.set_grid(specific_yield, name="groundwater/specific_yield")
 
-        # load initial water table depth
-        water_table_depth = self.data_catalog.get_rasterdataset(
-            "water_table_depth_globgm",
-            bbox=self.bounds,
-            buffer=0,
-        )
-        water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
-        assert water_table_depth.shape == self.grid.raster.shape
+        # # load initial water table depth
+        # water_table_depth = self.data_catalog.get_rasterdataset(
+        #     "water_table_depth_globgm",
+        #     bbox=self.bounds,
+        #     buffer=0,
+        # )
+        # water_table_depth = self.snap_to_grid(water_table_depth, self.grid)
+        # assert water_table_depth.shape == self.grid.raster.shape
 
-        self.set_grid(water_table_depth, name="groundwater/initial_water_table_depth")
+        # self.set_grid(water_table_depth, name="groundwater/initial_water_table_depth")
 
         # load recession coefficient
         recession_coefficient = self.data_catalog.get_rasterdataset(
@@ -1708,27 +1708,24 @@ class GEBModel(GridModel):
             region_continent = region_continent[0]
 
         initial_depth = self.data_catalog.get_rasterdataset(
-            f"initial_groundwater_depth_{region_continent}", bbox=self.bounds, buffer=5
+            f"initial_groundwater_depth_{region_continent}", bbox=self.bounds, buffer=0
+        ).rename({"lon": "x", "lat": "y"})
+
+        initial_depth_static = initial_depth.isel(time=0)
+        initial_depth_static_reprojected = initial_depth_static.raster.reproject_like(
+            self.grid, method="average"
         )
-        initial_depth_modflow = initial_depth.raster.reproject_like(
-            modflow_mask, method="average"
+
+        initial_depth_modflow = self.snap_to_grid(
+            initial_depth_static_reprojected, self.grid
         )
-        initial_depth_modflow = initial_depth_modflow.isel(time=0)
+
         initial_depth_modflow = initial_depth_modflow["WTD"] * -1
-        self.set_MODFLOW_grid(
-            initial_depth_modflow, name="groundwater/modflow/initial_groundwater_depth"
+        self.set_grid(
+            initial_depth_modflow, name="groundwater/initial_water_table_depth"
         )
-        import matplotlib
+        assert initial_depth_modflow.shape == self.grid.raster.shape
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        initial_depth_modflow.plot()
-        output_dir = os.path.join("plot", "testing")
-        os.makedirs(output_dir, exist_ok=True)
-        file_name = "water_depth.png"
-        plt.savefig(os.path.join(output_dir, file_name), dpi=300)
-        plt.close()
         # load aquifer classification from why_map and write it as a grid
         why_map = self.data_catalog.get_rasterdataset(
             "why_map",
