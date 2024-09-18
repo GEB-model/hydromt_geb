@@ -1,3 +1,5 @@
+NOTE: This repository is now integrated with the main GEB model
+
 # HydroMT-GEB: GEB plugin for HydroMT
 
 ## What is the HydroMT-GEB plugin?
